@@ -17,7 +17,9 @@ ferry-core = { path = "crates/ferry-core" }
 
 # UI. gpui-component 0.10.0 requires exactly gpui-pre 0.3.12.
 gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["wayland", "x11", "font-kit"] }
 gpui-component = { version = "=0.10.0" }
+gpui-component-assets = { package = "gpui-kit-assets", version = "=0.10.0" }
 
 # Async runtime and protocol stack.
 tokio = { version = "=1.54.1" }
@@ -42,6 +44,8 @@ unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
+# GPUI's idiomatic `Context<Self>` relies on elided lifetimes.
+elided_lifetimes_in_paths = "allow"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

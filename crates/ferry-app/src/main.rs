@@ -1,59 +1,91 @@
 //! Ferry desktop application.
 
+mod actions;
+mod bench;
+mod browser;
+mod destination;
+mod format;
+mod interaction;
+mod runtime;
+mod workspace;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Instant;
+
+use clap::Parser;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Decorations, IntoElement, ParentElement as _, Render,
-    Styled as _, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, div,
-    prelude::FluentBuilder as _, px, size,
+    App, AppContext as _, Bounds, Entity, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowHandle, WindowOptions, px, size,
 };
-use gpui_component::{ActiveTheme as _, Root, TitleBar, v_flex};
+use gpui_component::Root;
 use tracing_subscriber::EnvFilter;
+
+use crate::workspace::Workspace;
 
 /// Wayland `app_id`, also used by desktop files and compositor window rules.
 const APP_ID: &str = "dev.ferry.Ferry";
 const APP_NAME: &str = "Ferry";
 
-struct MainWindow;
+/// A fast file transfer client.
+#[derive(Debug, Parser)]
+#[command(name = "ferry", version, about)]
+struct Cli {
+    /// Where to connect: `sftp://user@host:port/path`, `user@host[:port]`, an
+    /// `ssh_config` alias, or an absolute local path.
+    destination: Option<String>,
 
-impl Render for MainWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Server-side decorations are requested; only when the compositor refuses them
-        // (no xdg-decoration, e.g. GNOME) do we draw a minimal title bar ourselves.
-        let client_decorated = matches!(window.window_decorations(), Decorations::Client { .. });
-        v_flex()
-            .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .when(client_decorated, |this| {
-                this.child(TitleBar::new().child(APP_NAME))
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(APP_NAME),
-            )
-    }
+    /// Use this SSH client configuration instead of `~/.ssh/config`.
+    #[arg(short = 'F', long, value_name = "FILE")]
+    ssh_config: Option<PathBuf>,
+
+    /// Run a benchmark scenario and exit (used by ferry-bench).
+    #[arg(long, hide = true, value_enum)]
+    bench: Option<bench::Scenario>,
 }
 
-fn main() {
+fn main() -> ExitCode {
+    let started = Instant::now();
+    let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_writer(std::io::stderr)
         .init();
 
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
-        .run(|cx: &mut App| {
-            gpui_component::init(cx);
-            if let Err(error) = open_main_window(cx) {
-                tracing::error!("failed to open the main window: {error:#}");
+        .run(move |cx: &mut App| {
+            if let Err(error) = runtime::init(cx) {
+                tracing::error!("failed to start the I/O runtime: {error}");
                 cx.quit();
+                return;
+            }
+            gpui_component::init(cx);
+            actions::bind_keys(cx);
+            workspace::bind_keys(cx);
+            cx.background_spawn(async { format::load_time_zone() })
+                .detach();
+
+            match open_main_window(cli.destination, cli.ssh_config, cx) {
+                Ok((window, workspace)) => {
+                    if let Some(scenario) = cli.bench {
+                        bench::start(scenario, window, workspace, started, cx);
+                    }
+                }
+                Err(error) => {
+                    tracing::error!("failed to open the main window: {error:#}");
+                    cx.quit();
+                }
             }
         });
+    ExitCode::SUCCESS
 }
 
-fn open_main_window(cx: &mut App) -> anyhow::Result<()> {
+fn open_main_window(
+    destination: Option<String>,
+    ssh_config: Option<PathBuf>,
+    cx: &mut App,
+) -> anyhow::Result<(WindowHandle<Root>, Entity<Workspace>)> {
     let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -62,16 +94,22 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<()> {
             ..TitlebarOptions::default()
         }),
         app_id: Some(APP_ID.to_owned()),
+        // Let the compositor decorate (xdg-decoration); niri with
+        // `prefer-no-csd` draws no title bar at all, which is what users want.
         window_decorations: Some(WindowDecorations::Server),
+        window_min_size: Some(size(px(360.), px(240.))),
         ..WindowOptions::default()
     };
-    cx.open_window(options, |window, cx| {
-        tracing::info!(decorations = ?window.window_decorations(), "main window opened");
-        let view = cx.new(|_| MainWindow);
+    let mut workspace = None;
+    let window = cx.open_window(options, |window, cx| {
+        tracing::debug!(decorations = ?window.window_decorations(), "main window opened");
+        let view = cx.new(|cx| Workspace::new(destination, ssh_config, window, cx));
+        workspace = Some(view.clone());
         cx.new(|cx| Root::new(view, window, cx))
     })?;
-    // Linux has no notion of activating an application; the compositor focuses new windows.
     #[cfg(target_os = "macos")]
     cx.activate(true);
-    Ok(())
+    let workspace =
+        workspace.ok_or_else(|| anyhow::anyhow!("window was created without content"))?;
+    Ok((window, workspace))
 }

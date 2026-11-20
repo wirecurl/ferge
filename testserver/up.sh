@@ -4,6 +4,7 @@
 #   user ferry, password ferry
 #   keys .testserver/id_ed25519 (no passphrase) and
 #        .testserver/id_ed25519_encrypted (passphrase "ferry")
+#   client config .testserver/ssh_config (host alias "ferry-test")
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -19,4 +20,17 @@ fi
 cat "$state/id_ed25519.pub" "$state/id_ed25519_encrypted.pub" > "$state/authorized_keys"
 
 docker compose -f "$repo/testserver/compose.yaml" up --detach --build --wait
-echo "Ferry test server ready: sftp -P 2222 -i .testserver/id_ed25519 ferry@127.0.0.1"
+
+# Client configuration for `ferry -F .testserver/ssh_config sftp://ferry-test`
+# and for the benchmarks. The host keys change whenever the image is rebuilt.
+ssh-keyscan -p 2222 -t ed25519,ecdsa,rsa 127.0.0.1 2>/dev/null > "$state/known_hosts"
+cat > "$state/ssh_config" <<CONFIG
+Host ferry-test
+  HostName 127.0.0.1
+  Port 2222
+  User ferry
+  IdentityFile $state/id_ed25519
+  UserKnownHostsFile $state/known_hosts
+CONFIG
+
+echo "Ferry test server ready: cargo run -- -F .testserver/ssh_config sftp://ferry-test/home/ferry/many"

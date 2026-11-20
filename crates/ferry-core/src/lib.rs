@@ -11,6 +11,7 @@ pub mod entry;
 pub mod error;
 mod glob;
 pub mod interaction;
+pub mod listing;
 pub mod path;
 pub mod remote;
 

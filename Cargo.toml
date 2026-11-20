@@ -32,6 +32,7 @@ anyhow = "=1.0.104"
 base64ct = "=1.8.3"
 bytes = "=1.12.2"
 hmac = "=0.13.0"
+jiff = "=1.0.1"
 sha1 = "=0.11.0"
 tokio-util = { version = "=0.7.20", features = ["io"] }
 async-trait = "=0.1.92"

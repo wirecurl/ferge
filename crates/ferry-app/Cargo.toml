@@ -1,0 +1,20 @@
+[package]
+name = "ferry-app"
+description = "The Ferry desktop application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ferry"
+path = "src/main.rs"
+
+[dependencies]
+ferry-core.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+
+[lints]
+workspace = true

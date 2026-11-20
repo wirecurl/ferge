@@ -1,0 +1,68 @@
+[workspace]
+resolver = "3"
+members = ["crates/ferry-core", "crates/ferry-app", "crates/ferry-bench"]
+default-members = ["crates/ferry-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+repository = "https://github.com/ferry-app/ferry"
+publish = false
+
+# Every version is pinned exactly. GPUI is pre-1.0; upgrades are deliberate,
+# separate tasks and never happen as a side effect of `cargo update`.
+[workspace.dependencies]
+ferry-core = { path = "crates/ferry-core" }
+
+# UI. gpui-component 0.10.0 requires exactly gpui-pre 0.3.12.
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui-component = { version = "=0.10.0" }
+
+# Async runtime and protocol stack.
+tokio = { version = "=1.54.1" }
+russh = { version = "=0.65.2" }
+russh-sftp = { version = "=3.0.1" }
+russh-config = { version = "=0.58.0" }
+
+# Support crates.
+anyhow = "=1.0.104"
+async-trait = "=0.1.92"
+clap = { version = "=4.6.9", features = ["derive"] }
+dirs = "=7.0.0"
+futures = "=0.3.34"
+secrecy = "=0.10.3"
+tempfile = "=3.27.0"
+thiserror = "=2.0.21"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+todo = "warn"
+
+[profile.dev]
+# GPUI is unusably slow without optimisation; keep our own crates debuggable.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

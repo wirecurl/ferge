@@ -1,0 +1,13 @@
+[package]
+name = "ferry-core"
+description = "UI-independent core of Ferry: remote backends, listings and transfers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -74,6 +74,9 @@ pub(crate) struct Workspace {
     browser: Option<Entity<FileBrowser>>,
     connect: ConnectState,
     connect_task: Option<Task<()>>,
+    /// Aborts the connection attempt on the runtime; dropping the UI task alone
+    /// would leave it running (and possibly prompting).
+    connect_abort: Option<tokio::task::AbortHandle>,
     interaction: UiInteraction,
     /// `-F` from the command line; `None` means `~/.ssh/config`.
     ssh_config: Option<PathBuf>,
@@ -161,6 +164,7 @@ impl Workspace {
             browser: None,
             connect: ConnectState::Idle,
             connect_task: None,
+            connect_abort: None,
             interaction,
             ssh_config,
             queued_prompts: VecDeque::new(),
@@ -198,7 +202,14 @@ impl Workspace {
                 return;
             }
         };
+        if let Some(previous) = self.connect_abort.take() {
+            previous.abort();
+            // Its questions can no longer be answered; dropping them rejects.
+            self.prompt = None;
+            self.queued_prompts.clear();
+        }
         let (label, connecting) = self.start_connection(destination, cx);
+        self.connect_abort = Some(connecting.abort_handle());
         self.connect = ConnectState::Connecting(label);
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = match connecting.await {
@@ -207,6 +218,7 @@ impl Workspace {
             };
             let _ = this.update_in(cx, |workspace, window, cx| {
                 workspace.connect_task = None;
+                workspace.connect_abort = None;
                 match result {
                     Ok((remote, path)) => workspace.show_browser(remote, path, window, cx),
                     Err(message) => {

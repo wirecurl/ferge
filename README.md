@@ -30,6 +30,8 @@ fontconfig).
 ```sh
 cargo install --locked --path crates/ferry-app
 install -Dm644 packaging/linux/dev.ferry.Ferry.desktop ~/.local/share/applications/dev.ferry.Ferry.desktop
+# If ~/.cargo/bin is not on the PATH of your desktop session, use an absolute Exec= path:
+sed -i "s|^Exec=ferry|Exec=$HOME/.cargo/bin/ferry|" ~/.local/share/applications/dev.ferry.Ferry.desktop
 ```
 
 ## Usage

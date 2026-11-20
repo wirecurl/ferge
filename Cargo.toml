@@ -29,6 +29,11 @@ russh-config = { version = "=0.58.0" }
 
 # Support crates.
 anyhow = "=1.0.104"
+base64ct = "=1.8.3"
+bytes = "=1.12.2"
+hmac = "=0.13.0"
+sha1 = "=0.11.0"
+tokio-util = { version = "=0.7.20", features = ["io"] }
 async-trait = "=0.1.92"
 clap = { version = "=4.6.9", features = ["derive"] }
 dirs = "=7.0.0"

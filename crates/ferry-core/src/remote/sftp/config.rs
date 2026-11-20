@@ -137,6 +137,8 @@ pub(crate) struct ResolvedTarget {
     pub identities_configured: bool,
     /// Command whose stdin/stdout replace the TCP connection.
     pub proxy_command: Option<String>,
+    /// `HostKeyAlias`: the name to look up and record the host key under.
+    pub host_key_alias: Option<String>,
     /// known_hosts files that may be written to, in order.
     pub user_known_hosts: Vec<PathBuf>,
     /// Read-only, system-wide known_hosts files.
@@ -158,36 +160,97 @@ impl ResolvedTarget {
 /// call it from a blocking context.
 pub(crate) fn resolve(options: &SftpOptions) -> Result<ResolvedTarget> {
     let home = dirs::home_dir();
-    let config_text = match &options.ssh_config {
-        SshConfigSource::Disabled => None,
-        SshConfigSource::User => match &home {
-            Some(home) => read_optional(&home.join(".ssh").join("config"))?,
-            None => None,
-        },
-        SshConfigSource::File(path) => {
-            Some(std::fs::read_to_string(path).map_err(|source| Error::Io {
-                context: format!("could not read {}", path.display()),
-                source,
-            })?)
-        }
-    };
-    let base_dir = match &options.ssh_config {
-        SshConfigSource::File(path) => path.parent().map(Path::to_path_buf),
-        _ => home.as_ref().map(|home| home.join(".ssh")),
-    }
-    .unwrap_or_default();
-
-    let normalized = match config_text {
-        Some(text) => {
-            let mut out = String::new();
-            preprocess(&text, &base_dir, home.as_deref(), 0, &mut out);
-            out
-        }
-        None => String::new(),
-    };
+    let normalized = normalized_config(&options.ssh_config, home.as_deref())?;
     let parsed = russh_config::parse(&normalized, &options.host)
         .map_err(|error| Error::Config(error.to_string()))?;
-    build_target(options, &parsed, home.as_deref())
+    let mut target = build_target(options, &parsed, home.as_deref())?;
+    // Options russh-config does not know are looked up directly.
+    target.host_key_alias =
+        lookup_option(&normalized, &options.host, "hostkeyalias").filter(|alias| !alias.is_empty());
+    if let Some(alias) = &target.host_key_alias {
+        validate_name("HostKeyAlias", alias, is_plain_char)?;
+    }
+    Ok(target)
+}
+
+/// The first value of `keyword` (lower-case) that applies to `host` in a
+/// normalized configuration, following OpenSSH's "first match wins" rule.
+fn lookup_option(normalized: &str, host: &str, keyword: &str) -> Option<String> {
+    let mut applies = false;
+    for line in normalized.lines() {
+        if let Some(patterns) = line.strip_prefix("Host ") {
+            applies = section_matches(patterns, host);
+            continue;
+        }
+        if !applies {
+            continue;
+        }
+        let (key, value) = split_keyword(line);
+        if key.eq_ignore_ascii_case(keyword) {
+            return Some(strip_quotes(value).to_owned());
+        }
+    }
+    None
+}
+
+/// `Host` line semantics: any positive pattern matches and no negated one does.
+fn section_matches(patterns: &str, host: &str) -> bool {
+    let mut matched = false;
+    for pattern in patterns.split_whitespace() {
+        if let Some(negated) = pattern.strip_prefix('!') {
+            if crate::glob::matches(negated, host, true) {
+                return false;
+            }
+        } else if crate::glob::matches(pattern, host, true) {
+            matched = true;
+        }
+    }
+    matched
+}
+
+/// Host aliases defined in the SSH configuration, in file order, for quick
+/// connect lists. Wildcard and negated patterns are left out. Performs
+/// blocking file I/O.
+pub fn configured_hosts(source: &SshConfigSource) -> Result<Vec<String>> {
+    let normalized = normalized_config(source, dirs::home_dir().as_deref())?;
+    let mut seen = std::collections::HashSet::new();
+    Ok(normalized
+        .lines()
+        .filter_map(|line| line.strip_prefix("Host "))
+        .flat_map(str::split_whitespace)
+        .filter(|pattern| !pattern.contains(['*', '?', '!']))
+        .filter(|pattern| seen.insert(pattern.to_string()))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Reads the configuration and rewrites it for russh-config (see [`preprocess`]).
+fn normalized_config(source: &SshConfigSource, home: Option<&Path>) -> Result<String> {
+    let (text, base_dir) = match source {
+        SshConfigSource::Disabled => return Ok(String::new()),
+        SshConfigSource::User => {
+            let Some(home) = home else {
+                return Ok(String::new());
+            };
+            let ssh_dir = home.join(".ssh");
+            (read_optional(&ssh_dir.join("config"))?, ssh_dir)
+        }
+        SshConfigSource::File(path) => {
+            let text = std::fs::read_to_string(path).map_err(|source| Error::Io {
+                context: format!("could not read {}", path.display()),
+                source,
+            })?;
+            (
+                Some(text),
+                path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            )
+        }
+    };
+    let mut out = String::new();
+    if let Some(text) = text {
+        preprocess(&text, &base_dir, home, 0, &mut out);
+    }
+    Ok(out)
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>> {
@@ -276,6 +339,7 @@ fn build_target(
         identity_files,
         identities_configured,
         proxy_command,
+        host_key_alias: None,
         user_known_hosts,
         global_known_hosts,
     })
@@ -369,7 +433,7 @@ fn is_plain_char(c: char) -> bool {
 
 /// Characters that are inert in a POSIX shell word.
 fn is_shell_safe_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%' | '@' | '+')
+    c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%' | '@' | '+' | '/')
 }
 
 fn local_user_name() -> String {
@@ -482,9 +546,18 @@ fn preprocess(text: &str, base_dir: &Path, home: Option<&Path>, depth: u8, out: 
                 section = Some(header);
             }
             "match" => {
-                tracing::warn!("ssh_config: `Match` blocks are not supported and are ignored");
-                // A pattern that only consists of a negation never matches.
-                let header = "Host !*".to_owned();
+                // `Match all` applies everywhere (commonly used to `Include` at the
+                // top level); other criteria are not supported and their block is
+                // disabled with a pattern that only consists of a negation.
+                let header = if value.eq_ignore_ascii_case("all") {
+                    "Host *".to_owned()
+                } else {
+                    tracing::warn!(
+                        criteria = value,
+                        "ssh_config: `Match` is not supported; block ignored"
+                    );
+                    "Host !*".to_owned()
+                };
                 out.push_str(&header);
                 out.push('\n');
                 section = Some(header);
@@ -687,6 +760,50 @@ Match host box
         let mut options = SftpOptions::new("j");
         options.ssh_config = SshConfigSource::File(path);
         assert!(matches!(resolve(&options), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn match_all_applies_and_host_key_alias_is_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("extra"),
+            "Host team/box\n  HostName 10.1.2.3\n  HostKeyAlias box-key\n",
+        )
+        .expect("write");
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            "Host first\n  User a\nMatch all\n  Include extra\nMatch host other\n  User nope\n",
+        )
+        .expect("write");
+        let mut options = SftpOptions::new("team/box");
+        options.ssh_config = SshConfigSource::File(path);
+        let target = resolve(&options).expect("resolve");
+        assert_eq!(target.hostname, "10.1.2.3");
+        assert_eq!(target.host_key_alias.as_deref(), Some("box-key"));
+        assert_ne!(target.user, "nope");
+
+        options.host = "first".into();
+        let target = resolve(&options).expect("resolve");
+        assert_eq!(target.host_key_alias, None);
+    }
+
+    #[test]
+    fn lists_configured_hosts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("extra"), "Host included\n  HostName x\n").expect("write");
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            "User global\nHost web db\n  Port 1\nHost *.lan !bad\nInclude extra\nHost web\nMatch all\n",
+        )
+        .expect("write");
+        let hosts = configured_hosts(&SshConfigSource::File(path)).expect("hosts");
+        assert_eq!(hosts, ["web", "db", "included"]);
+        assert_eq!(
+            configured_hosts(&SshConfigSource::Disabled).expect("hosts"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

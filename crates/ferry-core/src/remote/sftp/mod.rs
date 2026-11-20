@@ -24,7 +24,7 @@ use russh_sftp::protocol::{FileAttributes, StatusCode};
 use tokio::sync::{OnceCell, mpsc};
 
 use self::config::{DEFAULT_PORT, ResolvedTarget};
-pub use self::config::{KnownHostsSource, SftpOptions, SshConfigSource};
+pub use self::config::{KnownHostsSource, SftpOptions, SshConfigSource, configured_hosts};
 use self::handler::{ClientHandler, HostKeyFailure};
 use self::known_hosts::{KnownHosts, host_key_name};
 use super::{ByteStream, ListStream, Remote, reader_stream, write_all};
@@ -90,7 +90,11 @@ impl SftpRemote {
         let stream = open_transport(&target, options.connect_timeout).await?;
         let failure = HostKeyFailure::default();
         let handler = ClientHandler::new(
-            host_key_name(&target.hostname, target.port),
+            // Like OpenSSH, a HostKeyAlias is used verbatim, without the port.
+            target
+                .host_key_alias
+                .clone()
+                .unwrap_or_else(|| host_key_name(&target.hostname, target.port)),
             KnownHosts {
                 user_files: target.user_known_hosts.clone(),
                 global_files: target.global_known_hosts.clone(),

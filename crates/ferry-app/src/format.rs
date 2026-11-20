@@ -37,6 +37,19 @@ pub(crate) fn size(bytes: u64) -> String {
     }
 }
 
+/// Formats a count with thousands separators, e.g. `100,000`.
+pub(crate) fn count(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// Formats a modification time as `YYYY-MM-DD HH:MM` in the local time zone.
 pub(crate) fn date(time: Option<SystemTime>) -> String {
     let Some(timestamp) = time.and_then(|time| Timestamp::try_from(time).ok()) else {
@@ -66,6 +79,15 @@ mod tests {
         assert_eq!(size(999_950), "1.0 MB");
         assert_eq!(size(5_500_000_000), "5.5 GB");
         assert_eq!(size(u64::MAX), "18.4 EB");
+    }
+
+    #[test]
+    fn counts() {
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1000), "1,000");
+        assert_eq!(count(100_000), "100,000");
+        assert_eq!(count(1_234_567), "1,234,567");
     }
 
     #[test]

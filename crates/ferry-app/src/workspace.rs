@@ -6,18 +6,18 @@ use std::sync::Arc;
 
 use ferry_core::interaction::HostKeyDecision;
 use ferry_core::remote::local::LocalRemote;
-use ferry_core::remote::sftp::{SftpRemote, SshConfigSource};
+use ferry_core::remote::sftp::{SftpRemote, SshConfigSource, configured_hosts};
 use ferry_core::{Remote, RemotePath};
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable as _,
+    AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
     Subscription, Task, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
 use secrecy::SecretString;
 
 use crate::browser::{FileBrowser, Navigated};
@@ -31,15 +31,23 @@ type PendingConnection = tokio::task::JoinHandle<ferry_core::Result<(Arc<dyn Rem
 /// Key context of the dialog overlay.
 const PROMPT_CONTEXT: &str = "FerryPrompt";
 
+/// Key context of the whole window.
+const WORKSPACE_CONTEXT: &str = "Workspace";
+
 gpui::actions!(ferry_prompt, [CancelPrompt]);
+gpui::actions!(workspace, [FocusAddress]);
 
 /// Registers the key bindings of this module.
 pub(crate) fn bind_keys(cx: &mut gpui::App) {
-    cx.bind_keys([gpui::KeyBinding::new(
-        "escape",
-        CancelPrompt,
-        Some(PROMPT_CONTEXT),
-    )]);
+    let focus_address = if cfg!(target_os = "macos") {
+        "cmd-l"
+    } else {
+        "ctrl-l"
+    };
+    cx.bind_keys([
+        gpui::KeyBinding::new("escape", CancelPrompt, Some(PROMPT_CONTEXT)),
+        gpui::KeyBinding::new(focus_address, FocusAddress, Some(WORKSPACE_CONTEXT)),
+    ]);
 }
 
 enum ConnectState {
@@ -74,6 +82,11 @@ pub(crate) struct Workspace {
     prompt_focus: FocusHandle,
     _prompt_listener: Task<()>,
     _address_submit: Subscription,
+    /// Host aliases from the SSH configuration, shown on the start screen.
+    hosts: Vec<SharedString>,
+    _hosts_lookup: Task<()>,
+    /// Follows the system's light/dark preference.
+    _appearance: Subscription,
     /// Keeps the window title in sync with the browser.
     browser_title: Option<Subscription>,
 }
@@ -104,6 +117,32 @@ impl Workspace {
             },
         );
 
+        Theme::sync_system_appearance(Some(window), cx);
+        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
+            Theme::sync_system_appearance(Some(window), cx);
+        });
+
+        let source = ssh_config
+            .clone()
+            .map_or(SshConfigSource::User, SshConfigSource::File);
+        let lookup = runtime::spawn(cx, async move {
+            tokio::task::spawn_blocking(move || configured_hosts(&source)).await
+        });
+        let hosts_lookup = cx.spawn(async move |this, cx| {
+            let hosts = match lookup.await {
+                Ok(Ok(Ok(hosts))) => hosts,
+                Ok(Ok(Err(error))) => {
+                    tracing::warn!(%error, "could not read the SSH configuration");
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.hosts = hosts.into_iter().map(SharedString::from).collect();
+                cx.notify();
+            });
+        });
+
         let (interaction, mut requests) = interaction::channel();
         let prompt_listener = cx.spawn_in(window, async move |this, cx| {
             while let Some(request) = requests.next().await {
@@ -129,6 +168,9 @@ impl Workspace {
             prompt_focus: cx.focus_handle(),
             _prompt_listener: prompt_listener,
             _address_submit: submit,
+            hosts: Vec::new(),
+            _hosts_lookup: hosts_lookup,
+            _appearance: appearance,
             browser_title: None,
         };
         if autoconnect {
@@ -376,23 +418,117 @@ impl Workspace {
         });
         let content = match &self.browser {
             Some(browser) => div().flex_1().min_h_0().child(browser.clone()),
-            None => div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_color(theme.muted_foreground)
-                .child(Icon::new(IconName::HardDrive).size_8())
-                .child("Connect to a server or open a local folder")
-                .child(
-                    div()
-                        .text_xs()
-                        .child("Try sftp://ferry@127.0.0.1:2222 with the test server"),
-                ),
+            None => self.render_start(cx),
         };
         v_flex().flex_1().min_h_0().children(banner).child(content)
+    }
+
+    /// Fills the address field with `destination` and connects.
+    fn connect_to(
+        &mut self,
+        destination: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.address
+            .update(cx, |input, cx| input.set_value(destination, window, cx));
+        self.connect(window, cx);
+    }
+
+    fn render_start(&self, cx: &mut Context<Self>) -> gpui::Div {
+        /// Quick-connect buttons shown at most; long configs stay usable.
+        const MAX_HOSTS: usize = 24;
+        let theme = cx.theme();
+        let hosts = self
+            .hosts
+            .iter()
+            .take(MAX_HOSTS)
+            .enumerate()
+            .map(|(index, host)| {
+                let destination = host.clone();
+                Button::new(ElementId::NamedInteger("ssh-host".into(), index as u64))
+                    .outline()
+                    .small()
+                    .icon(IconName::Globe)
+                    .label(host.clone())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.connect_to(destination.clone(), window, cx);
+                    }))
+            });
+        let shortcuts = if cfg!(target_os = "macos") {
+            "⌘L address · ↩ open · ⌘↑ parent · ⌘[ back · type to filter · ⌘1–3 sort"
+        } else {
+            "Ctrl+L address · Enter open · Alt+↑ parent · Alt+← back · type to filter · Ctrl+1–3 sort"
+        };
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .child(
+                v_flex()
+                    .max_w(px(640.))
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        Icon::new(IconName::HardDrive)
+                            .size_10()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Where to?"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Type an address above, or pick a destination."),
+                            ),
+                    )
+                    .child(
+                        Button::new("open-local")
+                            .icon(IconName::Folder)
+                            .label("Local files")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.connect_to("local".into(), window, cx);
+                            })),
+                    )
+                    .when(!self.hosts.is_empty(), |this| {
+                        this.child(
+                            v_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("SSH hosts"),
+                                )
+                                .child(
+                                    h_flex()
+                                        .flex_wrap()
+                                        .justify_center()
+                                        .gap_2()
+                                        .children(hosts),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .pt_4()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(shortcuts),
+                    ),
+            )
     }
 
     fn render_prompt(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
@@ -532,6 +668,10 @@ impl Render for Workspace {
         v_flex()
             .relative()
             .size_full()
+            .key_context(WORKSPACE_CONTEXT)
+            .on_action(cx.listener(|this, _: &FocusAddress, window, cx| {
+                this.address.update(cx, |input, cx| input.focus(window, cx));
+            }))
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(self.render_toolbar(cx))

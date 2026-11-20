@@ -42,6 +42,13 @@ impl Render for FileBrowser {
             .on_action(cx.listener(Self::on_sort_by_modified))
             .on_action(cx.listener(Self::on_refresh))
             .on_key_down(cx.listener(Self::on_key_down))
+            // Clicking anywhere in the browser makes it the keyboard target.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                }),
+            )
             .child(self.render_path_bar(cx))
             .child(self.render_header(cx))
             .child(self.render_list(cx))
@@ -191,16 +198,17 @@ impl FileBrowser {
     fn render_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
         let (active, even, hover) = (theme.list_active, theme.list_even, theme.list_hover);
-        let (muted, border) = (theme.muted_foreground, theme.list_active_border);
+        let (muted, border, folder) =
+            (theme.muted_foreground, theme.list_active_border, theme.blue);
         range
             .filter_map(|index| {
                 let entry = self.view.get(index)?;
                 let selected = self.selected == Some(index);
-                let (icon, size) = match entry.kind() {
-                    EntryKind::Directory => (IconName::Folder, String::new()),
-                    EntryKind::Symlink => (IconName::ExternalLink, String::new()),
-                    EntryKind::File => (IconName::File, format::size(entry.metadata.size)),
-                    EntryKind::Other => (IconName::FileText, String::new()),
+                let (icon, icon_color, size) = match entry.kind() {
+                    EntryKind::Directory => (IconName::Folder, folder, String::new()),
+                    EntryKind::Symlink => (IconName::ExternalLink, muted, String::new()),
+                    EntryKind::File => (IconName::File, muted, format::size(entry.metadata.size)),
+                    EntryKind::Other => (IconName::FileText, muted, String::new()),
                 };
                 let row = h_flex()
                     .id(index)
@@ -221,7 +229,7 @@ impl FileBrowser {
                             this.open_index(index, cx);
                         }
                     }))
-                    .child(Icon::new(icon).size_4().text_color(muted))
+                    .child(Icon::new(icon).size_4().text_color(icon_color))
                     .child(
                         div()
                             .flex_1()
@@ -252,10 +260,14 @@ impl FileBrowser {
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let total = self.view.total_len();
-        let count = if self.filter.is_empty() {
-            format!("{total} items")
-        } else {
-            format!("{} of {total} items", self.view.len())
+        let count = match (self.filter.is_empty(), total) {
+            (true, 1) => "1 item".to_owned(),
+            (true, _) => format!("{} items", format::count(total)),
+            (false, _) => format!(
+                "{} of {} items",
+                format::count(self.view.len()),
+                format::count(total)
+            ),
         };
         let state: Option<SharedString> = match &self.state {
             LoadState::Loading => Some("Loading…".into()),

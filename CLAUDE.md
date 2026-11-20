@@ -19,6 +19,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
+## Test server
+
+```sh
+./testserver/up.sh               # OpenSSH on 127.0.0.1:2222, waits until ready
+./testserver/down.sh             # stop and remove (fixtures are regenerated on next start)
+cargo test --workspace -- --include-ignored   # includes SFTP integration tests
+```
+
+Credentials: user `ferry`, password `ferry`; keys in `.testserver/` (`id_ed25519` without
+passphrase, `id_ed25519_encrypted` with passphrase `ferry`). Fixtures in the login directory:
+`many/` (100,000 files, deterministic names, sparse sizes, spread mtimes) and `tree/` (nested
+dirs, unicode, hidden files, symlinks incl. a dangling one). Tests that need the server are
+`#[ignore]`d so plain `cargo test` works offline.
+
 ## Rules
 
 - All dependency versions are pinned exactly in the root `Cargo.toml`. GPUI comes from

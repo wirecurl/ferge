@@ -1,0 +1,12 @@
+# Started by ./testserver/up.sh, which creates the client keys first.
+name: ferry-testserver
+
+services:
+  sshd:
+    build: .
+    image: ferry-testserver:latest
+    ports:
+      - "127.0.0.1:2222:22"
+    volumes:
+      - ../.testserver/authorized_keys:/etc/ferry/authorized_keys:ro
+    restart: unless-stopped

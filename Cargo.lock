@@ -2040,7 +2040,11 @@ dependencies = [
 name = "ferry-bench"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
  "ferry-core",
+ "futures",
+ "tokio",
 ]
 
 [[package]]

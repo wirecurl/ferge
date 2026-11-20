@@ -33,6 +33,20 @@ passphrase, `id_ed25519_encrypted` with passphrase `ferry`). Fixtures in the log
 dirs, unicode, hidden files, symlinks incl. a dangling one). Tests that need the server are
 `#[ignore]`d so plain `cargo test` works offline.
 
+## Benchmarks
+
+```sh
+./testserver/up.sh
+cargo build --release
+cargo run --release -p ferry-bench   # prints measurements and a budget table; exit 1 = budget missed
+```
+
+The harness starts the release binary in hidden `--bench startup|interaction` modes. The app
+prints `ferry-bench:` markers to stderr; `ZED_MEASUREMENTS=1` makes GPUI print the CPU time of
+every frame, which the harness attributes to the preceding input. Frame budget: 8.33 ms (120 Hz).
+
+Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferry-test/home/ferry/many`.
+
 ## Rules
 
 - All dependency versions are pinned exactly in the root `Cargo.toml`. GPUI comes from

@@ -10,6 +10,8 @@ use std::path::Path;
 use async_trait::async_trait;
 use secrecy::SecretString;
 
+use crate::secrets::SecretId;
+
 /// An unknown host key that needs the user's decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostKeyPrompt {
@@ -35,6 +37,37 @@ pub enum HostKeyDecision {
     AcceptAndRemember,
 }
 
+/// The account being authenticated, after `ssh_config` was applied.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Account {
+    pub user: String,
+    /// The host as the user named it (alias or address), not the resolved
+    /// host name, so it matches what the user sees.
+    pub host: String,
+    pub port: u16,
+}
+
+impl Account {
+    /// Where a password for this account is saved.
+    pub fn password_id(&self) -> SecretId {
+        SecretId::Password {
+            user: self.user.clone(),
+            host: self.host.clone(),
+            port: self.port,
+        }
+    }
+}
+
+impl fmt::Display for Account {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.user, self.host)?;
+        if self.port != crate::remote::sftp::DEFAULT_PORT {
+            write!(f, ":{}", self.port)?;
+        }
+        Ok(())
+    }
+}
+
 /// One prompt of a keyboard-interactive authentication round.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyboardPrompt {
@@ -56,12 +89,13 @@ pub trait Interaction: Send + Sync + fmt::Debug {
     async fn key_passphrase(&self, key_file: &Path, retry: bool) -> Option<SecretString>;
 
     /// The server accepts password authentication.
-    async fn password(&self, user: &str, host: &str, retry: bool) -> Option<SecretString>;
+    async fn password(&self, account: &Account, retry: bool) -> Option<SecretString>;
 
     /// The server sent a keyboard-interactive challenge. Must return exactly one
     /// answer per prompt.
     async fn keyboard_interactive(
         &self,
+        account: &Account,
         name: &str,
         instructions: &str,
         prompts: &[KeyboardPrompt],
@@ -83,12 +117,13 @@ impl Interaction for NonInteractive {
         None
     }
 
-    async fn password(&self, _user: &str, _host: &str, _retry: bool) -> Option<SecretString> {
+    async fn password(&self, _account: &Account, _retry: bool) -> Option<SecretString> {
         None
     }
 
     async fn keyboard_interactive(
         &self,
+        _account: &Account,
         _name: &str,
         _instructions: &str,
         _prompts: &[KeyboardPrompt],

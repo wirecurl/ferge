@@ -23,14 +23,15 @@ use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, StatusCode};
 use tokio::sync::{OnceCell, mpsc};
 
-use self::config::{DEFAULT_PORT, ResolvedTarget};
+pub(crate) use self::config::DEFAULT_PORT;
+use self::config::ResolvedTarget;
 pub use self::config::{KnownHostsSource, SftpOptions, SshConfigSource, configured_hosts};
 use self::handler::{ClientHandler, HostKeyFailure};
 use self::known_hosts::{KnownHosts, host_key_name};
 use super::{ByteStream, ListStream, Remote, reader_stream, write_all};
 use crate::entry::{Entry, Metadata};
 use crate::error::{Error, Result};
-use crate::interaction::Interaction;
+use crate::interaction::{Account, Interaction};
 use crate::path::{EntryName, RemotePath};
 
 /// SFTP protocol version spoken by OpenSSH and supported by russh-sftp.
@@ -52,6 +53,7 @@ pub struct SftpRemote {
 
 struct Inner {
     label: String,
+    account: Account,
     home: RemotePath,
     ssh: client::Handle<ClientHandler>,
     /// Channel for listings and metadata.
@@ -69,6 +71,11 @@ impl fmt::Debug for SftpRemote {
 }
 
 impl SftpRemote {
+    /// The authenticated account, e.g. to save its password.
+    pub fn account(&self) -> &Account {
+        &self.inner.account
+    }
+
     /// Connects, verifies the host key, authenticates and opens the SFTP subsystem.
     ///
     /// Questions (unknown host key, passphrases, passwords) go to `interaction`.
@@ -122,6 +129,7 @@ impl SftpRemote {
         Ok(Self {
             inner: Arc::new(Inner {
                 label: target.label(),
+                account: target.account(),
                 home,
                 ssh,
                 meta,

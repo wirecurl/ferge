@@ -14,6 +14,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 
 use crate::error::{Error, Result};
+use crate::interaction::Account;
 
 /// Default TCP port of SSH.
 pub(crate) const DEFAULT_PORT: u16 = 22;
@@ -135,6 +136,8 @@ pub(crate) struct ResolvedTarget {
     pub identity_files: Vec<PathBuf>,
     /// Whether `identity_files` was configured (rather than OpenSSH's defaults).
     pub identities_configured: bool,
+    /// `IdentitiesOnly yes`: offer only agent keys that belong to `identity_files`.
+    pub identities_only: bool,
     /// Command whose stdin/stdout replace the TCP connection.
     pub proxy_command: Option<String>,
     /// `HostKeyAlias`: the name to look up and record the host key under.
@@ -148,10 +151,14 @@ pub(crate) struct ResolvedTarget {
 impl ResolvedTarget {
     /// `user@host` with the port when it is not the default.
     pub(crate) fn label(&self) -> String {
-        if self.port == DEFAULT_PORT {
-            format!("{}@{}", self.user, self.alias)
-        } else {
-            format!("{}@{}:{}", self.user, self.alias, self.port)
+        self.account().to_string()
+    }
+
+    pub(crate) fn account(&self) -> Account {
+        Account {
+            user: self.user.clone(),
+            host: self.alias.clone(),
+            port: self.port,
         }
     }
 }
@@ -170,6 +177,8 @@ pub(crate) fn resolve(options: &SftpOptions) -> Result<ResolvedTarget> {
     if let Some(alias) = &target.host_key_alias {
         validate_name("HostKeyAlias", alias, is_plain_char)?;
     }
+    target.identities_only = lookup_option(&normalized, &options.host, "identitiesonly")
+        .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
     Ok(target)
 }
 
@@ -338,6 +347,7 @@ fn build_target(
         user,
         identity_files,
         identities_configured,
+        identities_only: false,
         proxy_command,
         host_key_alias: None,
         user_known_hosts,
@@ -786,6 +796,14 @@ Match host box
         options.host = "first".into();
         let target = resolve(&options).expect("resolve");
         assert_eq!(target.host_key_alias, None);
+    }
+
+    #[test]
+    fn reads_identities_only() {
+        let config = "Host strict\n  IdentitiesOnly yes\nHost *\n  IdentitiesOnly no\n";
+        assert!(resolve_text(config, &SftpOptions::new("strict")).identities_only);
+        assert!(!resolve_text(config, &SftpOptions::new("other")).identities_only);
+        assert!(!resolve_text("", &SftpOptions::new("any")).identities_only);
     }
 
     #[test]

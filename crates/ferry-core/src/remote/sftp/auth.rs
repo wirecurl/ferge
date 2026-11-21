@@ -181,7 +181,8 @@ impl<'a> Authenticator<'a> {
 
     /// Offers the agent's keys. Keys matching configured identity files go first;
     /// with configured identities, other agent keys are not offered at all, which
-    /// mirrors what users expect from a per-host `IdentityFile`.
+    /// mirrors what users expect from a per-host `IdentityFile`. With
+    /// `IdentitiesOnly yes`, only keys of the configured files are offered.
     async fn agent_keys(&mut self, offered: &mut Vec<PublicKey>) -> Result<Option<Step>> {
         let mut agent = match AgentClient::connect_env().await {
             Ok(agent) => agent,
@@ -211,7 +212,12 @@ impl<'a> Authenticator<'a> {
                 .iter()
                 .any(|wanted| wanted.key_data() == key.key_data())
         });
-        if self.target.identities_configured && !preferred.is_empty() {
+        // `IdentitiesOnly yes` allows only the configured keys, even if none of
+        // them is in the agent; otherwise configured keys narrow the choice
+        // when the agent holds any of them.
+        if self.target.identities_only
+            || (self.target.identities_configured && !preferred.is_empty())
+        {
             candidates.retain(|key| {
                 preferred
                     .iter()
@@ -362,7 +368,12 @@ impl<'a> Authenticator<'a> {
                             .collect();
                         match self
                             .interaction
-                            .keyboard_interactive(&name, &instructions, &prompts)
+                            .keyboard_interactive(
+                                &self.target.account(),
+                                &name,
+                                &instructions,
+                                &prompts,
+                            )
                             .await
                         {
                             Some(answers) if answers.len() == prompts.len() => answers
@@ -412,7 +423,7 @@ impl<'a> Authenticator<'a> {
                 (0, Some(password)) => password.clone(),
                 _ => match self
                     .interaction
-                    .password(&self.target.user, &self.target.alias, attempt > 0)
+                    .password(&self.target.account(), attempt > 0)
                     .await
                 {
                     Some(password) => password,

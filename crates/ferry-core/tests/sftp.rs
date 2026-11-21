@@ -11,7 +11,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use ferry_core::interaction::{HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt};
+use ferry_core::interaction::{
+    Account, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt,
+};
 use ferry_core::remote::sftp::{KnownHostsSource, SftpOptions, SftpRemote, SshConfigSource};
 use ferry_core::{EntryKind, EntryName, Error, HostKeyError, Remote, RemotePath};
 use futures::{StreamExt as _, TryStreamExt as _};
@@ -46,13 +48,14 @@ impl Interaction for Scripted {
         (!queue.is_empty()).then(|| SecretString::from(queue.remove(0)))
     }
 
-    async fn password(&self, _user: &str, _host: &str, _retry: bool) -> Option<SecretString> {
+    async fn password(&self, _account: &Account, _retry: bool) -> Option<SecretString> {
         let mut queue = self.passwords.lock().unwrap();
         (!queue.is_empty()).then(|| SecretString::from(queue.remove(0)))
     }
 
     async fn keyboard_interactive(
         &self,
+        _account: &Account,
         _name: &str,
         _instructions: &str,
         _prompts: &[KeyboardPrompt],

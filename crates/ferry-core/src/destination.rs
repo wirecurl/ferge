@@ -141,6 +141,18 @@ impl Destination {
         }
     }
 
+    /// The same server or file system at `path`.
+    #[must_use]
+    pub fn with_path(&self, path: Option<RemotePath>) -> Self {
+        match self {
+            Self::Local { .. } => Self::Local { path },
+            Self::Sftp(target) => Self::Sftp(SftpTarget {
+                path,
+                ..target.clone()
+            }),
+        }
+    }
+
     /// A short name for lists and tab titles: the host or "Local files".
     pub fn title(&self) -> String {
         match self {

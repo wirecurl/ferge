@@ -766,13 +766,15 @@ impl FileBrowser {
         let Some(source) = dragged.source.upgrade() else {
             return;
         };
-        let (remote, items) = {
-            let source = source.read(cx);
-            (
-                Arc::clone(&source.remote),
-                source.drag_items(&dragged.grabbed),
-            )
+        // Rows dropped onto a folder of their own browser come from `self`,
+        // which is already borrowed for this update and cannot be read again.
+        let source = if source.entity_id() == cx.entity_id() {
+            &*self
+        } else {
+            source.read(cx)
         };
+        let remote = Arc::clone(&source.remote);
+        let items = source.drag_items(&dragged.grabbed);
         // Dropping rows onto their own folder would only duplicate them.
         if Arc::ptr_eq(&remote, &self.remote)
             && items

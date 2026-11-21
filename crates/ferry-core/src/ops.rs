@@ -1,6 +1,8 @@
 //! File operations made of several remote calls: deleting folders with their
-//! contents, creating empty files, finding free names.
+//! contents, creating empty files, finding free names, reading the start of a
+//! file for a preview.
 
+use bytes::{Bytes, BytesMut};
 use futures::{StreamExt as _, TryStreamExt as _};
 
 use crate::entry::EntryKind;
@@ -106,6 +108,38 @@ pub async fn free_name(remote: &dyn Remote, dir: &RemotePath, base: &str) -> Res
     })
 }
 
+/// The first `limit` bytes of a file, for a preview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Head {
+    pub bytes: Bytes,
+    /// The file goes on after `bytes`.
+    pub truncated: bool,
+}
+
+/// Reads at most `limit` bytes from the start of `path`. Reading stops as
+/// soon as enough arrived; the rest of the file is never transferred.
+pub async fn read_head(remote: &dyn Remote, path: &RemotePath, limit: usize) -> Result<Head> {
+    let mut stream = remote.read_from(path, 0).await?;
+    let mut buffer = BytesMut::new();
+    while let Some(chunk) = stream.try_next().await? {
+        let room = limit - buffer.len();
+        if chunk.len() >= room {
+            buffer.extend_from_slice(&chunk[..room]);
+            // Data beyond the limit, in this chunk or a later one.
+            let truncated = chunk.len() > room || stream.try_next().await?.is_some();
+            return Ok(Head {
+                bytes: buffer.freeze(),
+                truncated,
+            });
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+    Ok(Head {
+        bytes: buffer.freeze(),
+        truncated: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -116,6 +150,39 @@ mod tests {
 
     fn path(path: &Path) -> RemotePath {
         RemotePath::parse(path.to_str().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn reads_only_the_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..300_000_u32).map(|index| (index % 251) as u8).collect();
+        std::fs::write(dir.path().join("big"), &data).unwrap();
+        std::fs::write(dir.path().join("small"), b"hello").unwrap();
+        std::fs::write(dir.path().join("empty"), b"").unwrap();
+        let remote = LocalRemote::new();
+
+        let head = read_head(&remote, &path(&dir.path().join("big")), 100_000)
+            .await
+            .unwrap();
+        assert_eq!(&head.bytes[..], &data[..100_000]);
+        assert!(head.truncated);
+
+        let exact = read_head(&remote, &path(&dir.path().join("big")), data.len())
+            .await
+            .unwrap();
+        assert_eq!(exact.bytes.len(), data.len());
+        assert!(!exact.truncated);
+
+        let small = read_head(&remote, &path(&dir.path().join("small")), 100)
+            .await
+            .unwrap();
+        assert_eq!(&small.bytes[..], b"hello");
+        assert!(!small.truncated);
+
+        let empty = read_head(&remote, &path(&dir.path().join("empty")), 100)
+            .await
+            .unwrap();
+        assert!(empty.bytes.is_empty() && !empty.truncated);
     }
 
     #[tokio::test]

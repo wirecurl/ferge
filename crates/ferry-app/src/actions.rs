@@ -76,6 +76,8 @@ actions!(
         /// Puts the addresses of the selection on the clipboard.
         CopyAddress,
         ToggleHiddenFiles,
+        /// Shows the selected file over the panes, or hides it again.
+        Preview,
     ]
 );
 

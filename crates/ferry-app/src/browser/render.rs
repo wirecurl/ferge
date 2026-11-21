@@ -505,7 +505,9 @@ fn row_menu(
     } else {
         menu
     };
-    menu.menu("Copy to other side", Box::new(actions::CopyToOtherPane))
+    menu.menu("Quick look", Box::new(actions::Preview))
+        .separator()
+        .menu("Copy to other side", Box::new(actions::CopyToOtherPane))
         .menu("Copy", Box::new(actions::Copy))
         .menu("Copy address", Box::new(actions::CopyAddress))
         .separator()

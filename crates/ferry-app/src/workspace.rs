@@ -26,6 +26,7 @@ use crate::actions;
 use crate::appearance::Appearance;
 use crate::browser::FileBrowser;
 use crate::inspector::{INSPECTOR_WIDTH, Inspector};
+use crate::preview::Preview;
 use crate::prompts::{self, PromptRequest, SessionId, TaggedPrompt};
 use crate::runtime;
 use crate::session::{ConnectRequest, Session, SessionContext, SessionEvent};
@@ -147,6 +148,9 @@ pub(crate) struct Workspace {
     seen_transfers: HashSet<TransferId>,
     inspector: Entity<Inspector>,
     inspector_open: bool,
+    /// Quick look over the panes.
+    preview: Entity<Preview>,
+    preview_open: bool,
     /// The toolbar's search field; it filters the active file browser.
     filter: Entity<InputState>,
     /// The last problem with the settings that was shown.
@@ -240,6 +244,8 @@ impl Workspace {
             seen_transfers: HashSet::new(),
             inspector: cx.new(|_| Inspector::new()),
             inspector_open: false,
+            preview: cx.new(|_| Preview::new()),
+            preview_open: false,
             filter,
             tasks: Vec::new(),
             shown_settings_issue: 0,
@@ -410,6 +416,11 @@ impl Workspace {
         self.inspector.update(cx, |inspector, cx| {
             inspector.set_browser(browser.as_ref(), cx);
         });
+        if self.preview_open {
+            self.preview.update(cx, |preview, cx| {
+                preview.set_browser(browser.as_ref(), cx);
+            });
+        }
         let filter = browser
             .map(|browser| browser.read(cx).filter().to_owned())
             .unwrap_or_default();
@@ -622,6 +633,35 @@ impl Workspace {
         self.sync_active(window, cx);
     }
 
+    fn on_preview(&mut self, _: &actions::Preview, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_preview_open(!self.preview_open, cx);
+    }
+
+    /// Escape that nothing inside wanted closes the preview.
+    fn on_clear_filter(
+        &mut self,
+        _: &actions::ClearFilter,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.preview_open {
+            self.set_preview_open(false, cx);
+        }
+    }
+
+    fn set_preview_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.preview_open = open;
+        let browser = self.active_browser(cx).filter(|_| open);
+        self.preview.update(cx, |preview, cx| {
+            if open {
+                preview.set_browser(browser.as_ref(), cx);
+            } else {
+                preview.clear(cx);
+            }
+        });
+        cx.notify();
+    }
+
     fn on_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.filter.update(cx, |input, cx| input.focus(window, cx));
     }
@@ -731,6 +771,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_focus_left))
             .on_action(cx.listener(Self::on_focus_right))
             .on_action(cx.listener(Self::on_copy_to_other_pane))
+            .on_action(cx.listener(Self::on_preview))
+            .on_action(cx.listener(Self::on_clear_filter))
             .bg(background)
             .text_color(foreground)
             // Everything inside inherits body text unless it says otherwise.
@@ -738,10 +780,12 @@ impl Render for Workspace {
             .child(self.render_toolbar(window, cx))
             .child(
                 h_flex()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
                     .child(content)
+                    .when(self.preview_open, |this| this.child(self.preview.clone()))
                     .when(self.inspector_open, |this| {
                         this.child(
                             div()

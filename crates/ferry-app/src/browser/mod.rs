@@ -988,7 +988,12 @@ impl FileBrowser {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.filter.is_empty() {
+        if self.filter.is_empty() {
+            // Nothing to clear here; Escape may close something around.
+            cx.propagate();
+            return;
+        }
+        {
             // Keep the entry that was found selected and in view.
             let found = self.selected_name.clone();
             self.set_filter(String::new(), cx);
@@ -1035,7 +1040,7 @@ impl FileBrowser {
 
     /// Type-to-filter: printable characters that no binding claimed extend the
     /// filter.
-    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.renaming.is_some() {
             return;
         }
@@ -1047,6 +1052,13 @@ impl FileBrowser {
             return;
         };
         if text.is_empty() || text.chars().any(char::is_control) {
+            return;
+        }
+        // Space previews; while a filter is typed it is part of the filter,
+        // as names contain spaces.
+        if text == " " && self.filter.is_empty() {
+            window.dispatch_action(Box::new(actions::Preview), cx);
+            cx.stop_propagation();
             return;
         }
         let mut filter = self.filter.clone();

@@ -10,6 +10,7 @@ mod file_type;
 mod format;
 mod inspector;
 mod interaction;
+mod preview;
 mod prompts;
 mod runtime;
 mod session;

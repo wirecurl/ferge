@@ -27,6 +27,9 @@ russh = { version = "=0.65.2" }
 russh-sftp = { version = "=3.0.1" }
 russh-config = { version = "=0.58.0" }
 
+# Persistence. SQLite is bundled so every platform runs the same, tested version.
+rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }
+
 # Support crates.
 anyhow = "=1.0.104"
 base64ct = "=1.8.3"

@@ -3,7 +3,6 @@
 mod actions;
 mod bench;
 mod browser;
-mod destination;
 mod format;
 mod interaction;
 mod runtime;

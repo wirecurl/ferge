@@ -7,14 +7,17 @@
 //!
 //! [`Interaction`]: interaction::Interaction
 
+pub mod destination;
 pub mod entry;
 pub mod error;
 mod glob;
 pub mod interaction;
+pub mod library;
 pub mod listing;
 pub mod path;
 pub mod remote;
 
+pub use destination::{Destination, SftpTarget};
 pub use entry::{Entry, EntryKind, Metadata};
 pub use error::{Error, HostKeyError, Result};
 pub use path::{EntryName, RemotePath};

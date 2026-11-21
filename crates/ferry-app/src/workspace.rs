@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ferry_core::interaction::HostKeyDecision;
 use ferry_core::remote::local::LocalRemote;
 use ferry_core::remote::sftp::{SftpRemote, SshConfigSource, configured_hosts};
-use ferry_core::{Remote, RemotePath};
+use ferry_core::{Destination, Remote, RemotePath};
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -21,7 +21,6 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_fl
 use secrecy::SecretString;
 
 use crate::browser::{FileBrowser, Navigated};
-use crate::destination::Destination;
 use crate::interaction::{self, PromptRequest, SecretRequest, UiInteraction};
 use crate::runtime;
 
@@ -196,8 +195,8 @@ impl Workspace {
         let text = self.address.read(cx).value().to_string();
         let destination = match Destination::parse(&text) {
             Ok(destination) => destination,
-            Err(message) => {
-                self.connect = ConnectState::Failed(message);
+            Err(error) => {
+                self.connect = ConnectState::Failed(error.to_string());
                 cx.notify();
                 return;
             }
@@ -242,7 +241,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> (String, PendingConnection) {
         match destination {
-            Destination::Local(path) => (
+            Destination::Local { path } => (
                 "local files".into(),
                 runtime::spawn(cx, async move {
                     let remote: Arc<dyn Remote> = Arc::new(LocalRemote::new());
@@ -253,7 +252,9 @@ impl Workspace {
                     Ok((remote, start))
                 }),
             ),
-            Destination::Sftp { mut options, path } => {
+            Destination::Sftp(target) => {
+                let mut options = target.options();
+                let path = target.path;
                 if let Some(file) = &self.ssh_config {
                     options.ssh_config = SshConfigSource::File(file.clone());
                 }
@@ -262,7 +263,7 @@ impl Workspace {
                 (
                     label,
                     runtime::spawn(cx, async move {
-                        let sftp = SftpRemote::connect(*options, interaction).await?;
+                        let sftp = SftpRemote::connect(options, interaction).await?;
                         let remote: Arc<dyn Remote> = Arc::new(sftp);
                         let start = match path {
                             Some(path) => path,

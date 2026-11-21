@@ -348,6 +348,8 @@ impl Render for Palette {
             .id("palette-backdrop")
             .absolute()
             .inset_0()
+            // Nothing behind the palette reacts to the mouse while it is open.
+            .occlude()
             .flex()
             .flex_col()
             .items_center()

@@ -325,10 +325,12 @@ impl Render for Preview {
         });
         let body = self.render_body(cx);
         // The backdrop takes clicks beside the card and closes the preview.
+        // It occludes the file list, so no click, drag or scroll reaches it.
         div()
             .id("preview-backdrop")
             .absolute()
             .inset_0()
+            .occlude()
             .flex()
             .items_center()
             .justify_center()

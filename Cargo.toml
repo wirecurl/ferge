@@ -106,3 +106,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+
+# CI: no debug info and unoptimised dependencies. Tests need neither, and
+# the build takes a fraction of the time on small CI runners.
+[profile.ci]
+inherits = "dev"
+debug = false
+
+[profile.ci.package."*"]
+opt-level = 0

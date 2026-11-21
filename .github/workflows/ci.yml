@@ -14,6 +14,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Builds use the `ci` profile from Cargo.toml: no debug info, unoptimised
+# dependencies. The small runners need several times longer otherwise.
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -70,13 +72,17 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --profile ci -- -D warnings
+      - name: Build the tests
+        run: cargo test --workspace --locked --profile ci --no-run
       - name: Tests
-        run: cargo test --workspace --locked
+        timeout-minutes: 5
+        run: cargo test --workspace --locked --profile ci
       - name: Start the SFTP test server
         run: ./testserver/up.sh
       - name: SFTP integration tests
-        run: cargo test -p ferge-core --test sftp --locked -- --ignored
+        timeout-minutes: 5
+        run: cargo test -p ferge-core --test sftp --locked --profile ci -- --ignored
       - name: Stop the SFTP test server
         if: always()
         run: ./testserver/down.sh
@@ -98,6 +104,9 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --profile ci -- -D warnings
+      - name: Build the tests
+        run: cargo test --workspace --locked --profile ci --no-run
       - name: Tests
-        run: cargo test --workspace --locked
+        timeout-minutes: 5
+        run: cargo test --workspace --locked --profile ci

@@ -1,4 +1,4 @@
-//! Checks Ferge against the performance budgets in PLAN.md.
+//! Checks ferge against the performance budgets in PLAN.md.
 //!
 //! Needs the release build of the app (`cargo build --release`) and the test
 //! server (`./testserver/up.sh`). Exits with status 1 if a budget is missed.
@@ -36,7 +36,7 @@ const LARGE_DIRECTORY: usize = 100_000;
 #[derive(Debug, Parser)]
 #[command(
     name = "ferge-bench",
-    about = "Measures Ferge against its performance budgets"
+    about = "Measures ferge against its performance budgets"
 )]
 struct Cli {
     /// The app binary. Defaults to the workspace's release build.

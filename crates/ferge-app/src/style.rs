@@ -1,5 +1,5 @@
 //! The design system of the window. Every size, radius and text size of
-//! Ferge's own views comes from here; `design_rules` in the tests rejects
+//! ferge's own views comes from here; `design_rules` in the tests rejects
 //! views that bypass it.
 //!
 //! # Scale
@@ -7,7 +7,7 @@
 //! Sizes are multiples of the body text size ([`em`]). gpui-component draws
 //! its menus, fields and buttons with `text_sm` (0.875 rem), so the theme's
 //! rem is set to body size / 0.875 ([`rem_for_body`]); that way library
-//! controls and Ferge's own text are exactly the same size, and everything
+//! controls and ferge's own text are exactly the same size, and everything
 //! grows and shrinks with the font size setting.
 //!
 //! # Shapes

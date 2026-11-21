@@ -1,4 +1,4 @@
-//! UI-independent core of Ferge.
+//! UI-independent core of ferge.
 //!
 //! Everything that touches the network or the file system lives here and runs
 //! on tokio. The crate knows nothing about windows or widgets: it exposes

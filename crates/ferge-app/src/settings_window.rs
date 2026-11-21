@@ -58,7 +58,7 @@ fn open(cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: Some("Ferge Settings".into()),
+            title: Some("Settings – ferge".into()),
             ..TitlebarOptions::default()
         }),
         app_id: Some(crate::APP_ID.to_owned()),
@@ -117,7 +117,7 @@ fn appearance_page(cx: &App) -> SettingPage {
             SettingGroup::new().title("Colors").item(theme_item()),
             SettingGroup::new()
                 .title("Fonts")
-                .description("By default Ferge uses the fonts of your desktop.")
+                .description("By default ferge uses the fonts of your desktop.")
                 .items([font_item(cx), font_size_item(), mono_font_item(cx)]),
             SettingGroup::new()
                 .title("Settings file")

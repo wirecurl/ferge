@@ -60,7 +60,7 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
     /// Short human-readable description such as `user@example.org` or `Local`.
     fn label(&self) -> &str;
 
-    /// Whether this is the computer Ferge runs on.
+    /// Whether this is the computer ferge runs on.
     fn is_local(&self) -> bool {
         false
     }

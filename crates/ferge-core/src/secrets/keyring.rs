@@ -8,8 +8,8 @@ use secrecy::{ExposeSecret as _, SecretString};
 
 use super::{Result, SecretError, SecretId, SecretStore};
 
-/// Service name under which all of Ferge's secrets are filed.
-const SERVICE: &str = "app.ferge.Ferge";
+/// Service name under which all of ferge's secrets are filed.
+const SERVICE: &str = "com.wirecurl.ferge";
 
 /// The Secret Service (Linux) or the login Keychain (macOS).
 #[derive(Debug)]

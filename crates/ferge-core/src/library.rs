@@ -57,8 +57,8 @@ pub enum LibraryError {
         #[source]
         source: std::io::Error,
     },
-    /// The database was written by a newer version of Ferge.
-    #[error("the library was created by a newer version of Ferge (schema {0})")]
+    /// The database was written by a newer version of ferge.
+    #[error("the library was created by a newer version of ferge (schema {0})")]
     TooNew(i64),
     #[error("{0}")]
     Invalid(String),

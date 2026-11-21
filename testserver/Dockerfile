@@ -1,4 +1,4 @@
-# OpenSSH test server for Ferge's integration tests and benchmarks.
+# OpenSSH test server for ferge's integration tests and benchmarks.
 # Start it with ./testserver/up.sh; see CLAUDE.md.
 FROM alpine:3.24
 

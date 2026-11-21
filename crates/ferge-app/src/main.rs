@@ -1,4 +1,4 @@
-//! Ferge desktop application.
+//! ferge desktop application.
 
 mod actions;
 mod appearance;
@@ -36,8 +36,8 @@ use tracing_subscriber::EnvFilter;
 use crate::workspace::Workspace;
 
 /// Wayland `app_id`, also used by desktop files and compositor window rules.
-pub(crate) const APP_ID: &str = "app.ferge.Ferge";
-const APP_NAME: &str = "Ferge";
+pub(crate) const APP_ID: &str = "com.wirecurl.ferge";
+const APP_NAME: &str = "ferge";
 
 /// A fast file transfer client.
 #[derive(Debug, Parser)]

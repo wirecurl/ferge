@@ -31,7 +31,7 @@ pub(super) enum Kind {
 }
 
 /// How a file is previewed: Quick Look first where the system has it, then
-/// Ferge's own reader.
+/// ferge's own reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Plan {
     pub kind: Kind,

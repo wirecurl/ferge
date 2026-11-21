@@ -801,7 +801,7 @@ impl FileBrowser {
     }
 
     /// For dragging local files out of the window into other applications.
-    /// Remote files do not exist locally yet, so they stay inside Ferge.
+    /// Remote files do not exist locally yet, so they stay inside ferge.
     pub(crate) fn drag_out_paths(&self, grabbed: &EntryName) -> Option<gpui::FileDragPaths> {
         if !self.remote.is_local() {
             return None;

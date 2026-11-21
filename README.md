@@ -1,7 +1,7 @@
-# Ferge
+# ferge
 
 A fast file transfer client for Linux and macOS, written in Rust with
-[GPUI](https://www.gpui.rs/). Ferge is keyboard-first, renders on the GPU and keeps every
+[GPUI](https://www.gpui.rs/). ferge is keyboard-first, renders on the GPU and keeps every
 network and disk operation off the UI thread, so folders with 100,000 entries scroll, sort and
 filter without dropping a frame.
 
@@ -18,7 +18,7 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 - Transfers between any two panes or tabs: uploads, downloads and server-to-server copies of
   files and whole folders. Copy with Ctrl+C / Ctrl+V, F5 into the other pane, or drag and
   drop, including files dropped from the desktop's file manager. Local files can also be dragged
-  out of Ferge into other applications.
+  out of ferge into other applications.
 - A transfer queue with progress, speed and time left; up to four files in parallel. Transfers
   can be paused and resumed in the middle of a file. Files are written as `name.ferge-part` and
   renamed when complete, keeping their modification time; cancelling removes partial files.
@@ -33,7 +33,7 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 - Work as root on any SSH server where your account may use sudo, without logging in as root
   and without setting anything up: the shield button in a pane's header (or "Open as root" /
   "Work as root" where the server refused access) switches the pane to root in the same folder.
-  Ferge finds the server's `sftp-server`, runs it through `sudo` on the existing connection and
+  ferge finds the server's `sftp-server`, runs it through `sudo` on the existing connection and
   asks for the sudo password only if sudo needs one (a saved login password is tried first; the
   sudo password can be remembered like any other). The pane header is tinted while it lasts.
 - File operations: new folder and file, rename in place, duplicate, delete (folders with their
@@ -41,7 +41,7 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 - An inspector with the details of the selection and editable permissions; optional Kind and
   Permissions columns; hidden files on demand.
 - Passwords and key passphrases can be remembered: in the Secret Service (GNOME Keyring,
-  KeePassXC, KWallet) on Linux and the Keychain on macOS. Without a credential service, Ferge
+  KeePassXC, KWallet) on Linux and the Keychain on macOS. Without a credential service, ferge
   uses an encrypted file (Argon2id + XChaCha20-Poly1305) protected by a master password.
   Passwords are only saved after they worked; a saved password the server rejects is asked for
   again. `FERGE_SECRET_STORE=file` forces the encrypted file.
@@ -67,9 +67,9 @@ fontconfig).
 
 ```sh
 cargo install --locked --path crates/ferge-app
-install -Dm644 packaging/linux/app.ferge.Ferge.desktop ~/.local/share/applications/app.ferge.Ferge.desktop
+install -Dm644 packaging/linux/com.wirecurl.ferge.desktop ~/.local/share/applications/com.wirecurl.ferge.desktop
 # If ~/.cargo/bin is not on the PATH of your desktop session, use an absolute Exec= path:
-sed -i "s|^Exec=ferge|Exec=$HOME/.cargo/bin/ferge|" ~/.local/share/applications/app.ferge.Ferge.desktop
+sed -i "s|^Exec=ferge|Exec=$HOME/.cargo/bin/ferge|" ~/.local/share/applications/com.wirecurl.ferge.desktop
 ```
 
 ## Usage
@@ -121,7 +121,7 @@ Favorites and folders are edited from their context menu or the + menu.
 ## Preview
 
 Space shows the selected file over the panes; the arrow keys keep moving through the folder.
-Ferge shows text and images, spreadsheets (`xlsx`, `xlsm`, `xlsb`, `ods`, `csv`, `tsv`) as a
+ferge shows text and images, spreadsheets (`xlsx`, `xlsm`, `xlsb`, `ods`, `csv`, `tsv`) as a
 grid with a tab per sheet, Word, PowerPoint and OpenDocument files (`docx`, `pptx`, `odt`, `odp`)
 as their text with headings, lists and tables, and PDF pages. All of it is built in and works
 the same for files on servers. On macOS, Quick Look renders office files, including older
@@ -134,9 +134,9 @@ and copied with Ctrl+C (⌘C); without a selection, Ctrl+C copies the selected f
 Settings live in `settings.toml` in the configuration directory (`~/.config/ferge` on Linux,
 `~/Library/Application Support/ferge` on macOS). The settings window (Ctrl+, or the gear in the
 toolbar) edits the same file, and edits made to the file in any editor take effect as soon as
-it is saved. Ferge keeps comments and the order of what is written by hand, and a file that is
+it is saved. ferge keeps comments and the order of what is written by hand, and a file that is
 a symbolic link (as in a dotfiles repository) stays one. A setting that is left out uses its
-default; a value Ferge cannot use is reported and ignored.
+default; a value ferge cannot use is reported and ignored.
 
 ```toml
 [appearance]
@@ -163,3 +163,9 @@ cargo build --release && cargo run --release -p ferge-bench
 
 The workspace has three crates: `ferge-core` (protocols, listings; no UI), `ferge-app` (GPUI
 application) and `ferge-bench` (performance budget checks).
+
+## License
+
+ferge is free software: you can redistribute it and/or modify it under the terms of the
+[GNU General Public License](LICENSE) as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version.

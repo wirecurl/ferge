@@ -34,4 +34,4 @@ Host ferge-test
   UserKnownHostsFile $state/known_hosts
 CONFIG
 
-echo "Ferge test server ready: cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many"
+echo "ferge test server ready: cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many"

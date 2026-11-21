@@ -4,7 +4,7 @@
 //! [`SettingsFile::apply`], which edits the document in place, so comments,
 //! ordering and unknown keys written by hand survive. Every write replaces the
 //! file atomically. [`SettingsWatcher`] reports changes made by anyone, which
-//! is how edits in a text editor take effect while Ferge runs.
+//! is how edits in a text editor take effect while ferge runs.
 //!
 //! A setting that is left out takes its default; for fonts that means
 //! following the desktop. A value that cannot be used is reported as a
@@ -31,7 +31,7 @@ const SETTLE_TIME: Duration = Duration::from_millis(75);
 
 /// Written when the application stores the first setting, so that people who
 /// open the file find out what they can change.
-const TEMPLATE: &str = r#"# Ferge settings. Changes take effect as soon as the file is saved.
+const TEMPLATE: &str = r#"# ferge settings. Changes take effect as soon as the file is saved.
 # A setting that is left out uses its default.
 #
 # [appearance]
@@ -114,7 +114,7 @@ impl fmt::Display for ThemePreference {
     }
 }
 
-/// How Ferge looks.
+/// How ferge looks.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Appearance {
     pub theme: ThemePreference,
@@ -559,7 +559,7 @@ mod tests {
         let loaded = file.apply(&Change::Theme(ThemePreference::Dark)).unwrap();
         assert_eq!(loaded.settings.appearance.theme, ThemePreference::Dark);
         let text = std::fs::read_to_string(file.path()).unwrap();
-        assert!(text.starts_with("# Ferge settings."));
+        assert!(text.starts_with("# ferge settings."));
         assert!(text.contains("theme = \"dark\""));
         assert_eq!(file.load().unwrap(), loaded);
     }

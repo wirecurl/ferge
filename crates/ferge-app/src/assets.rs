@@ -1,4 +1,4 @@
-//! The application's assets: gpui-component's icons and the icons Ferge uses
+//! The application's assets: gpui-component's icons and the icons ferge uses
 //! beyond them. Only these are embedded, not the whole icon catalog; the
 //! tests check that every icon in use is among them.
 

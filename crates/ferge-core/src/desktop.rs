@@ -1,4 +1,4 @@
-//! What the desktop prefers, so Ferge can blend in: its fonts.
+//! What the desktop prefers, so ferge can blend in: its fonts.
 //!
 //! On Linux the preferences come from the XDG desktop portal, which every
 //! major desktop and most compositors provide; GNOME's keys are the ones the

@@ -764,7 +764,7 @@ impl Workspace {
             .track_focus(&self.prompt_focus)
             .child(div().text_title().child("Unknown host key"))
             .child(div().text_body().child(format!(
-                "Ferge has not connected to {} before. Compare the fingerprint with the one \
+                "ferge has not connected to {} before. Compare the fingerprint with the one \
                  the server's administrator gave you before you trust it.",
                 prompt.host
             )))
@@ -878,7 +878,7 @@ impl Workspace {
         let (title, message) = if request.create {
             (
                 "Protect saved passwords",
-                "No system keyring is available, so Ferge keeps saved passwords in an \
+                "No system keyring is available, so ferge keeps saved passwords in an \
                  encrypted file. Choose a master password for it. It cannot be recovered.",
             )
         } else if request.retry {
@@ -889,7 +889,7 @@ impl Workspace {
         } else {
             (
                 "Unlock saved passwords",
-                "Enter the master password of Ferge's password file.",
+                "Enter the master password of ferge's password file.",
             )
         };
         Self::card(cx)

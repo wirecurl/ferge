@@ -1,9 +1,10 @@
 [package]
 name = "ferge-app"
-description = "The Ferge desktop application."
+description = "The ferge desktop application."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 publish.workspace = true
 

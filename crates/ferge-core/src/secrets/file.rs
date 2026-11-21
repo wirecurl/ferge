@@ -290,10 +290,10 @@ impl Header {
     fn parse(data: &[u8]) -> Result<Self> {
         let corrupt = |reason: &str| SecretError::Corrupt(reason.into());
         if data.len() < HEADER_LEN + TAG_LEN || !data.starts_with(MAGIC) {
-            return Err(corrupt("not a Ferge password store"));
+            return Err(corrupt("not a ferge password store"));
         }
         if data[MAGIC.len()] != VERSION {
-            return Err(corrupt("written by an unsupported version of Ferge"));
+            return Err(corrupt("written by an unsupported version of ferge"));
         }
         let mut cursor = &data[MAGIC.len() + 1..HEADER_LEN];
         let kdf = KdfParams {

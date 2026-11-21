@@ -2,7 +2,7 @@
 //!
 //! SFTP is request/response: a client that waits for each READ or WRITE before
 //! sending the next is limited to one chunk per round trip. Like OpenSSH's
-//! `sftp`, Ferge keeps a window of requests in flight, so throughput is bound
+//! `sftp`, ferge keeps a window of requests in flight, so throughput is bound
 //! by bandwidth instead of latency.
 
 use std::collections::BTreeMap;

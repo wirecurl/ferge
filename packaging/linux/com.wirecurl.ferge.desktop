@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Ferge
+Name=ferge
 GenericName=File Transfer
 Comment=Fast SFTP client
 Exec=ferge %u
@@ -8,4 +8,4 @@ Icon=folder-remote
 Terminal=false
 Categories=Network;FileTransfer;
 Keywords=sftp;ssh;transfer;remote;
-StartupWMClass=app.ferge.Ferge
+StartupWMClass=com.wirecurl.ferge

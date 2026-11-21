@@ -1,4 +1,4 @@
-//! How Ferge looks: the appearance settings, the desktop's fonts and the
+//! How ferge looks: the appearance settings, the desktop's fonts and the
 //! installed font families, applied to the theme and kept current while the
 //! settings file or the desktop change.
 //!
@@ -178,7 +178,7 @@ impl Appearance {
             let mut watcher = match file.watch() {
                 Ok(watcher) => watcher,
                 Err(error) => {
-                    tracing::warn!(%error, "settings changes made outside Ferge will need a restart");
+                    tracing::warn!(%error, "settings changes made outside ferge will need a restart");
                     return;
                 }
             };

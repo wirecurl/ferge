@@ -87,11 +87,11 @@ impl SecretId {
     fn label(&self) -> String {
         match self {
             Self::Password { user, host, port } => {
-                format!("Ferge: password for {user}@{host}:{port}")
+                format!("ferge: password for {user}@{host}:{port}")
             }
-            Self::KeyPassphrase(path) => format!("Ferge: passphrase for {}", path.display()),
+            Self::KeyPassphrase(path) => format!("ferge: passphrase for {}", path.display()),
             Self::SudoPassword { user, host, port } => {
-                format!("Ferge: sudo password for {user}@{host}:{port}")
+                format!("ferge: sudo password for {user}@{host}:{port}")
             }
         }
     }

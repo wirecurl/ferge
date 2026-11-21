@@ -248,9 +248,9 @@ impl Session {
         match &self.connection {
             Some(connection) => {
                 let browser = connection.browser.read(cx);
-                format!("{} – {} – Ferge", browser.path(), browser.remote_label())
+                format!("{} – {} – ferge", browser.path(), browser.remote_label())
             }
-            None => "Ferge".to_owned(),
+            None => "ferge".to_owned(),
         }
     }
 

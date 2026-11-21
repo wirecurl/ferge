@@ -7,7 +7,8 @@ default-members = ["crates/ferge-app"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-repository = "https://github.com/ferge-app/ferge"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/wirecurl/ferge"
 publish = false
 
 # Every version is pinned exactly. GPUI is pre-1.0; upgrades are deliberate,

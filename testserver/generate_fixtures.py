@@ -42,7 +42,7 @@ def tree(root: str) -> None:
     os.makedirs(os.path.join(root, "nested", "deeper", "deepest"), exist_ok=True)
     os.makedirs(os.path.join(root, "empty"), exist_ok=True)
     files = {
-        "hello.txt": b"Hello from the Ferge test server.\n",
+        "hello.txt": b"Hello from the ferge test server.\n",
         "Ünïcödé ✓.txt": "Unicode name\n".encode(),
         "with space.txt": b"spaces\n",
         ".hidden": b"hidden\n",

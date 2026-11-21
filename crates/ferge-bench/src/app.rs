@@ -1,4 +1,4 @@
-//! Runs the Ferge binary in its benchmark modes and parses what it reports.
+//! Runs the ferge binary in its benchmark modes and parses what it reports.
 //!
 //! The app writes `ferge-bench: …` markers to stderr; with `ZED_MEASUREMENTS=1`
 //! GPUI adds a `frame duration: …` line for every drawn frame. Both go to the

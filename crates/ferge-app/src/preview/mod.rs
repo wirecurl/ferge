@@ -3,7 +3,7 @@
 //! from file to file while it is open.
 //!
 //! Text, images, spreadsheets ([`sheet`]), office documents as text
-//! ([`document`]) and PDF pages ([`pages`]) are shown by Ferge itself; on
+//! ([`document`]) and PDF pages ([`pages`]) are shown by ferge itself; on
 //! macOS, Quick Look renders office files as their programs would. Text is
 //! read only from the start; documents are read whole, up to a limit.
 //! Reading waits a moment after the selection changed and is abandoned when

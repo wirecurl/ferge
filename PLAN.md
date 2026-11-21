@@ -1,6 +1,6 @@
-# Ferge – Plan
+# ferge – Plan
 
-Name „Ferge“ (norwegisch für Fähre, im Deutschen dichterisch für Fährmann). Ein schneller, moderner File-Transfer-Client für Linux und macOS, der sich am Bedienkonzept von Transmit 5 orientiert. Eigenes Produkt mit eigenem Namen und Look, kein 1:1-Nachbau.
+Name „ferge“ (norwegisch für Fähre, im Deutschen dichterisch für Fährmann). Ein schneller, moderner File-Transfer-Client für Linux und macOS, der sich am Bedienkonzept von Transmit 5 orientiert. Eigenes Produkt mit eigenem Namen und Look, kein 1:1-Nachbau.
 
 Hauptplattform: Arch Linux mit dem Wayland-Compositor **niri**. macOS ist Zweitplattform.
 
@@ -115,7 +115,7 @@ Richtungen Upload, Download, Mirror. Vorschau als Dry-Run vor der Ausführung, L
 
 Remote-Datei im externen Editor öffnen mit Auto-Upload beim Speichern, Info- und Rechte-Inspector, Paketierung (AUR, Flatpak, signiertes macOS-Bundle).
 
-Als root arbeiten: Ein Pane wechselt per Klick auf root, ohne Root-Login und ohne Einrichtung auf dem Server. Ferge startet über die bestehende SSH-Verbindung zusätzliche SFTP-Kanäle mit `sudo sftp-server` (Pfad automatisch ermittelt, Passwort nur wenn sudo es verlangt, vorher mit `sudo true` geprüft) und hält das Passwort danach nicht im Speicher.
+Als root arbeiten: Ein Pane wechselt per Klick auf root, ohne Root-Login und ohne Einrichtung auf dem Server. ferge startet über die bestehende SSH-Verbindung zusätzliche SFTP-Kanäle mit `sudo sftp-server` (Pfad automatisch ermittelt, Passwort nur wenn sudo es verlangt, vorher mit `sudo true` geprüft) und hält das Passwort danach nicht im Speicher.
 
 ## Risiken
 

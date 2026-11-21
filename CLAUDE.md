@@ -1,4 +1,4 @@
-# Ferge – working notes
+# ferge – working notes
 
 PLAN.md is the binding source for technology, architecture and performance budgets.
 
@@ -69,9 +69,11 @@ real Secret Service / Keychain.
 - For GPUI API questions read the sources in `~/.cargo/registry/src/*/gpui-pre-0.3.12` and
   `~/.cargo/registry/src/*/gpui-component-0.10.0` instead of guessing.
 - Commit messages and authorship never mention AI tools.
+- The name is always written in lowercase: "ferge", also at the start of a sentence and in
+  window titles. The app ID is `com.wirecurl.ferge`. Licensed GPL-3.0-or-later.
 - Look and feel come only from `crates/ferge-app/src/style.rs`, the design system:
   - Sizes are `style::em(x)`, multiples of body text. The theme's rem is body / 0.875, so
-    gpui-component's `text_sm` controls (menus, fields, buttons) match Ferge's body text.
+    gpui-component's `text_sm` controls (menus, fields, buttons) match ferge's body text.
   - Text sizes: `text_body`, `text_small`, `text_title`. Controls come in two sizes
     (`ControlSize::Regular` in the toolbar, `Compact` in headers and panels).
   - Icon-only buttons are `style::IconButton`, choices are `style::segmented`, related controls

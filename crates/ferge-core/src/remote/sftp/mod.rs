@@ -294,7 +294,7 @@ impl DataChannel {
 fn ssh_config() -> client::Config {
     client::Config {
         client_id: russh::SshId::Standard(Cow::Borrowed(concat!(
-            "SSH-2.0-Ferge_",
+            "SSH-2.0-ferge_",
             env!("CARGO_PKG_VERSION")
         ))),
         keepalive_interval: Some(Duration::from_secs(15)),

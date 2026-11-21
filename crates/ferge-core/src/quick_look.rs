@@ -1,8 +1,8 @@
 //! Quick Look on macOS: the system renders a document as its program
-//! would, and Ferge shows the picture.
+//! would, and ferge shows the picture.
 //!
 //! Rendering runs in `qlmanage`, which ships with macOS, in a process of its
-//! own: a Quick Look generator that hangs or crashes cannot take Ferge with
+//! own: a Quick Look generator that hangs or crashes cannot take ferge with
 //! it, and no Objective-C is needed (the workspace forbids `unsafe`).
 //! Elsewhere [`render`] fails, and callers fall back to their own readers.
 
@@ -100,7 +100,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn renders_a_text_document() {
-        let rtf = br"{\rtf1\ansi{\fonttbl\f0 Helvetica;}\f0\fs48 Hello from Ferge}";
+        let rtf = br"{\rtf1\ansi{\fonttbl\f0 Helvetica;}\f0\fs48 Hello from ferge}";
         let png = render_bytes("hello.rtf", Bytes::from_static(rtf), 512)
             .await
             .unwrap();

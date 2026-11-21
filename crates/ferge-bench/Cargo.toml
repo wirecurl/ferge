@@ -1,9 +1,10 @@
 [package]
 name = "ferge-bench"
-description = "Benchmark harness that checks Ferge against its performance budgets."
+description = "Benchmark harness that checks ferge against its performance budgets."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 publish.workspace = true
 

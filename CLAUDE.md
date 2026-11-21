@@ -69,6 +69,11 @@ real Secret Service / Keychain.
 - For GPUI API questions read the sources in `~/.cargo/registry/src/*/gpui-pre-0.3.12` and
   `~/.cargo/registry/src/*/gpui-component-0.10.0` instead of guessing.
 - Commit messages and authorship never mention AI tools.
+- Commit subjects follow Conventional Commits: `type(scope): lowercase imperative summary`.
+  Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`. Scopes:
+  `core`, `sftp`, `transfer`, `library`, `secrets`, `settings`, `preview`, `app`, `bench`,
+  `testserver`; a change spanning several takes the one most of it is in, and repository-wide
+  changes go without a scope. The body explains what changed and why, in full sentences.
 - The name is always written in lowercase: "ferge", also at the start of a sentence and in
   window titles. The app ID is `com.wirecurl.ferge`. Licensed GPL-3.0-or-later.
 - Look and feel come only from `crates/ferge-app/src/style.rs`, the design system:

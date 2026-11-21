@@ -79,9 +79,10 @@ ferry -F ./ssh_config myserver          # use another SSH client configuration
 | Key (Linux) | Key (macOS) | Action |
 |---|---|---|
 | ↑ ↓ PgUp PgDn Home End | same | move the selection |
-| Shift+↑ / Shift+↓, Shift-click, Ctrl-click, Ctrl+A | Shift+↑ / ↓, ⇧-click, ⌘-click, ⌘A | select several items |
-| Enter, Alt+↓ | Enter, ⌘↓ | open folder |
-| Backspace, Alt+↑ | Backspace, ⌘↑ | parent folder (Backspace edits the filter while one is active) |
+| Shift with ↑ ↓ PgUp PgDn Home End, Shift-click, Ctrl-click, Ctrl+A | same with Shift, ⇧-click, ⌘-click, ⌘A | select several items |
+| Insert, Ctrl+Space | Insert | mark or unmark the item and move down |
+| Enter, →, Alt+↓ | Enter, →, ⌘↓ | open folder; on a file: preview |
+| Backspace, ←, Alt+↑ | Backspace, ←, ⌘↑ | parent folder (Backspace edits the filter while one is active) |
 | Alt+← / Alt+→ | ⌘[ / ⌘] | back / forward |
 | any character, Ctrl+F | same, ⌘F | filter the folder; Esc clears |
 | Ctrl+1 / 2 / 3 | ⌘1 / 2 / 3 | sort by name / size / date, again to reverse |
@@ -102,6 +103,7 @@ ferry -F ./ssh_config myserver          # use another SSH client configuration
 | Ctrl+\\ | ⌘\\ | one or two file browsers |
 | Ctrl+J | ⌘J | show or hide transfers |
 | Ctrl+T / Ctrl+W | ⌘T / ⌘W | new tab / close tab |
+| Alt+1 … Alt+8, Alt+9 | ⌥1 … ⌥8, ⌥9 | go to that tab, to the last tab |
 | Ctrl+Tab, Ctrl+PgDn / Ctrl+Shift+Tab, Ctrl+PgUp | Ctrl+Tab, ⌘⇧] / Ctrl+Shift+Tab, ⌘⇧[ | next / previous tab |
 | Ctrl+K | ⌘K | command palette: commands, servers, tabs and the files of open folders |
 | Space | Space | preview the selected file (while no filter is typed) |

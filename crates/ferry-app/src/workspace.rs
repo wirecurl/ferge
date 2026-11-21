@@ -63,6 +63,23 @@ gpui::actions!(
     ]
 );
 
+gpui::actions!(
+    workspace,
+    [
+        /// Switches to the tab with this number.
+        ActivateTab1,
+        ActivateTab2,
+        ActivateTab3,
+        ActivateTab4,
+        ActivateTab5,
+        ActivateTab6,
+        ActivateTab7,
+        ActivateTab8,
+        /// Switches to the last tab.
+        ActivateLastTab,
+    ]
+);
+
 /// The commands of the palette, for tests elsewhere.
 #[cfg(test)]
 pub(crate) fn palette_commands() -> Vec<palette::Command> {
@@ -92,6 +109,15 @@ pub(crate) fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new(primary!("i"), ToggleInspector, context),
         gpui::KeyBinding::new(primary!("f"), FocusSearch, context),
         gpui::KeyBinding::new(primary!("k"), TogglePalette, context),
+        gpui::KeyBinding::new("alt-1", ActivateTab1, context),
+        gpui::KeyBinding::new("alt-2", ActivateTab2, context),
+        gpui::KeyBinding::new("alt-3", ActivateTab3, context),
+        gpui::KeyBinding::new("alt-4", ActivateTab4, context),
+        gpui::KeyBinding::new("alt-5", ActivateTab5, context),
+        gpui::KeyBinding::new("alt-6", ActivateTab6, context),
+        gpui::KeyBinding::new("alt-7", ActivateTab7, context),
+        gpui::KeyBinding::new("alt-8", ActivateTab8, context),
+        gpui::KeyBinding::new("alt-9", ActivateLastTab, context),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -786,6 +812,34 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_copy_to_other_pane))
             .on_action(cx.listener(Self::on_preview))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(
+                cx.listener(|this, _: &ActivateTab1, window, cx| this.activate(0, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab2, window, cx| this.activate(1, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab3, window, cx| this.activate(2, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab4, window, cx| this.activate(3, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab5, window, cx| this.activate(4, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab6, window, cx| this.activate(5, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab7, window, cx| this.activate(6, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ActivateTab8, window, cx| this.activate(7, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ActivateLastTab, window, cx| {
+                let last = this.tabs.len().saturating_sub(1);
+                this.activate(last, window, cx);
+            }))
             .on_action(cx.listener(Self::on_clear_filter))
             .bg(background)
             .text_color(foreground)

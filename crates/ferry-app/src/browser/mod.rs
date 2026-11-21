@@ -970,10 +970,78 @@ impl FileBrowser {
         }
     }
 
-    fn on_open(&mut self, _: &actions::Open, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = self.selected {
-            self.open_index(index, cx);
+    /// Opens a folder; a file is previewed.
+    fn on_open(&mut self, _: &actions::Open, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.selected else {
+            return;
+        };
+        if self
+            .view
+            .get(index)
+            .is_some_and(|entry| matches!(entry.kind(), EntryKind::File | EntryKind::Other))
+        {
+            window.dispatch_action(Box::new(actions::Preview), cx);
+            return;
         }
+        self.open_index(index, cx);
+    }
+
+    fn on_select_first_extend(
+        &mut self,
+        _: &actions::SelectFirstExtend,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.view.is_empty() {
+            self.select_range(0, cx);
+        }
+    }
+
+    fn on_select_last_extend(
+        &mut self,
+        _: &actions::SelectLastExtend,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(last) = self.view.len().checked_sub(1) {
+            self.select_range(last, cx);
+        }
+    }
+
+    fn on_page_up_extend(
+        &mut self,
+        _: &actions::SelectPageUpExtend,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_selection(-self.page_rows(window), cx);
+    }
+
+    fn on_page_down_extend(
+        &mut self,
+        _: &actions::SelectPageDownExtend,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_selection(self.page_rows(window), cx);
+    }
+
+    /// Marks or unmarks the cursor row and moves on, to mark rows one by one
+    /// from the keyboard.
+    fn on_toggle_mark(&mut self, _: &actions::ToggleMark, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.selected else {
+            return;
+        };
+        let Some(name) = self.view.get(index).map(|entry| entry.name.clone()) else {
+            return;
+        };
+        if !self.marked.remove(&name) {
+            self.marked.insert(name);
+        }
+        self.anchor = Some(index);
+        let next = (index + 1).min(self.view.len().saturating_sub(1));
+        self.move_cursor(next, cx);
+        cx.notify();
     }
 
     fn on_go_to_parent(&mut self, _: &actions::GoToParent, _: &mut Window, cx: &mut Context<Self>) {

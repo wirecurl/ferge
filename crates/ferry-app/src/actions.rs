@@ -54,6 +54,13 @@ actions!(
         /// Extends the selection by one row up or down.
         SelectPreviousExtend,
         SelectNextExtend,
+        /// Extends the selection to the first or last row, or by a page.
+        SelectFirstExtend,
+        SelectLastExtend,
+        SelectPageUpExtend,
+        SelectPageDownExtend,
+        /// Marks or unmarks the row under the cursor and moves down.
+        ToggleMark,
         SelectAll,
         /// Remembers the selected items for pasting elsewhere.
         Copy,
@@ -112,6 +119,13 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", ClearFilter, context),
         KeyBinding::new("shift-up", SelectPreviousExtend, context),
         KeyBinding::new("shift-down", SelectNextExtend, context),
+        KeyBinding::new("shift-home", SelectFirstExtend, context),
+        KeyBinding::new("shift-end", SelectLastExtend, context),
+        KeyBinding::new("shift-pageup", SelectPageUpExtend, context),
+        KeyBinding::new("shift-pagedown", SelectPageDownExtend, context),
+        KeyBinding::new("left", GoToParent, context),
+        KeyBinding::new("right", Open, context),
+        KeyBinding::new("insert", ToggleMark, context),
         KeyBinding::new("f5", CopyToOtherPane, context),
         KeyBinding::new("tab", FocusOtherPane, context),
         KeyBinding::new("f2", Rename, context),
@@ -161,5 +175,6 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-c", CopyAddress, context),
         KeyBinding::new("ctrl-shift-r", CopyToOtherPane, context),
         KeyBinding::new("ctrl-h", ToggleHiddenFiles, context),
+        KeyBinding::new("ctrl-space", ToggleMark, context),
     ]);
 }

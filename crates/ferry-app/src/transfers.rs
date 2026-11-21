@@ -266,31 +266,20 @@ impl TransferPanel {
                                 snapshot.source_label, snapshot.target_label, snapshot.target_dir
                             ))),
                     )
-                    .children(state_icon)
-                    .child(buttons),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        div().flex_1().child(
-                            Progress::new(ElementId::NamedInteger(
-                                "progress".into(),
-                                id_number(id),
-                            ))
-                            .value(percent),
-                        ),
-                    )
                     .child(
                         div()
-                            .w(px(420.))
                             .flex_shrink_0()
                             .text_xs()
                             .text_color(muted)
-                            .text_right()
-                            .truncate()
                             .child(status),
-                    ),
+                    )
+                    .children(state_icon)
+                    .child(buttons),
+            )
+            // The bar spans the whole row so a finished transfer reads as full.
+            .child(
+                Progress::new(ElementId::NamedInteger("progress".into(), id_number(id)))
+                    .value(percent),
             )
             .children(error)
     }

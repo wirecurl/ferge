@@ -14,6 +14,7 @@ use gpui_component::checkbox::Checkbox;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::browser::FileBrowser;
+use crate::file_type::FileType;
 use crate::style::{self, TypeScale as _};
 use crate::{format, runtime};
 
@@ -102,14 +103,11 @@ impl Inspector {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = cx.theme();
-        let (muted, folder) = (theme.muted_foreground, theme.blue);
+        let muted = theme.muted_foreground;
         let path = browser.read(cx).path().join(&entry.name);
         let address = browser.read(cx).address_of(&path);
-        let (icon, color) = match entry.kind() {
-            EntryKind::Directory => (IconName::Folder, folder),
-            EntryKind::Symlink => (IconName::ExternalLink, muted),
-            _ => (IconName::File, muted),
-        };
+        let file_type = FileType::of(entry.name.as_str(), entry.kind());
+        let (icon, color) = (file_type.icon(), file_type.color(cx.theme()));
         let fact = |index: usize, label: &'static str, value: SharedString| {
             let row = h_flex()
                 .px_3()
@@ -154,11 +152,7 @@ impl Inspector {
             )
             .child(
                 style::group(cx)
-                    .child(fact(
-                        0,
-                        "Kind",
-                        format::kind(entry.name.as_str(), entry.kind()).into(),
-                    ))
+                    .child(fact(0, "Kind", file_type.label().into()))
                     .child(fact(1, "Size", size))
                     .child(fact(
                         2,

@@ -83,10 +83,9 @@ impl Workspace {
             .children(self.render_narrow_switch(window, cx))
             .child(div().flex_1().min_w_2())
             .child(
-                div().w(rems(15.)).flex_shrink_1().min_w(rems(8.)).child(
+                div().w(rems(18.)).flex_shrink_1().min_w(rems(8.)).child(
                     Input::new(&self.filter)
-                        .small()
-                        .prefix(Icon::new(IconName::Search).size_3p5())
+                        .prefix(Icon::new(IconName::Search).size_4())
                         .cleanable(true),
                 ),
             )
@@ -168,7 +167,7 @@ impl Workspace {
                 });
                 h_flex()
                     .id(ElementId::NamedInteger("tab".into(), index as u64))
-                    .h(rems(1.75))
+                    .h(rems(2.))
                     .pl_2()
                     // The close button brings its own padding.
                     .map(|this| if closable { this.pr_0p5() } else { this.pr_2() })
@@ -176,7 +175,7 @@ impl Workspace {
                     .min_w_0()
                     .rounded(style::RADIUS)
                     .cursor_pointer()
-                    .text_small()
+                    .text_body()
                     .map(|this| {
                         if active {
                             this.bg(raised).text_color(foreground).shadow_xs()
@@ -187,7 +186,7 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.activate(index, window, cx);
                     }))
-                    .child(Icon::new(icon).size_3p5().flex_shrink_0())
+                    .child(Icon::new(icon).size_4().flex_shrink_0())
                     .child(div().max_w(rems(11.)).truncate().child(title))
                     .children(close)
             })
@@ -225,7 +224,6 @@ impl Workspace {
         Some(
             style::track(cx).child(
                 ButtonGroup::new("pane-switch")
-                    .small()
                     .ghost()
                     .children(titles.into_iter().enumerate().map(|(index, title)| {
                         Button::new(("pane", index))
@@ -267,5 +265,8 @@ impl Workspace {
 
 /// An icon button inside a track.
 fn tool(id: &'static str, icon: IconName, tooltip: &'static str) -> Button {
-    Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
+    Button::new(id)
+        .ghost()
+        .icon(Icon::new(icon).size_4())
+        .tooltip(tooltip)
 }

@@ -19,7 +19,7 @@ pub(crate) const GROUP_RADIUS: Pixels = px(10.);
 /// Height of one row in the file list.
 pub(crate) const ROW_HEIGHT: Rems = rems(2.);
 /// Height of the toolbar.
-pub(crate) const TOOLBAR_HEIGHT: Rems = rems(3.);
+pub(crate) const TOOLBAR_HEIGHT: Rems = rems(3.5);
 /// Height of a pane header; both panes line up.
 pub(crate) const HEADER_HEIGHT: Rems = rems(2.5);
 

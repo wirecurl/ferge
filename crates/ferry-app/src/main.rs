@@ -2,9 +2,11 @@
 
 mod actions;
 mod appearance;
+mod assets;
 mod bench;
 mod browser;
 mod editor;
+mod file_type;
 mod format;
 mod inspector;
 mod interaction;
@@ -61,7 +63,7 @@ fn main() -> ExitCode {
         .init();
 
     gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             if let Err(error) = runtime::init(cx) {
                 tracing::error!("failed to start the I/O runtime: {error}");

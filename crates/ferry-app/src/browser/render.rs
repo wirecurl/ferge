@@ -16,6 +16,7 @@ use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use super::{DraggedEntries, FileBrowser, FileClipboard, LoadState};
+use crate::file_type::FileType;
 use crate::style::{self, Palette as _, TypeScale as _};
 use crate::{actions, format};
 
@@ -198,7 +199,7 @@ impl FileBrowser {
             theme.inactive_selection()
         };
         let hover = theme.hover_fill();
-        let (muted, ring, folder) = (theme.muted_foreground, theme.list_active_border, theme.blue);
+        let (muted, ring) = (theme.muted_foreground, theme.list_active_border);
         let multiple = !self.marked.is_empty();
         let mono = theme.mono_font_family.clone();
         let this = cx.entity().downgrade();
@@ -207,11 +208,12 @@ impl FileBrowser {
                 let entry = self.view.get(index)?;
                 let cursor = self.selected == Some(index);
                 let marked = self.is_marked(&entry.name);
-                let (icon, icon_color, size) = match entry.kind() {
-                    EntryKind::Directory => (IconName::Folder, folder, String::new()),
-                    EntryKind::Symlink => (IconName::ExternalLink, muted, String::new()),
-                    EntryKind::File => (IconName::File, muted, format::size(entry.metadata.size)),
-                    EntryKind::Other => (IconName::FileText, muted, String::new()),
+                let file_type = FileType::of(entry.name.as_str(), entry.kind());
+                let icon_color = file_type.color(cx.theme());
+                let size = if entry.kind() == EntryKind::File {
+                    format::size(entry.metadata.size)
+                } else {
+                    String::new()
                 };
                 let dragged = DraggedEntries {
                     source: this.clone(),
@@ -268,7 +270,7 @@ impl FileBrowser {
                     })
                     .when(is_dir, |this| Self::accept_drops(this, dir_path, cx))
                     .child(
-                        Icon::new(icon)
+                        Icon::new(file_type.icon())
                             .size(ICON_WIDTH)
                             .flex_shrink_0()
                             .text_color(icon_color),
@@ -366,7 +368,7 @@ impl FileBrowser {
                     .text_small()
                     .truncate()
                     .text_color(muted)
-                    .child(format::kind(entry.name.as_str(), entry.kind())),
+                    .child(FileType::of(entry.name.as_str(), entry.kind()).label()),
             )
         })
         .when(self.options.show_permissions, |this| {

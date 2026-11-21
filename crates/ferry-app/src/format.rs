@@ -62,51 +62,6 @@ pub(crate) fn date(time: Option<SystemTime>) -> String {
     local.strftime("%Y-%m-%d %H:%M").to_string()
 }
 
-/// A short description of what a file is, from its kind and extension.
-pub(crate) fn kind(name: &str, kind: ferry_core::EntryKind) -> &'static str {
-    use ferry_core::EntryKind;
-    match kind {
-        EntryKind::Directory => return "Folder",
-        EntryKind::Symlink => return "Link",
-        EntryKind::Other => return "Special file",
-        EntryKind::File => {}
-    }
-    let lower = name.to_ascii_lowercase();
-    if [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"]
-        .iter()
-        .any(|suffix| lower.ends_with(suffix))
-    {
-        return "Archive";
-    }
-    let extension = match lower.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => extension,
-        _ => return "File",
-    };
-    match extension {
-        "pdf" => "PDF document",
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "tif" | "tiff" | "heic"
-        | "avif" | "ico" => "Image",
-        "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" => "Video",
-        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" => "Audio",
-        "zip" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "7z" | "rar" | "tar" => "Archive",
-        "txt" | "md" | "log" | "rst" | "csv" | "tsv" => "Text",
-        "json" | "yaml" | "yml" | "toml" | "xml" | "ini" | "conf" | "cfg" | "env" => {
-            "Configuration"
-        }
-        "html" | "htm" | "css" | "scss" => "Web page",
-        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "h" | "cpp" | "hpp" | "java"
-        | "kt" | "rb" | "php" | "sh" | "bash" | "zsh" | "fish" | "swift" | "lua" | "sql" => {
-            "Source code"
-        }
-        "doc" | "docx" | "odt" | "rtf" | "pages" => "Document",
-        "xls" | "xlsx" | "ods" | "numbers" => "Spreadsheet",
-        "ppt" | "pptx" | "odp" | "key" => "Presentation",
-        "iso" | "img" | "dmg" => "Disk image",
-        "deb" | "rpm" | "pkg" | "apk" | "appimage" => "Package",
-        _ => "File",
-    }
-}
-
 /// Permission bits as `rwxr-x---`, including setuid, setgid and sticky.
 pub(crate) fn permissions(mode: u32) -> String {
     let bit = |mask: u32, letter: char| if mode & mask != 0 { letter } else { '-' };
@@ -171,13 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn kinds_and_permissions() {
-        use ferry_core::EntryKind;
-        assert_eq!(kind("a.PDF", EntryKind::File), "PDF document");
-        assert_eq!(kind("backup.tar.gz", EntryKind::File), "Archive");
-        assert_eq!(kind(".bashrc", EntryKind::File), "File");
-        assert_eq!(kind("Makefile", EntryKind::File), "File");
-        assert_eq!(kind("x", EntryKind::Directory), "Folder");
+    fn permission_strings() {
         assert_eq!(permissions(0o755), "rwxr-xr-x");
         assert_eq!(permissions(0o640), "rw-r-----");
         assert_eq!(permissions(0o4755), "rwsr-xr-x");

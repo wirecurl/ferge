@@ -1,100 +1,163 @@
-//! Bridges the core's [`Interaction`] questions to dialogs on the UI thread.
+//! Answers the core's [`Interaction`] questions for one connection attempt:
+//! saved secrets first, then dialogs.
 //!
-//! The core awaits answers on tokio; the UI receives [`PromptRequest`]s over a
-//! runtime-agnostic channel and replies through a oneshot sender. A dropped
-//! reply (dialog closed, window gone) counts as "rejected" or "not available".
+//! Secrets the user asks to remember are only saved once the connection has
+//! succeeded ([`UiInteraction::commit`]), so a mistyped password never ends
+//! up in the keyring. A saved password the server rejects is replaced by the
+//! one entered instead, or forgotten if the user unticks "Remember".
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use ferry_core::interaction::{HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt};
-use futures::channel::{mpsc, oneshot};
+use ferry_core::interaction::{
+    Account, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt,
+};
+use ferry_core::secrets::SecretId;
 use secrecy::SecretString;
 
-/// A question for the user.
+use crate::prompts::Prompter;
+use crate::vault::Vault;
+
+/// A change to the saved secrets, applied after a successful login.
 #[derive(Debug)]
-pub(crate) enum PromptRequest {
-    HostKey {
-        prompt: HostKeyPrompt,
-        reply: oneshot::Sender<HostKeyDecision>,
-    },
-    Secret(SecretRequest),
+enum Change {
+    Save(SecretString),
+    Forget,
 }
 
-/// A request for a password, passphrase or one-time code.
-#[derive(Debug)]
-pub(crate) struct SecretRequest {
-    pub title: String,
-    pub message: String,
-    /// Whether the answer may be displayed while typing.
-    pub echo: bool,
-    pub reply: oneshot::Sender<Option<SecretString>>,
+#[derive(Debug, Default)]
+struct State {
+    /// Secrets handed out from the vault in this attempt.
+    used_saved: Vec<SecretId>,
+    pending: Vec<(SecretId, Change)>,
+    /// Keyboard-interactive password rounds answered so far.
+    keyboard_password_rounds: usize,
 }
 
-/// [`Interaction`] implementation that forwards every question to the UI.
-#[derive(Debug, Clone)]
+/// [`Interaction`] for one connection attempt.
+#[derive(Debug)]
 pub(crate) struct UiInteraction {
-    sender: mpsc::UnboundedSender<PromptRequest>,
-}
-
-/// Creates the interaction and the receiving end for the UI.
-pub(crate) fn channel() -> (UiInteraction, mpsc::UnboundedReceiver<PromptRequest>) {
-    let (sender, receiver) = mpsc::unbounded();
-    (UiInteraction { sender }, receiver)
+    prompter: Prompter,
+    vault: Arc<Vault>,
+    state: Mutex<State>,
 }
 
 impl UiInteraction {
-    async fn secret(&self, title: String, message: String, echo: bool) -> Option<SecretString> {
-        let (reply, answer) = oneshot::channel();
-        let request = PromptRequest::Secret(SecretRequest {
-            title,
-            message,
-            echo,
-            reply,
-        });
-        self.sender.unbounded_send(request).ok()?;
-        answer.await.ok().flatten()
+    pub(crate) fn new(prompter: Prompter, vault: Arc<Vault>) -> Self {
+        Self {
+            prompter,
+            vault,
+            state: Mutex::default(),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Applies the remembered and forgotten secrets. Call after the
+    /// connection succeeded; must run on the I/O runtime.
+    pub(crate) async fn commit(&self) {
+        let pending = std::mem::take(&mut self.state().pending);
+        for (id, change) in pending {
+            match change {
+                Change::Save(secret) => self.vault.save(id, secret, &self.prompter).await,
+                Change::Forget => self.vault.forget(id, &self.prompter).await,
+            }
+        }
+    }
+
+    /// Asks for a password or passphrase identified by `id`, preferring a
+    /// saved one on the first attempt.
+    async fn saved_or_asked(
+        &self,
+        id: SecretId,
+        retry: bool,
+        title: &str,
+        ask: &str,
+    ) -> Option<SecretString> {
+        if !retry && let Some(saved) = self.vault.lookup(&id, &self.prompter).await {
+            self.state().used_saved.push(id);
+            return Some(saved);
+        }
+        let saved_rejected = {
+            let mut state = self.state();
+            let position = state.used_saved.iter().position(|used| used == &id);
+            position
+                .map(|index| state.used_saved.remove(index))
+                .is_some()
+        };
+        let message = if saved_rejected {
+            format!("The saved {title} was not accepted. {ask}")
+        } else if retry {
+            format!("That did not work. {ask}")
+        } else {
+            ask.to_owned()
+        };
+        let answer = self
+            .prompter
+            .secret(capitalize(title), message, false, Some(saved_rejected))
+            .await?;
+        let mut state = self.state();
+        state.pending.retain(|(pending, _)| pending != &id);
+        if answer.remember {
+            state
+                .pending
+                .push((id, Change::Save(answer.secret.clone())));
+        } else if saved_rejected {
+            state.pending.push((id, Change::Forget));
+        }
+        Some(answer.secret)
     }
 }
 
 #[async_trait]
 impl Interaction for UiInteraction {
     async fn confirm_host_key(&self, prompt: HostKeyPrompt) -> HostKeyDecision {
-        let (reply, answer) = oneshot::channel();
-        if self
-            .sender
-            .unbounded_send(PromptRequest::HostKey { prompt, reply })
-            .is_err()
-        {
-            return HostKeyDecision::Reject;
-        }
-        answer.await.unwrap_or(HostKeyDecision::Reject)
+        self.prompter.host_key(prompt).await
     }
 
     async fn key_passphrase(&self, key_file: &Path, retry: bool) -> Option<SecretString> {
-        let message = if retry {
-            format!("Wrong passphrase. Try again for {}", key_file.display())
-        } else {
-            format!("Enter the passphrase for {}", key_file.display())
-        };
-        self.secret("Key passphrase".into(), message, false).await
+        let ask = format!("Enter the passphrase of {}.", key_file.display());
+        self.saved_or_asked(
+            SecretId::KeyPassphrase(key_file.to_path_buf()),
+            retry,
+            "key passphrase",
+            &ask,
+        )
+        .await
     }
 
-    async fn password(&self, user: &str, host: &str, retry: bool) -> Option<SecretString> {
-        let message = if retry {
-            format!("Wrong password. Try again for {user}@{host}")
-        } else {
-            format!("Password for {user}@{host}")
-        };
-        self.secret("Password".into(), message, false).await
+    async fn password(&self, account: &Account, retry: bool) -> Option<SecretString> {
+        let ask = format!("Enter the password for {account}.");
+        self.saved_or_asked(account.password_id(), retry, "password", &ask)
+            .await
     }
 
     async fn keyboard_interactive(
         &self,
+        account: &Account,
         name: &str,
         instructions: &str,
         prompts: &[KeyboardPrompt],
     ) -> Option<Vec<SecretString>> {
+        // A lone hidden "Password:" prompt is a password in disguise; treat it
+        // like one so it can be saved and filled in.
+        if let [prompt] = prompts
+            && !prompt.echo
+            && prompt.text.to_lowercase().contains("password")
+        {
+            let retry = {
+                let mut state = self.state();
+                state.keyboard_password_rounds += 1;
+                state.keyboard_password_rounds > 1
+            };
+            return self
+                .password(account, retry)
+                .await
+                .map(|secret| vec![secret]);
+        }
         let title = if name.is_empty() {
             "Authentication".to_owned()
         } else {
@@ -107,8 +170,109 @@ impl Interaction for UiInteraction {
             } else {
                 format!("{instructions}\n{}", prompt.text)
             };
-            answers.push(self.secret(title.clone(), message, prompt.echo).await?);
+            let answer = self
+                .prompter
+                .secret(title.clone(), message, prompt.echo, None)
+                .await?;
+            answers.push(answer.secret);
         }
         Some(answers)
+    }
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt as _;
+    use secrecy::ExposeSecret as _;
+
+    use super::*;
+    use crate::prompts::{self, PromptRequest, SecretAnswer};
+
+    fn account() -> Account {
+        Account {
+            user: "me".into(),
+            host: "server".into(),
+            port: 22,
+        }
+    }
+
+    /// Answers every secret prompt with `answer`, remembering as given.
+    fn answering(
+        answer: &'static str,
+        remember: bool,
+    ) -> (Prompter, tokio::task::JoinHandle<Vec<bool>>) {
+        let (sender, mut receiver) = prompts::channel();
+        let answers = tokio::spawn(async move {
+            let mut asked = Vec::new();
+            while let Some(prompt) = receiver.next().await {
+                if let PromptRequest::Secret(request) = prompt.request {
+                    asked.push(request.remember.unwrap_or(false));
+                    let _ = request.reply.send(Some(SecretAnswer {
+                        secret: SecretString::from(answer),
+                        remember,
+                    }));
+                }
+            }
+            asked
+        });
+        (Prompter::new(sender, None), answers)
+    }
+
+    #[tokio::test]
+    async fn remembers_only_after_commit_and_prefers_saved_secrets() {
+        let vault = Vault::ephemeral();
+        let (prompter, prompts) = answering("typed", true);
+        let first = UiInteraction::new(prompter.clone(), Arc::clone(&vault));
+        let typed = first.password(&account(), false).await.unwrap();
+        assert_eq!(typed.expose_secret(), "typed");
+        assert!(
+            vault
+                .lookup(&account().password_id(), &prompter)
+                .await
+                .is_none()
+        );
+        first.commit().await;
+
+        let second = UiInteraction::new(prompter.clone(), Arc::clone(&vault));
+        let saved = second.password(&account(), false).await.unwrap();
+        assert_eq!(saved.expose_secret(), "typed");
+        drop((first, second, prompter));
+        // Only the first attempt asked; "Remember" started unticked.
+        assert_eq!(prompts.await.unwrap(), [false]);
+    }
+
+    #[tokio::test]
+    async fn forgets_a_rejected_saved_password_unless_remembered() {
+        let vault = Vault::ephemeral();
+        let (prompter, prompts) = answering("new", false);
+        vault
+            .save(
+                account().password_id(),
+                SecretString::from("old"),
+                &prompter,
+            )
+            .await;
+        let interaction = UiInteraction::new(prompter.clone(), Arc::clone(&vault));
+        let saved = interaction.password(&account(), false).await.unwrap();
+        assert_eq!(saved.expose_secret(), "old");
+        // The server rejected it; the retry asks with "Remember" ticked.
+        let typed = interaction.password(&account(), true).await.unwrap();
+        assert_eq!(typed.expose_secret(), "new");
+        interaction.commit().await;
+        assert!(
+            vault
+                .lookup(&account().password_id(), &prompter)
+                .await
+                .is_none()
+        );
+        drop((interaction, prompter));
+        assert_eq!(prompts.await.unwrap(), [true]);
     }
 }

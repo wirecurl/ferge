@@ -3,9 +3,14 @@
 mod actions;
 mod bench;
 mod browser;
+mod editor;
+mod fonts;
 mod format;
 mod interaction;
+mod prompts;
 mod runtime;
+mod session;
+mod vault;
 mod workspace;
 
 use std::path::PathBuf;
@@ -64,8 +69,15 @@ fn main() -> ExitCode {
             workspace::bind_keys(cx);
             cx.background_spawn(async { format::load_time_zone() })
                 .detach();
+            fonts::detect(cx);
 
-            match open_main_window(cli.destination, cli.ssh_config, cx) {
+            let options = workspace::Options {
+                initial: cli.destination,
+                ssh_config: cli.ssh_config,
+                // Benchmarks must neither read nor change the user's data.
+                ephemeral: cli.bench.is_some(),
+            };
+            match open_main_window(options, cx) {
                 Ok((window, workspace)) => {
                     if let Some(scenario) = cli.bench {
                         bench::start(scenario, window, workspace, started, cx);
@@ -81,12 +93,11 @@ fn main() -> ExitCode {
 }
 
 fn open_main_window(
-    destination: Option<String>,
-    ssh_config: Option<PathBuf>,
+    options: workspace::Options,
     cx: &mut App,
 ) -> anyhow::Result<(WindowHandle<Root>, Entity<Workspace>)> {
-    let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
-    let options = WindowOptions {
+    let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+    let window_options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
             title: Some(APP_NAME.into()),
@@ -100,9 +111,9 @@ fn open_main_window(
         ..WindowOptions::default()
     };
     let mut workspace = None;
-    let window = cx.open_window(options, |window, cx| {
+    let window = cx.open_window(window_options, |window, cx| {
         tracing::debug!(decorations = ?window.window_decorations(), "main window opened");
-        let view = cx.new(|cx| Workspace::new(destination, ssh_config, window, cx));
+        let view = cx.new(|cx| Workspace::new(options, window, cx));
         workspace = Some(view.clone());
         cx.new(|cx| Root::new(view, window, cx))
     })?;

@@ -4,7 +4,8 @@ PLAN.md is the binding source for technology, architecture and performance budge
 
 ## Layout
 
-- `crates/ferry-core` – UI-independent core (remote backends, listings). Never depends on GPUI.
+- `crates/ferry-core` – UI-independent core: remote backends, listings, `library` (SQLite:
+  favorites, folders, history), `secrets` (keyring / encrypted file). Never depends on GPUI.
 - `crates/ferry-app` – GPUI desktop application (binary `ferry`).
 - `crates/ferry-bench` – benchmark harness for the PLAN.md budgets.
 
@@ -46,6 +47,12 @@ prints `ferry-bench:` markers to stderr; `ZED_MEASUREMENTS=1` makes GPUI print t
 every frame, which the harness attributes to the preceding input. Frame budget: 8.33 ms (120 Hz).
 
 Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferry-test/home/ferry/many`.
+
+To try favorites and saved passwords without touching your own data, point the data directory
+elsewhere and force the encrypted-file store:
+`XDG_DATA_HOME=/tmp/ferry-data FERRY_SECRET_STORE=file cargo run`. Benchmark runs (`--bench`)
+keep everything in memory. `cargo test -p ferry-core --test keyring -- --ignored` exercises the
+real Secret Service / Keychain.
 
 ## Rules
 

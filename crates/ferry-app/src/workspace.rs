@@ -1,136 +1,217 @@
-//! The main window: address bar, file browser and connection dialogs.
+//! The main window: tabs, the sidebar with favorites, and dialogs.
 
-use std::collections::VecDeque;
+mod dialogs;
+mod sidebar;
+
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ferry_core::interaction::HostKeyDecision;
-use ferry_core::remote::local::LocalRemote;
-use ferry_core::remote::sftp::{SftpRemote, SshConfigSource, configured_hosts};
-use ferry_core::{Destination, Remote, RemotePath};
+use ferry_core::Destination;
+use ferry_core::library::{
+    BookmarkDraft, BookmarkId, FolderId, Library, LibraryError, LibrarySnapshot,
+};
+use ferry_core::remote::sftp::{SshConfigSource, configured_hosts};
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle, Focusable as _,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Task, Window, div, px,
+    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
+    div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, h_flex, v_flex};
-use secrecy::SecretString;
+use gpui_component::tab::{Tab, TabBar};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Theme, h_flex, v_flex,
+};
 
-use crate::browser::{FileBrowser, Navigated};
-use crate::interaction::{self, PromptRequest, SecretRequest, UiInteraction};
+use self::dialogs::{ActivePrompt, Dialog};
+use crate::browser::FileBrowser;
+use crate::prompts::{self, PromptRequest, SessionId, TaggedPrompt};
 use crate::runtime;
-
-/// A connection being established, resolving to the remote and its start directory.
-type PendingConnection = tokio::task::JoinHandle<ferry_core::Result<(Arc<dyn Remote>, RemotePath)>>;
-
-/// Key context of the dialog overlay.
-const PROMPT_CONTEXT: &str = "FerryPrompt";
+use crate::session::{ConnectRequest, Session, SessionContext, SessionEvent};
+use crate::vault::Vault;
 
 /// Key context of the whole window.
 const WORKSPACE_CONTEXT: &str = "Workspace";
 
-gpui::actions!(ferry_prompt, [CancelPrompt]);
-gpui::actions!(workspace, [FocusAddress]);
+/// Below this window width the sidebar hides itself.
+const SIDEBAR_MIN_WINDOW_WIDTH: gpui::Pixels = px(720.);
+
+gpui::actions!(
+    workspace,
+    [
+        FocusAddress,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        ToggleSidebar,
+        SaveFavorite,
+    ]
+);
 
 /// Registers the key bindings of this module.
-pub(crate) fn bind_keys(cx: &mut gpui::App) {
-    let focus_address = if cfg!(target_os = "macos") {
-        "cmd-l"
-    } else {
-        "ctrl-l"
-    };
+pub(crate) fn bind_keys(cx: &mut App) {
+    /// `cmd-…` on macOS, `ctrl-…` elsewhere.
+    macro_rules! primary {
+        ($key:literal) => {
+            if cfg!(target_os = "macos") {
+                concat!("cmd-", $key)
+            } else {
+                concat!("ctrl-", $key)
+            }
+        };
+    }
+    let context = Some(WORKSPACE_CONTEXT);
     cx.bind_keys([
-        gpui::KeyBinding::new("escape", CancelPrompt, Some(PROMPT_CONTEXT)),
-        gpui::KeyBinding::new(focus_address, FocusAddress, Some(WORKSPACE_CONTEXT)),
+        gpui::KeyBinding::new(primary!("l"), FocusAddress, context),
+        gpui::KeyBinding::new(primary!("t"), NewTab, context),
+        gpui::KeyBinding::new(primary!("w"), CloseTab, context),
+        gpui::KeyBinding::new("ctrl-tab", NextTab, context),
+        gpui::KeyBinding::new("ctrl-shift-tab", PreviousTab, context),
+        gpui::KeyBinding::new(primary!("b"), ToggleSidebar, context),
+        gpui::KeyBinding::new(primary!("d"), SaveFavorite, context),
     ]);
+    #[cfg(target_os = "macos")]
+    cx.bind_keys([
+        gpui::KeyBinding::new("cmd-shift-]", NextTab, context),
+        gpui::KeyBinding::new("cmd-shift-[", PreviousTab, context),
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        gpui::KeyBinding::new("ctrl-pagedown", NextTab, context),
+        gpui::KeyBinding::new("ctrl-pageup", PreviousTab, context),
+    ]);
+    dialogs::bind_keys(cx);
 }
 
-enum ConnectState {
-    Idle,
-    Connecting(String),
-    Failed(String),
-}
-
-/// A dialog that is currently shown.
-enum ActivePrompt {
-    HostKey {
-        prompt: ferry_core::interaction::HostKeyPrompt,
-        reply: futures::channel::oneshot::Sender<HostKeyDecision>,
-    },
-    Secret {
-        request: SecretRequest,
-        input: Entity<InputState>,
-        _submit: Subscription,
-    },
+/// How the window was started.
+#[derive(Debug, Default)]
+pub(crate) struct Options {
+    /// Connect the first tab to this address.
+    pub initial: Option<String>,
+    /// `-F` from the command line.
+    pub ssh_config: Option<PathBuf>,
+    /// Keep favorites, history and passwords in memory only (benchmarks).
+    pub ephemeral: bool,
 }
 
 pub(crate) struct Workspace {
-    address: Entity<InputState>,
-    browser: Option<Entity<FileBrowser>>,
-    connect: ConnectState,
-    connect_task: Option<Task<()>>,
-    /// Aborts the connection attempt on the runtime; dropping the UI task alone
-    /// would leave it running (and possibly prompting).
-    connect_abort: Option<tokio::task::AbortHandle>,
-    interaction: UiInteraction,
-    /// `-F` from the command line; `None` means `~/.ssh/config`.
-    ssh_config: Option<PathBuf>,
-    queued_prompts: VecDeque<PromptRequest>,
+    context: SessionContext,
+    sessions: Vec<Entity<Session>>,
+    session_events: Vec<Subscription>,
+    active: usize,
+    next_session: u64,
+    library: Option<Arc<Library>>,
+    snapshot: Arc<LibrarySnapshot>,
+    /// Host aliases from the SSH configuration.
+    ssh_hosts: Vec<SharedString>,
+    collapsed: HashSet<FolderId>,
+    sidebar_open: bool,
+    queued_prompts: VecDeque<TaggedPrompt>,
     prompt: Option<ActivePrompt>,
+    dialog: Option<Dialog>,
     prompt_focus: FocusHandle,
-    _prompt_listener: Task<()>,
-    _address_submit: Subscription,
-    /// Host aliases from the SSH configuration, shown on the start screen.
-    hosts: Vec<SharedString>,
-    _hosts_lookup: Task<()>,
-    /// Follows the system's light/dark preference.
+    /// Background work owned by the window; dropped with it.
+    tasks: Vec<Task<()>>,
     _appearance: Subscription,
-    /// Keeps the window title in sync with the browser.
-    browser_title: Option<Subscription>,
 }
 
 impl Workspace {
-    pub(crate) fn new(
-        initial: Option<String>,
-        ssh_config: Option<PathBuf>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let autoconnect = initial.is_some();
-        let address = cx.new(|cx| {
-            let state = InputState::new(window, cx)
-                .placeholder("sftp://user@host:port/path, an ssh_config alias, or a local path");
-            match initial {
-                Some(text) => state.default_value(text),
-                None => state,
-            }
-        });
-        let submit = cx.subscribe_in(
-            &address,
-            window,
-            |this, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.connect(window, cx);
-                }
-            },
-        );
-
+    pub(crate) fn new(options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Theme::sync_system_appearance(Some(window), cx);
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
 
-        let source = ssh_config
+        let (sender, mut receiver) = prompts::channel();
+        let prompt_listener = cx.spawn_in(window, async move |this, cx| {
+            while let Some(prompt) = receiver.next().await {
+                let delivered = this.update_in(cx, |workspace, window, cx| {
+                    workspace.receive_prompt(prompt, window, cx);
+                });
+                if delivered.is_err() {
+                    break;
+                }
+            }
+        });
+        let vault = if options.ephemeral {
+            Vault::ephemeral()
+        } else {
+            Vault::new()
+        };
+        // Open the password store early and off the UI thread, so the first
+        // saved password is not delayed by D-Bus.
+        let warm_up = Arc::clone(&vault);
+        runtime::spawn(cx, async move {
+            warm_up.store().await;
+        });
+
+        let mut workspace = Self {
+            context: SessionContext {
+                prompts: sender,
+                vault,
+                ssh_config: options.ssh_config,
+            },
+            sessions: Vec::new(),
+            session_events: Vec::new(),
+            active: 0,
+            next_session: 0,
+            library: None,
+            snapshot: Arc::default(),
+            ssh_hosts: Vec::new(),
+            collapsed: HashSet::new(),
+            sidebar_open: true,
+            queued_prompts: VecDeque::new(),
+            prompt: None,
+            dialog: None,
+            prompt_focus: cx.focus_handle(),
+            tasks: Vec::new(),
+            _appearance: appearance,
+        };
+        workspace.tasks = vec![
+            prompt_listener,
+            workspace.load_ssh_hosts(cx),
+            Self::load_library(options.ephemeral, cx),
+        ];
+
+        let session = workspace.add_session(window, cx);
+        session.update(cx, |session, cx| match options.initial {
+            Some(address) => match Destination::parse(&address) {
+                Ok(destination) => session.connect(ConnectRequest::to(destination), window, cx),
+                Err(error) => {
+                    tracing::error!(%address, %error, "invalid destination");
+                    session.focus(window, cx);
+                }
+            },
+            None => session.focus(window, cx),
+        });
+        workspace
+    }
+
+    /// The browser of the active tab, if it is connected (benchmarks).
+    pub(crate) fn active_browser(&self, cx: &App) -> Option<Entity<FileBrowser>> {
+        self.active_session()?.read(cx).browser().cloned()
+    }
+
+    fn active_session(&self) -> Option<&Entity<Session>> {
+        self.sessions.get(self.active)
+    }
+
+    // ---------------------------------------------------------------------
+    // Background loading
+
+    fn load_ssh_hosts(&self, cx: &mut Context<Self>) -> Task<()> {
+        let source = self
+            .context
+            .ssh_config
             .clone()
             .map_or(SshConfigSource::User, SshConfigSource::File);
         let lookup = runtime::spawn(cx, async move {
             tokio::task::spawn_blocking(move || configured_hosts(&source)).await
         });
-        let hosts_lookup = cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let hosts = match lookup.await {
                 Ok(Ok(Ok(hosts))) => hosts,
                 Ok(Ok(Err(error))) => {
@@ -140,555 +221,385 @@ impl Workspace {
                 _ => Vec::new(),
             };
             let _ = this.update(cx, |workspace, cx| {
-                workspace.hosts = hosts.into_iter().map(SharedString::from).collect();
+                workspace.ssh_hosts = hosts.into_iter().map(SharedString::from).collect();
                 cx.notify();
             });
-        });
-
-        let (interaction, mut requests) = interaction::channel();
-        let prompt_listener = cx.spawn_in(window, async move |this, cx| {
-            while let Some(request) = requests.next().await {
-                let delivered = this.update_in(cx, |workspace, window, cx| {
-                    workspace.queued_prompts.push_back(request);
-                    workspace.show_next_prompt(window, cx);
-                });
-                if delivered.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let mut workspace = Self {
-            address,
-            browser: None,
-            connect: ConnectState::Idle,
-            connect_task: None,
-            connect_abort: None,
-            interaction,
-            ssh_config,
-            queued_prompts: VecDeque::new(),
-            prompt: None,
-            prompt_focus: cx.focus_handle(),
-            _prompt_listener: prompt_listener,
-            _address_submit: submit,
-            hosts: Vec::new(),
-            _hosts_lookup: hosts_lookup,
-            _appearance: appearance,
-            browser_title: None,
-        };
-        if autoconnect {
-            workspace.connect(window, cx);
-        } else {
-            workspace
-                .address
-                .update(cx, |input, cx| input.focus(window, cx));
-        }
-        workspace
+        })
     }
 
-    /// The browser, if connected. Used by the benchmark driver.
-    pub(crate) fn browser(&self) -> Option<&Entity<FileBrowser>> {
-        self.browser.as_ref()
-    }
-
-    fn connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.address.read(cx).value().to_string();
-        let destination = match Destination::parse(&text) {
-            Ok(destination) => destination,
-            Err(error) => {
-                self.connect = ConnectState::Failed(error.to_string());
-                cx.notify();
-                return;
-            }
-        };
-        if let Some(previous) = self.connect_abort.take() {
-            previous.abort();
-            // Its questions can no longer be answered; dropping them rejects.
-            self.prompt = None;
-            self.queued_prompts.clear();
-        }
-        let (label, connecting) = self.start_connection(destination, cx);
-        self.connect_abort = Some(connecting.abort_handle());
-        self.connect = ConnectState::Connecting(label);
-        self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = match connecting.await {
-                Ok(result) => result.map_err(|error| error.to_string()),
-                Err(error) => Err(format!("connection task failed: {error}")),
+    fn load_library(ephemeral: bool, cx: &mut Context<Self>) -> Task<()> {
+        let opening = runtime::spawn(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                let opened = match Library::default_path() {
+                    Some(path) if !ephemeral => Library::open(&path),
+                    _ => Library::open_in_memory(),
+                };
+                let (library, warning) = match opened {
+                    Ok(library) => (library, None),
+                    // Keep working without persistence rather than not at all.
+                    Err(error) => (Library::open_in_memory()?, Some(error.to_string())),
+                };
+                let snapshot = library.snapshot()?;
+                Ok::<_, LibraryError>((Arc::new(library), snapshot, warning))
+            })
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let opened = match opening.await {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) | Err(error) => Err(LibraryError::Invalid(error.to_string())),
             };
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                workspace.connect_task = None;
-                workspace.connect_abort = None;
-                match result {
-                    Ok((remote, path)) => workspace.show_browser(remote, path, window, cx),
-                    Err(message) => {
-                        workspace.connect = ConnectState::Failed(message);
-                        workspace
-                            .address
-                            .update(cx, |input, cx| input.focus(window, cx));
+            let _ = this.update(cx, |workspace, cx| match opened {
+                Ok((library, snapshot, warning)) => {
+                    workspace.library = Some(library);
+                    workspace.set_snapshot(snapshot, cx);
+                    if let Some(warning) = warning {
+                        workspace.notice(format!(
+                            "Favorites could not be opened and will not be saved: {warning}"
+                        ));
                     }
                 }
-                cx.notify();
+                Err(error) => tracing::error!(%error, "the library is unavailable"),
             });
-        }));
+        })
+    }
+
+    /// Runs `change` against the library on the runtime, then reloads it.
+    fn change_library(
+        &mut self,
+        change: impl FnOnce(&Library) -> Result<(), LibraryError> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(library) = self.library.clone() else {
+            self.notice("Favorites are still loading. Try again in a moment.".into());
+            return;
+        };
+        let changing = runtime::spawn(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                let result = change(&library).map_err(|error| error.to_string());
+                (result, library.snapshot())
+            })
+            .await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok((result, snapshot))) = changing.await else {
+                return;
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                match snapshot {
+                    Ok(snapshot) => workspace.set_snapshot(snapshot, cx),
+                    Err(error) => tracing::warn!(%error, "reloading the library failed"),
+                }
+                if let Err(error) = result {
+                    workspace.notice(error);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn set_snapshot(&mut self, snapshot: LibrarySnapshot, cx: &mut Context<Self>) {
+        self.snapshot = Arc::new(snapshot);
+        for session in &self.sessions {
+            let snapshot = Arc::clone(&self.snapshot);
+            session.update(cx, |session, cx| session.set_library(snapshot, cx));
+        }
         cx.notify();
     }
 
-    /// Starts connecting on the runtime and returns a label for the UI plus the
-    /// pending connection with its start directory.
-    fn start_connection(
-        &self,
-        destination: Destination,
-        cx: &mut Context<Self>,
-    ) -> (String, PendingConnection) {
-        match destination {
-            Destination::Local { path } => (
-                "local files".into(),
-                runtime::spawn(cx, async move {
-                    let remote: Arc<dyn Remote> = Arc::new(LocalRemote::new());
-                    let start = match path {
-                        Some(path) => path,
-                        None => remote.home_dir().await?,
-                    };
-                    Ok((remote, start))
-                }),
-            ),
-            Destination::Sftp(target) => {
-                let mut options = target.options();
-                let path = target.path;
-                if let Some(file) = &self.ssh_config {
-                    options.ssh_config = SshConfigSource::File(file.clone());
-                }
-                let label = options.host.clone();
-                let interaction = Arc::new(self.interaction.clone());
-                (
-                    label,
-                    runtime::spawn(cx, async move {
-                        let sftp = SftpRemote::connect(options, interaction).await?;
-                        let remote: Arc<dyn Remote> = Arc::new(sftp);
-                        let start = match path {
-                            Some(path) => path,
-                            None => remote.home_dir().await?,
-                        };
-                        Ok((remote, start))
-                    }),
-                )
-            }
-        }
-    }
-
-    fn show_browser(
-        &mut self,
-        remote: Arc<dyn Remote>,
-        path: RemotePath,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let browser = cx.new(|cx| FileBrowser::new(remote, path, window, cx));
-        let titles = cx.subscribe_in(&browser, window, |_, browser, _: &Navigated, window, cx| {
-            let browser = browser.read(cx);
-            window.set_window_title(&format!(
-                "{} – {} – Ferry",
-                browser.path(),
-                browser.remote_label()
-            ));
+    /// Shows `message` as a notification. Goes through the prompt channel
+    /// because showing it needs the window, which is not at hand everywhere.
+    fn notice(&self, message: String) {
+        let _ = self.context.prompts.unbounded_send(TaggedPrompt {
+            session: None,
+            request: PromptRequest::Notice(message),
         });
-        {
-            let browser = browser.read(cx);
-            window.set_window_title(&format!(
-                "{} – {} – Ferry",
-                browser.path(),
-                browser.remote_label()
-            ));
-        }
-        self.browser_title = Some(titles);
-        self.browser = Some(browser);
-        self.connect = ConnectState::Idle;
     }
 
     // ---------------------------------------------------------------------
-    // Prompts
+    // Tabs
 
-    fn show_next_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.prompt.is_some() {
+    fn add_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Session> {
+        let id = SessionId(self.next_session);
+        self.next_session += 1;
+        let context = self.context.clone();
+        let snapshot = Arc::clone(&self.snapshot);
+        let session = cx.new(|cx| Session::new(id, context, snapshot, window, cx));
+        let events = cx.subscribe_in(&session, window, Self::on_session_event);
+        self.sessions.push(session.clone());
+        self.session_events.push(events);
+        self.active = self.sessions.len() - 1;
+        self.update_title(window, cx);
+        cx.notify();
+        session
+    }
+
+    fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.sessions.len() {
             return;
         }
-        let Some(request) = self.queued_prompts.pop_front() else {
-            self.restore_focus(window, cx);
-            return;
-        };
-        self.prompt = Some(match request {
-            PromptRequest::HostKey { prompt, reply } => {
-                window.focus(&self.prompt_focus, cx);
-                ActivePrompt::HostKey { prompt, reply }
-            }
-            PromptRequest::Secret(request) => {
-                let echo = request.echo;
-                let input = cx.new(|cx| InputState::new(window, cx).masked(!echo));
-                input.update(cx, |input, cx| input.focus(window, cx));
-                let submit =
-                    cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                        if let InputEvent::PressEnter { .. } = event {
-                            this.answer_secret(true, window, cx);
-                        }
-                    });
-                ActivePrompt::Secret {
-                    request,
-                    input,
-                    _submit: submit,
-                }
-            }
-        });
+        self.active = index;
+        self.sessions[index].update(cx, |session, cx| session.focus(window, cx));
+        self.update_title(window, cx);
         cx.notify();
     }
 
-    fn answer_host_key(
+    fn close_session(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.sessions.len() {
+            return;
+        }
+        let closed = self.sessions.remove(index).read(cx).id();
+        drop(self.session_events.remove(index));
+        self.drop_prompts_of(closed, window, cx);
+        if self.sessions.is_empty() {
+            self.add_session(window, cx)
+                .update(cx, |session, cx| session.focus(window, cx));
+            return;
+        }
+        if self.active > index || self.active == self.sessions.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        let active = self.active;
+        self.activate(active, window, cx);
+    }
+
+    fn update_title(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.active_session() {
+            window.set_window_title(&session.read(cx).window_title(cx));
+        }
+    }
+
+    fn on_session_event(
         &mut self,
-        decision: HostKeyDecision,
+        session: &Entity<Session>,
+        event: &SessionEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ActivePrompt::HostKey { reply, .. }) = self.prompt.take() {
-            let _ = reply.send(decision);
-        }
-        self.show_next_prompt(window, cx);
-    }
-
-    fn answer_secret(&mut self, submit: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ActivePrompt::Secret { request, input, .. }) = self.prompt.take() {
-            let answer = submit.then(|| SecretString::from(input.read(cx).value().to_string()));
-            // Do not keep the secret around in the input's buffer.
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-            let _ = request.reply.send(answer);
-        }
-        self.show_next_prompt(window, cx);
-    }
-
-    fn cancel_prompt(&mut self, _: &CancelPrompt, window: &mut Window, cx: &mut Context<Self>) {
-        match self.prompt {
-            Some(ActivePrompt::HostKey { .. }) => {
-                self.answer_host_key(HostKeyDecision::Reject, window, cx);
+        match event {
+            SessionEvent::Changed => {
+                if self.active_session() == Some(session) {
+                    self.update_title(window, cx);
+                }
+                cx.notify();
             }
-            Some(ActivePrompt::Secret { .. }) => self.answer_secret(false, window, cx),
-            None => {}
+            SessionEvent::Connected {
+                destination,
+                bookmark,
+            } => {
+                let (destination, bookmark) = (destination.clone(), *bookmark);
+                self.change_library(
+                    move |library| library.record_connection(&destination, bookmark),
+                    cx,
+                );
+            }
+            SessionEvent::Abandoned => {
+                let id = session.read(cx).id();
+                self.drop_prompts_of(id, window, cx);
+            }
+            SessionEvent::SaveAsFavorite(destination) => {
+                let draft = BookmarkDraft {
+                    folder: None,
+                    name: String::new(),
+                    destination: destination.clone(),
+                    identity_file: None,
+                };
+                self.open_editor(None, &draft, window, cx);
+            }
         }
     }
 
-    fn restore_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        match &self.browser {
-            Some(browser) => window.focus(&browser.focus_handle(cx), cx),
-            None => self.address.update(cx, |input, cx| input.focus(window, cx)),
+    /// Opens `request` in the active tab, or in a new one.
+    fn open(
+        &mut self,
+        request: ConnectRequest,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = match self.active_session() {
+            Some(session) if !new_tab => session.clone(),
+            _ => self.add_session(window, cx),
+        };
+        session.update(cx, |session, cx| session.connect(request, window, cx));
+        cx.notify();
+    }
+
+    fn open_bookmark(
+        &mut self,
+        id: BookmarkId,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bookmark) = self.snapshot.bookmark(id) else {
+            return;
+        };
+        let request = ConnectRequest {
+            destination: bookmark.destination.clone(),
+            bookmark: Some(id),
+            identity_file: bookmark.identity_file.clone(),
+        };
+        self.open(request, new_tab, window, cx);
+    }
+
+    // ---------------------------------------------------------------------
+    // Actions
+
+    fn on_focus_address(&mut self, _: &FocusAddress, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.active_session() {
+            session.update(cx, |session, cx| session.focus_address(window, cx));
         }
+    }
+
+    fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_session(window, cx)
+            .update(cx, |session, cx| session.focus(window, cx));
+    }
+
+    fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.active;
+        self.close_session(active, window, cx);
+    }
+
+    fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        let next = (self.active + 1) % self.sessions.len().max(1);
+        self.activate(next, window, cx);
+    }
+
+    fn on_previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.sessions.len().max(1);
+        let previous = (self.active + count - 1) % count;
+        self.activate(previous, window, cx);
+    }
+
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        cx.notify();
+    }
+
+    fn on_save_favorite(&mut self, _: &SaveFavorite, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(location) = self
+            .active_session()
+            .and_then(|session| session.read(cx).location(cx))
+        else {
+            return;
+        };
+        let draft = BookmarkDraft {
+            folder: None,
+            name: String::new(),
+            destination: location,
+            identity_file: None,
+        };
+        self.open_editor(None, &draft, window, cx);
     }
 
     // ---------------------------------------------------------------------
     // Rendering
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let connecting = matches!(self.connect, ConnectState::Connecting(_));
-        h_flex()
-            .p_2()
-            .gap_2()
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(div().flex_1().child(Input::new(&self.address)))
-            .child(
-                Button::new("connect")
-                    .primary()
-                    .label("Connect")
-                    .loading(connecting)
-                    .on_click(
-                        cx.listener(|this, _: &ClickEvent, window, cx| this.connect(window, cx)),
-                    ),
-            )
-    }
-
-    fn render_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let message: Option<(IconName, SharedString, bool)> = match &self.connect {
-            ConnectState::Connecting(host) => Some((
-                IconName::LoaderCircle,
-                format!("Connecting to {host}…").into(),
-                false,
-            )),
-            ConnectState::Failed(error) => {
-                Some((IconName::TriangleAlert, error.clone().into(), true))
-            }
-            ConnectState::Idle => None,
-        };
-        let banner = message.map(|(icon, text, failed)| {
-            h_flex()
-                .px_3()
-                .py_2()
-                .gap_2()
-                .text_sm()
-                .flex_shrink_0()
-                .border_b_1()
-                .border_color(theme.border)
-                .when(failed, |this| this.text_color(theme.danger))
-                .child(Icon::new(icon).size_4())
-                .child(text)
-        });
-        let content = match &self.browser {
-            Some(browser) => div().flex_1().min_h_0().child(browser.clone()),
-            None => self.render_start(cx),
-        };
-        v_flex().flex_1().min_h_0().children(banner).child(content)
-    }
-
-    /// Fills the address field with `destination` and connects.
-    fn connect_to(
-        &mut self,
-        destination: SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.address
-            .update(cx, |input, cx| input.set_value(destination, window, cx));
-        self.connect(window, cx);
-    }
-
-    fn render_start(&self, cx: &mut Context<Self>) -> gpui::Div {
-        /// Quick-connect buttons shown at most; long configs stay usable.
-        const MAX_HOSTS: usize = 24;
-        let theme = cx.theme();
-        let hosts = self
-            .hosts
+    fn render_tabs(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let tabs: Vec<Tab> = self
+            .sessions
             .iter()
-            .take(MAX_HOSTS)
             .enumerate()
-            .map(|(index, host)| {
-                let destination = host.clone();
-                Button::new(ElementId::NamedInteger("ssh-host".into(), index as u64))
-                    .outline()
-                    .small()
-                    .icon(IconName::Globe)
-                    .label(host.clone())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.connect_to(destination.clone(), window, cx);
-                    }))
-            });
-        let shortcuts = if cfg!(target_os = "macos") {
-            "⌘L address · ↩ open · ⌘↑ parent · ⌘[ back · type to filter · ⌘1–3 sort"
-        } else {
-            "Ctrl+L address · Enter open · Alt+↑ parent · Alt+← back · type to filter · Ctrl+1–3 sort"
-        };
-        div()
-            .flex_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_6()
-            .child(
-                v_flex()
-                    .max_w(px(640.))
-                    .items_center()
-                    .gap_4()
-                    .child(
-                        Icon::new(IconName::HardDrive)
-                            .size_10()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(
-                        v_flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Where to?"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Type an address above, or pick a destination."),
-                            ),
-                    )
-                    .child(
-                        Button::new("open-local")
-                            .icon(IconName::Folder)
-                            .label("Local files")
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.connect_to("local".into(), window, cx);
-                            })),
-                    )
-                    .when(!self.hosts.is_empty(), |this| {
-                        this.child(
-                            v_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child("SSH hosts"),
-                                )
-                                .child(
-                                    h_flex()
-                                        .flex_wrap()
-                                        .justify_center()
-                                        .gap_2()
-                                        .children(hosts),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .pt_4()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(shortcuts),
-                    ),
-            )
+            .map(|(index, session)| {
+                let session = session.read(cx);
+                let close = {
+                    let this = this.clone();
+                    Button::new(("close-tab", index))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Close)
+                        .on_click(move |_: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            let _ = this.update(cx, |workspace, cx| {
+                                workspace.close_session(index, window, cx);
+                            });
+                        })
+                };
+                let icon = if session.is_connecting() {
+                    IconName::LoaderCircle
+                } else if session.browser().is_some() {
+                    IconName::Globe
+                } else {
+                    IconName::Plus
+                };
+                Tab::new()
+                    .prefix(div().pl_2().child(Icon::new(icon).size_3p5()))
+                    .label(session.title(cx))
+                    .suffix(close)
+            })
+            .collect();
+        let new_tab = Button::new("new-tab")
+            .ghost()
+            .small()
+            .icon(IconName::Plus)
+            .tooltip("New tab")
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.on_new_tab(&NewTab, window, cx);
+            }));
+        let sidebar_toggle = Button::new("toggle-sidebar")
+            .ghost()
+            .small()
+            .icon(Icon::new(gpui_component_assets::IconName::PanelLeft))
+            .tooltip("Toggle sidebar")
+            .selected(self.sidebar_visible(window))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.on_toggle_sidebar(&ToggleSidebar, window, cx);
+            }));
+        TabBar::new("tabs")
+            .small()
+            .prefix(h_flex().px_1().child(sidebar_toggle))
+            .suffix(h_flex().px_1().child(new_tab))
+            .selected_index(self.active)
+            .on_click(move |index: &usize, window, cx| {
+                let index = *index;
+                let _ = this.update(cx, |workspace, cx| workspace.activate(index, window, cx));
+            })
+            .children(tabs)
     }
 
-    fn render_prompt(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let theme = cx.theme();
-        let card = v_flex()
-            .w(px(460.))
-            .p_4()
-            .gap_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.popover)
-            .text_color(theme.popover_foreground)
-            .shadow_lg();
-        let card = match self.prompt.as_ref()? {
-            ActivePrompt::HostKey { prompt, .. } => self.render_host_key_prompt(card, prompt, cx),
-            ActivePrompt::Secret { request, input, .. } => {
-                Self::render_secret_prompt(card, request, input, cx)
-            }
-        };
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::black().opacity(0.35))
-                .key_context(PROMPT_CONTEXT)
-                .on_action(cx.listener(Self::cancel_prompt))
-                .child(card),
-        )
-    }
-
-    fn render_host_key_prompt(
-        &self,
-        card: gpui::Div,
-        prompt: &ferry_core::interaction::HostKeyPrompt,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let theme = cx.theme();
-        let decide = |decision: HostKeyDecision| {
-            cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
-                this.answer_host_key(decision, window, cx);
-            })
-        };
-        card.track_focus(&self.prompt_focus)
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Unknown host key"),
-            )
-            .child(div().text_sm().child(format!(
-                "The authenticity of {} cannot be established. Verify the fingerprint with the \
-                 server's administrator before you trust it.",
-                prompt.host
-            )))
-            .child(
-                v_flex()
-                    .p_2()
-                    .rounded_md()
-                    .bg(theme.muted)
-                    .text_xs()
-                    .font_family("monospace")
-                    .child(prompt.algorithm.clone())
-                    .child(prompt.fingerprint.clone()),
-            )
-            .when(prompt.other_types_known, |this| {
-                this.child(div().text_sm().text_color(theme.danger).child(
-                    "Keys of other types are already known for this host. The server may have \
-                     been reconfigured, or someone may be intercepting the connection.",
-                ))
-            })
-            .child(
-                h_flex()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        Button::new("host-key-reject")
-                            .label("Cancel")
-                            .on_click(decide(HostKeyDecision::Reject)),
-                    )
-                    .child(
-                        Button::new("host-key-once")
-                            .label("Connect once")
-                            .on_click(decide(HostKeyDecision::AcceptOnce)),
-                    )
-                    .child(
-                        Button::new("host-key-trust")
-                            .primary()
-                            .label("Trust and connect")
-                            .on_click(decide(HostKeyDecision::AcceptAndRemember)),
-                    ),
-            )
-    }
-
-    fn render_secret_prompt(
-        card: gpui::Div,
-        request: &SecretRequest,
-        input: &Entity<InputState>,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let answer = |submit: bool| {
-            cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
-                this.answer_secret(submit, window, cx);
-            })
-        };
-        card.child(
-            div()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(request.title.clone()),
-        )
-        .child(div().text_sm().child(request.message.clone()))
-        .child(Input::new(input))
-        .child(
-            h_flex()
-                .gap_2()
-                .justify_end()
-                .child(
-                    Button::new("secret-cancel")
-                        .label("Cancel")
-                        .on_click(answer(false)),
-                )
-                .child(
-                    Button::new("secret-ok")
-                        .primary()
-                        .label("OK")
-                        .on_click(answer(true)),
-                ),
-        )
+    fn sidebar_visible(&self, window: &Window) -> bool {
+        self.sidebar_open && window.viewport_size().width >= SIDEBAR_MIN_WINDOW_WIDTH
     }
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let (background, foreground, border) = (theme.background, theme.foreground, theme.border);
+        let sidebar = self
+            .sidebar_visible(window)
+            .then(|| self.render_sidebar(cx));
+        let content = self
+            .active_session()
+            .map(|session| div().flex_1().min_w_0().child(session.clone()));
         v_flex()
             .relative()
             .size_full()
             .key_context(WORKSPACE_CONTEXT)
-            .on_action(cx.listener(|this, _: &FocusAddress, window, cx| {
-                this.address.update(cx, |input, cx| input.focus(window, cx));
-            }))
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .child(self.render_toolbar(cx))
-            .child(self.render_body(cx))
+            .on_action(cx.listener(Self::on_focus_address))
+            .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_next_tab))
+            .on_action(cx.listener(Self::on_previous_tab))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_save_favorite))
+            .bg(background)
+            .text_color(foreground)
+            .child(self.render_tabs(window, cx))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_stretch()
+                    .when_some(sidebar, |this, sidebar| {
+                        this.child(sidebar.border_r_1().border_color(border))
+                    })
+                    .children(content),
+            )
+            .children(self.render_dialog(cx))
             .children(self.render_prompt(cx))
     }
 }

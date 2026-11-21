@@ -2059,6 +2059,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "dirs 7.0.0",
  "ferry-core",
  "futures",
  "gpui-component",

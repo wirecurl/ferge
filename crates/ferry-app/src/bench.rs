@@ -94,7 +94,7 @@ async fn key(
 }
 
 fn browser(workspace: &Entity<Workspace>, cx: &mut AsyncApp) -> Option<Entity<FileBrowser>> {
-    workspace.read_with(cx, |workspace, _| workspace.browser().cloned())
+    workspace.read_with(cx, Workspace::active_browser)
 }
 
 /// Waits frame by frame until the browser is idle; returns the elapsed time.

@@ -30,6 +30,8 @@ pub struct DesktopFonts {
 }
 
 /// Reads the desktop's fonts. Never fails: what cannot be read is `None`.
+// Only Linux has something to await; the signature is the same everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
 pub async fn fonts() -> DesktopFonts {
     #[cfg(target_os = "linux")]
     {
@@ -53,6 +55,7 @@ pub async fn fonts() -> DesktopFonts {
 
 /// Yields whenever the desktop's fonts may have changed; read them again
 /// with [`fonts`]. Ends at once where changes cannot be observed.
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
 pub async fn font_changes() -> BoxStream<'static, ()> {
     #[cfg(target_os = "linux")]
     {

@@ -30,6 +30,15 @@ russh-config = { version = "=0.58.0" }
 # Persistence. SQLite is bundled so every platform runs the same, tested version.
 rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }
 
+# Secrets: platform credential stores, and the encrypted-file fallback.
+keyring-core = "=1.1.0"
+zbus-secret-service-keyring-store = { version = "=1.0.1", features = ["rt-tokio-crypto-rust"] }
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc"] }
+getrandom = "=0.4.3"
+zeroize = "=1.9.2"
+
 # Support crates.
 anyhow = "=1.0.104"
 base64ct = "=1.8.3"

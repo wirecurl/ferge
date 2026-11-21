@@ -45,6 +45,15 @@ notify = { version = "=8.2.2" }
 # Desktop integration (the XDG desktop portal) on Linux.
 zbus = { version = "=5.19.0" }
 
+# File previews: spreadsheets, office documents (ZIP + XML) and PDF pages,
+# all in pure Rust so they work everywhere without extra installs.
+calamine = { version = "=0.38.0" }
+zip = { version = "=9.8.1", default-features = false, features = ["deflate"] }
+quick-xml = { version = "=0.42.0" }
+hayro = { version = "=0.9.0" }
+# Decoded preview images are handed to GPUI as frames (the version GPUI uses).
+image = { version = "=0.25.10", default-features = false }
+
 # Support crates.
 anyhow = "=1.0.104"
 base64ct = "=1.8.3"

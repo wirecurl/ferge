@@ -7,7 +7,8 @@ PLAN.md is the binding source for technology, architecture and performance budge
 - `crates/ferry-core` – UI-independent core: remote backends, listings, `transfer` (queue,
   pause/resume, conflicts), `library` (SQLite: favorites, folders, history), `secrets`
   (keyring / encrypted file), `settings` (TOML file, edited in place, watched), `desktop`
-  (desktop fonts via the XDG portal). Never depends on GPUI.
+  (desktop fonts via the XDG portal), `document` (previews: spreadsheets, office text, PDF
+  pages; bounded against hostile files). Never depends on GPUI.
 - `crates/ferry-app` – GPUI desktop application (binary `ferry`).
 - `crates/ferry-bench` – benchmark harness for the PLAN.md budgets.
 

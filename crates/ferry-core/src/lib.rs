@@ -9,6 +9,7 @@
 
 pub mod desktop;
 pub mod destination;
+pub mod document;
 pub mod entry;
 pub mod error;
 mod glob;

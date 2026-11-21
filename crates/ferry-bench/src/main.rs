@@ -12,6 +12,7 @@ mod app;
 mod core;
 mod report;
 mod stats;
+mod transfer;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -96,6 +97,7 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
 
     let startup = measure_startup(&app, cli.startup_runs).await?;
     let core = measure_core(&ssh_config, &large_dir, cli.runs).await?;
+    measure_transfers(&ssh_config).await?;
     let ui = measure_ui(&app).await?;
     let verdicts = verdicts(&startup, &core, &ui);
     println!();
@@ -147,6 +149,40 @@ async fn measure_core(
     println!("  direction flip:  {}", costs.flip);
     println!("  filter:          {}", costs.filter);
     Ok(CoreResults { listing, cache_hit })
+}
+
+/// Reports transfer throughput; there is no budget for it.
+async fn measure_transfers(ssh_config: &Path) -> anyhow::Result<()> {
+    println!(
+        "Transfers, one {} MiB file…",
+        transfer::SIZE / (1024 * 1024)
+    );
+    let remote = core::connect(ssh_config, "ferry-test").await?;
+    let scratch = tempfile::tempdir()?;
+    let result = transfer::measure(&remote, ssh_config, scratch.path()).await?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "megabytes per second need no exact bytes"
+    )]
+    let rate = |elapsed: Duration| transfer::SIZE as f64 / 1e6 / elapsed.as_secs_f64();
+    println!(
+        "  upload:          {} ({:.0} MB/s)",
+        ms(result.upload),
+        rate(result.upload)
+    );
+    println!(
+        "  download:        {} ({:.0} MB/s)",
+        ms(result.download),
+        rate(result.download)
+    );
+    if let Some(openssh) = result.openssh_download {
+        println!(
+            "  OpenSSH sftp:    {} ({:.0} MB/s) for comparison",
+            ms(openssh),
+            rate(openssh)
+        );
+    }
+    Ok(())
 }
 
 struct UiResults {

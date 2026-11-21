@@ -50,6 +50,13 @@ pub const PART_SUFFIX: &str = ".ferry-part";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TransferId(u64);
 
+impl TransferId {
+    /// A number unique within the queue, e.g. for element ids in a UI.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Which way the data flows, for presentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -600,7 +607,10 @@ impl Transfer {
                 TransferState::Failed
             }
             (None, Some(Ok(()))) => {
-                if self.progress.files_failed.load(Ordering::Relaxed) > 0 {
+                // Problems found while scanning count as failures too.
+                if self.progress.files_failed.load(Ordering::Relaxed) > 0
+                    || !self.control().errors.is_empty()
+                {
                     TransferState::Failed
                 } else {
                     TransferState::Completed
@@ -615,7 +625,8 @@ impl Transfer {
     /// Lists what to copy and records the totals.
     async fn make_plan(&self, shared: &Shared) -> crate::Result<Arc<plan::Plan>> {
         self.set_state(TransferState::Scanning, shared);
-        let same_remote = Arc::ptr_eq(&self.source, &self.target);
+        let same_remote = Arc::ptr_eq(&self.source, &self.target)
+            || (self.source.is_local() && self.target.is_local());
         let (plan, errors) = plan::Plan::scan(
             self.source.as_ref(),
             &self.items,
@@ -652,6 +663,16 @@ impl Transfer {
         }
         copy::copy_files(self, shared, &plan).await;
         Ok(())
+    }
+}
+
+/// `error`, prefixed with `path` unless the message names it already.
+fn describe(path: &RemotePath, error: &crate::Error) -> String {
+    let message = error.to_string();
+    if message.contains(path.as_str()) {
+        message
+    } else {
+        format!("{path}: {message}")
     }
 }
 

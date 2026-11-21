@@ -2,17 +2,17 @@
 
 use std::ops::Range;
 
-use ferry_core::EntryKind;
 use ferry_core::listing::SortColumn;
+use ferry_core::{EntryKind, RemotePath};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, ClickEvent, Context, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px, uniform_list,
+    AnyElement, AppContext as _, ClickEvent, Context, ElementId, ExternalDragPayload,
+    ExternalPaths, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 
-use super::{FileBrowser, LoadState, ROW_HEIGHT};
+use super::{DraggedEntries, FileBrowser, LoadState, ROW_HEIGHT};
 use crate::{actions, format};
 
 const SIZE_WIDTH: gpui::Pixels = px(96.);
@@ -41,6 +41,11 @@ impl Render for FileBrowser {
             .on_action(cx.listener(Self::on_sort_by_size))
             .on_action(cx.listener(Self::on_sort_by_modified))
             .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_select_previous_extend))
+            .on_action(cx.listener(Self::on_select_next_extend))
+            .on_action(cx.listener(Self::on_select_all))
+            .on_action(cx.listener(Self::on_copy))
+            .on_action(cx.listener(Self::on_paste))
             .on_key_down(cx.listener(Self::on_key_down))
             // Clicking anywhere in the browser makes it the keyboard target.
             .on_mouse_down(
@@ -168,19 +173,20 @@ impl FileBrowser {
                 LoadState::Complete if self.filter.is_empty() => "This folder is empty".into(),
                 LoadState::Complete => format!("Nothing matches “{}”", self.filter).into(),
             };
-            return div()
+            let empty = div()
+                .id("empty-drop")
                 .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_sm()
-                .text_color(cx.theme().muted_foreground)
+                .text_color(cx.theme().muted_foreground);
+            return Self::accept_drops(empty, self.path.clone(), cx)
                 .child(message)
                 .into_any_element();
         }
-        div()
-            .flex_1()
-            .min_h_0()
+        let list = div().id("entries-drop").flex_1().min_h_0();
+        Self::accept_drops(list, self.path.clone(), cx)
             .child(
                 uniform_list(
                     "entries",
@@ -200,16 +206,26 @@ impl FileBrowser {
         let (active, even, hover) = (theme.list_active, theme.list_even, theme.list_hover);
         let (muted, border, folder) =
             (theme.muted_foreground, theme.list_active_border, theme.blue);
+        let marked_bg = theme.accent;
+        let this = cx.entity().downgrade();
         range
             .filter_map(|index| {
                 let entry = self.view.get(index)?;
-                let selected = self.selected == Some(index);
+                let cursor = self.selected == Some(index);
+                let marked = self.is_marked(&entry.name);
                 let (icon, icon_color, size) = match entry.kind() {
                     EntryKind::Directory => (IconName::Folder, folder, String::new()),
                     EntryKind::Symlink => (IconName::ExternalLink, muted, String::new()),
                     EntryKind::File => (IconName::File, muted, format::size(entry.metadata.size)),
                     EntryKind::Other => (IconName::FileText, muted, String::new()),
                 };
+                let dragged = DraggedEntries {
+                    source: this.clone(),
+                    grabbed: entry.name.clone(),
+                    count: self.drag_count(&entry.name),
+                };
+                let is_dir = entry.kind() == EntryKind::Directory;
+                let dir_path = self.path.join(&entry.name);
                 let row = h_flex()
                     .id(index)
                     .w_full()
@@ -217,18 +233,42 @@ impl FileBrowser {
                     .px_3()
                     .gap_2()
                     .text_sm()
-                    // Every row reserves the selection border so content never shifts.
+                    // Every row reserves the cursor border so content never shifts.
                     .border_l_2()
                     .border_color(gpui::transparent_black())
-                    .when(selected, |this| this.bg(active).border_color(border))
-                    .when(!selected && index % 2 == 1, |this| this.bg(even))
-                    .when(!selected, |this| this.hover(|style| style.bg(hover)))
+                    .when(marked, |this| this.bg(marked_bg))
+                    .when(cursor, |this| this.border_color(border))
+                    .when(cursor && !marked, |this| this.bg(active))
+                    .when(!cursor && !marked && index % 2 == 1, |this| this.bg(even))
+                    .when(!cursor && !marked, |this| {
+                        this.hover(|style| style.bg(hover))
+                    })
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        this.select(index, cx);
-                        if event.click_count() >= 2 {
-                            this.open_index(index, cx);
+                        let modifiers = event.modifiers();
+                        if modifiers.shift {
+                            this.select_range(index, cx);
+                        } else if modifiers.secondary(cx) {
+                            this.toggle_mark(index, cx);
+                        } else {
+                            this.select(index, cx);
+                            if event.click_count() >= 2 {
+                                this.open_index(index, cx);
+                            }
                         }
                     }))
+                    .on_drag(dragged, |dragged, _, _, cx| {
+                        let label: SharedString = match dragged.count {
+                            1 => dragged.grabbed.as_str().to_owned().into(),
+                            count => format!("{count} items").into(),
+                        };
+                        cx.new(|_| DragPreview { label })
+                    })
+                    .external_drag_payload(|dragged: &DraggedEntries, _, cx| {
+                        let source = dragged.source.upgrade()?;
+                        let paths = source.read(cx).drag_out_paths(&dragged.grabbed)?;
+                        Some(ExternalDragPayload::Files(paths))
+                    })
+                    .when(is_dir, |this| Self::accept_drops(this, dir_path, cx))
                     .child(Icon::new(icon).size_4().text_color(icon_color))
                     .child(
                         div()
@@ -255,6 +295,26 @@ impl FileBrowser {
                 Some(row.into_any_element())
             })
             .collect()
+    }
+
+    /// Makes `element` take dragged rows and files from other applications,
+    /// copying them into `target_dir`; it lights up while something hovers.
+    fn accept_drops(
+        element: gpui::Stateful<gpui::Div>,
+        target_dir: RemotePath,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let highlight = cx.theme().drop_target;
+        let for_files = target_dir.clone();
+        element
+            .drag_over::<DraggedEntries>(move |style, _, _, _| style.bg(highlight))
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(highlight))
+            .on_drop(cx.listener(move |this, dragged: &DraggedEntries, _, cx| {
+                this.receive_drag(dragged, target_dir.clone(), cx);
+            }))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                this.receive_external(paths, for_files.clone(), cx);
+            }))
     }
 
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -286,6 +346,10 @@ impl FileBrowser {
             .border_t_1()
             .border_color(theme.border)
             .child(count)
+            .when(self.marked.len() > 1, |this| {
+                this.child(format!("{} selected", format::count(self.marked.len())))
+            })
+            .children(self.notice.clone())
             .when(!self.filter.is_empty(), |this| {
                 this.child(
                     h_flex()
@@ -305,5 +369,29 @@ impl FileBrowser {
                     .when(failed, |this| this.text_color(theme.danger))
                     .child(state)
             }))
+    }
+}
+
+/// The label that follows the pointer while rows are dragged.
+struct DragPreview {
+    label: SharedString,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .text_sm()
+            .shadow_md()
+            .child(Icon::new(IconName::File).size_4())
+            .child(self.label.clone())
     }
 }

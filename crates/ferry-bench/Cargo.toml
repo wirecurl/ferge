@@ -12,6 +12,7 @@ anyhow.workspace = true
 clap.workspace = true
 ferry-core.workspace = true
 futures.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
 
 [lints]

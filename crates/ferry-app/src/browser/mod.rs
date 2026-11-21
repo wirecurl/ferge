@@ -7,20 +7,22 @@
 
 mod render;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
 use ferry_core::listing::{self, DirectoryView, ListingCache, ListingEvent, SortColumn, SortOrder};
+use ferry_core::transfer::TransferRequest;
 use ferry_core::{Entry, EntryKind, EntryName, Remote, RemotePath};
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    App, AppContext as _, Context, FocusHandle, Focusable, KeyDownEvent, ScrollStrategy, Task,
-    UniformListScrollHandle, Window, px,
+    App, AppContext as _, Context, FocusHandle, Focusable, Global, KeyDownEvent, ScrollStrategy,
+    SharedString, Task, UniformListScrollHandle, WeakEntity, Window, px,
 };
 
 use crate::actions;
 use crate::runtime;
+use crate::transfers::Transfers;
 
 /// Height of one row in the list. Rows must be uniform for virtualization.
 pub(crate) const ROW_HEIGHT: gpui::Pixels = px(26.);
@@ -51,6 +53,24 @@ pub(crate) struct Navigated;
 
 impl gpui::EventEmitter<Navigated> for FileBrowser {}
 
+/// Items copied with Ctrl+C, waiting to be pasted. Shared by all tabs.
+pub(crate) struct FileClipboard {
+    source: Arc<dyn Remote>,
+    items: Vec<RemotePath>,
+}
+
+impl Global for FileClipboard {}
+
+/// What is carried while rows are dragged: the browser they come from and
+/// the row that was grabbed. The items are looked up when they are dropped.
+#[derive(Clone)]
+pub(crate) struct DraggedEntries {
+    pub source: WeakEntity<FileBrowser>,
+    pub grabbed: EntryName,
+    /// Shown in the drag preview.
+    pub count: usize,
+}
+
 struct CachedView {
     path: RemotePath,
     view: DirectoryView,
@@ -72,6 +92,13 @@ pub(crate) struct FileBrowser {
     /// Name of the selected entry, so the selection survives re-sorting,
     /// filtering and refreshes.
     selected_name: Option<EntryName>,
+    /// Entries marked for a multiple selection (Shift, Ctrl/Cmd, select all).
+    /// Empty means the selection is just the cursor row.
+    marked: HashSet<EntryName>,
+    /// Where Shift-selections start.
+    anchor: Option<usize>,
+    /// A short message for the status bar, e.g. after copying.
+    notice: Option<SharedString>,
     state: LoadState,
     /// Incremented on every navigation; results of older work are dropped.
     generation: u64,
@@ -109,6 +136,9 @@ impl FileBrowser {
             filter: String::new(),
             selected: None,
             selected_name: None,
+            marked: HashSet::new(),
+            anchor: None,
+            notice: None,
             state: LoadState::Loading,
             generation: 0,
             pending: Vec::new(),
@@ -130,6 +160,10 @@ impl FileBrowser {
 
     pub(crate) fn remote_label(&self) -> &str {
         self.remote.label()
+    }
+
+    pub(crate) fn remote(&self) -> &Arc<dyn Remote> {
+        &self.remote
     }
 
     /// Whether nothing is loading, building or sorting.
@@ -186,6 +220,9 @@ impl FileBrowser {
         self.filter.clear();
         self.selected = None;
         self.selected_name = select;
+        self.marked.clear();
+        self.anchor = None;
+        self.notice = None;
         if let Some(cached) = self.take_parked_view(&self.path.clone()) {
             self.view = cached.view;
             self.view.set_filter("");
@@ -474,6 +511,8 @@ impl FileBrowser {
 
     fn set_filter(&mut self, filter: String, cx: &mut Context<Self>) {
         self.filter = filter;
+        // Marks on rows the filter hides would be copied unseen.
+        self.marked.clear();
         self.view.set_filter(&self.filter);
         // Typing narrows the list; jump to the best (first) match.
         self.selected = (!self.view.is_empty()).then_some(0);
@@ -501,23 +540,192 @@ impl FileBrowser {
     }
 
     pub(crate) fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.marked.clear();
+        self.anchor = Some(index);
+        self.move_cursor(index, cx);
+    }
+
+    fn move_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(entry) = self.view.get(index) else {
             return;
         };
         self.selected = Some(index);
         self.selected_name = Some(entry.name.clone());
+        self.notice = None;
         self.scroll_to_selection();
         cx.notify();
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let len = self.view.len();
-        if len == 0 {
+    /// Marks the rows from the anchor to `index` (Shift).
+    fn select_range(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.view.len() {
             return;
         }
+        let anchor = self.anchor.or(self.selected).unwrap_or(index);
+        let (from, to) = (anchor.min(index), anchor.max(index));
+        self.marked = (from..=to)
+            .filter_map(|row| self.view.get(row).map(|entry| entry.name.clone()))
+            .collect();
+        self.anchor = Some(anchor);
+        self.move_cursor(index, cx);
+    }
+
+    /// Adds or removes one row from the selection (Ctrl/Cmd-click).
+    fn toggle_mark(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(name) = self.view.get(index).map(|entry| entry.name.clone()) else {
+            return;
+        };
+        if self.marked.is_empty()
+            && let Some(current) = self.selected_name.clone()
+        {
+            self.marked.insert(current);
+        }
+        if !self.marked.remove(&name) {
+            self.marked.insert(name);
+        }
+        self.anchor = Some(index);
+        self.move_cursor(index, cx);
+    }
+
+    pub(crate) fn is_marked(&self, name: &EntryName) -> bool {
+        self.marked.contains(name)
+    }
+
+    /// The selected items: the marked rows, or the cursor row.
+    pub(crate) fn selected_paths(&self) -> Vec<RemotePath> {
+        if self.marked.is_empty() {
+            return self
+                .selected
+                .and_then(|index| self.view.get(index))
+                .map(|entry| vec![self.path.join(&entry.name)])
+                .unwrap_or_default();
+        }
+        let mut names: Vec<&EntryName> = self.marked.iter().collect();
+        names.sort();
+        names.into_iter().map(|name| self.path.join(name)).collect()
+    }
+
+    /// What dragging `grabbed` carries: the whole selection if the row is
+    /// part of it, otherwise just that row.
+    pub(crate) fn drag_items(&self, grabbed: &EntryName) -> Vec<RemotePath> {
+        if self.marked.contains(grabbed) {
+            self.selected_paths()
+        } else {
+            vec![self.path.join(grabbed)]
+        }
+    }
+
+    /// For dragging local files out of the window into other applications.
+    /// Remote files do not exist locally yet, so they stay inside Ferry.
+    pub(crate) fn drag_out_paths(&self, grabbed: &EntryName) -> Option<gpui::FileDragPaths> {
+        if !self.remote.is_local() {
+            return None;
+        }
+        let entries = self.drag_items(grabbed).into_iter().map(|path| {
+            let is_dir = path
+                .file_name()
+                .and_then(|name| self.view.position(name))
+                .and_then(|row| self.view.get(row))
+                .is_some_and(|entry| entry.kind() == EntryKind::Directory);
+            (std::path::PathBuf::from(path.as_str()), is_dir)
+        });
+        Some(gpui::FileDragPaths::new(entries))
+    }
+
+    /// Number of rows a drag of `grabbed` would carry.
+    pub(crate) fn drag_count(&self, grabbed: &EntryName) -> usize {
+        if self.marked.contains(grabbed) {
+            self.marked.len()
+        } else {
+            1
+        }
+    }
+
+    /// Copies `items` from `source` into `target_dir` of this browser's remote.
+    pub(crate) fn receive(
+        &mut self,
+        source: Arc<dyn Remote>,
+        items: Vec<RemotePath>,
+        target_dir: RemotePath,
+        cx: &mut Context<Self>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        Transfers::start(
+            TransferRequest {
+                source,
+                items,
+                target: Arc::clone(&self.remote),
+                target_dir,
+            },
+            cx,
+        );
+    }
+
+    /// Copies what was dragged from another (or this) browser into `target_dir`.
+    pub(crate) fn receive_drag(
+        &mut self,
+        dragged: &DraggedEntries,
+        target_dir: RemotePath,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = dragged.source.upgrade() else {
+            return;
+        };
+        let (remote, items) = {
+            let source = source.read(cx);
+            (
+                Arc::clone(&source.remote),
+                source.drag_items(&dragged.grabbed),
+            )
+        };
+        // Dropping rows onto their own folder would only duplicate them.
+        if Arc::ptr_eq(&remote, &self.remote)
+            && items
+                .iter()
+                .all(|item| item.parent().as_ref() == Some(&target_dir))
+        {
+            return;
+        }
+        self.receive(remote, items, target_dir, cx);
+    }
+
+    /// Uploads files dropped from another application.
+    pub(crate) fn receive_external(
+        &mut self,
+        paths: &gpui::ExternalPaths,
+        target_dir: RemotePath,
+        cx: &mut Context<Self>,
+    ) {
+        let items: Vec<RemotePath> = paths
+            .paths()
+            .iter()
+            .filter_map(|path| path.to_str().and_then(|path| RemotePath::parse(path).ok()))
+            .collect();
+        let source: Arc<dyn Remote> = Arc::new(ferry_core::remote::local::LocalRemote::new());
+        self.receive(source, items, target_dir, cx);
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(target) = self.row_after(delta) {
+            self.select(target, cx);
+        }
+    }
+
+    fn extend_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(target) = self.row_after(delta) {
+            self.select_range(target, cx);
+        }
+    }
+
+    fn row_after(&self, delta: isize) -> Option<usize> {
+        let len = self.view.len();
+        if len == 0 {
+            return None;
+        }
         let current = self.selected.unwrap_or(0);
-        let target = current.saturating_add_signed(delta).min(len - 1);
-        self.select(target, cx);
+        Some(current.saturating_add_signed(delta).min(len - 1))
     }
 
     /// Rows that fit into the list's viewport.
@@ -553,6 +761,59 @@ impl FileBrowser {
 
     fn on_select_next(&mut self, _: &actions::SelectNext, _: &mut Window, cx: &mut Context<Self>) {
         self.move_selection(1, cx);
+    }
+
+    fn on_select_previous_extend(
+        &mut self,
+        _: &actions::SelectPreviousExtend,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_selection(-1, cx);
+    }
+
+    fn on_select_next_extend(
+        &mut self,
+        _: &actions::SelectNextExtend,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.extend_selection(1, cx);
+    }
+
+    fn on_select_all(&mut self, _: &actions::SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.marked = (0..self.view.len())
+            .filter_map(|row| self.view.get(row).map(|entry| entry.name.clone()))
+            .collect();
+        cx.notify();
+    }
+
+    fn on_copy(&mut self, _: &actions::Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let items = self.selected_paths();
+        if items.is_empty() {
+            return;
+        }
+        self.notice = Some(
+            match items.len() {
+                1 => "Copied 1 item. Paste it into another folder.".to_owned(),
+                n => format!("Copied {n} items. Paste them into another folder."),
+            }
+            .into(),
+        );
+        cx.set_global(FileClipboard {
+            source: Arc::clone(&self.remote),
+            items,
+        });
+        cx.notify();
+    }
+
+    fn on_paste(&mut self, _: &actions::Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(clipboard) = cx.try_global::<FileClipboard>() else {
+            return;
+        };
+        let (source, items) = (Arc::clone(&clipboard.source), clipboard.items.clone());
+        let target_dir = self.path.clone();
+        self.receive(source, items, target_dir, cx);
     }
 
     fn on_page_up(&mut self, _: &actions::SelectPageUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -643,6 +904,12 @@ impl FileBrowser {
     }
 
     fn on_refresh(&mut self, _: &actions::Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.reload(cx);
+    }
+
+    /// Lists the current folder again, keeping what is shown until the new
+    /// listing arrives.
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.state = if self.view.total_len() > 0 {
             LoadState::Revalidating
         } else {

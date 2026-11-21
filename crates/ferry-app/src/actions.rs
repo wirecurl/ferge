@@ -27,6 +27,18 @@ actions!(
         SortBySize,
         SortByModified,
         Refresh,
+        /// Extends the selection by one row up or down.
+        SelectPreviousExtend,
+        SelectNextExtend,
+        SelectAll,
+        /// Remembers the selected items for pasting elsewhere.
+        Copy,
+        /// Copies the remembered items into the current folder.
+        Paste,
+        /// Copies the selection into the folder of the other pane.
+        CopyToOtherPane,
+        /// Moves the keyboard focus to the other pane.
+        FocusOtherPane,
     ]
 );
 
@@ -43,7 +55,10 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", Open, context),
         KeyBinding::new("backspace", Backspace, context),
         KeyBinding::new("escape", ClearFilter, context),
-        KeyBinding::new("f5", Refresh, context),
+        KeyBinding::new("shift-up", SelectPreviousExtend, context),
+        KeyBinding::new("shift-down", SelectNextExtend, context),
+        KeyBinding::new("f5", CopyToOtherPane, context),
+        KeyBinding::new("tab", FocusOtherPane, context),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -55,6 +70,9 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-2", SortBySize, context),
         KeyBinding::new("cmd-3", SortByModified, context),
         KeyBinding::new("cmd-r", Refresh, context),
+        KeyBinding::new("cmd-a", SelectAll, context),
+        KeyBinding::new("cmd-c", Copy, context),
+        KeyBinding::new("cmd-v", Paste, context),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
@@ -66,5 +84,8 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-2", SortBySize, context),
         KeyBinding::new("ctrl-3", SortByModified, context),
         KeyBinding::new("ctrl-r", Refresh, context),
+        KeyBinding::new("ctrl-a", SelectAll, context),
+        KeyBinding::new("ctrl-c", Copy, context),
+        KeyBinding::new("ctrl-v", Paste, context),
     ]);
 }

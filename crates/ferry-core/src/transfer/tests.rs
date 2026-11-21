@@ -439,3 +439,30 @@ async fn cancelling_removes_partial_files() {
     assert!(queue.remove(id));
     assert!(queue.snapshot().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_items_do_not_stop_the_others() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    write(&from.path().join("good.txt"), b"good");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(from.path().join("missing"), from.path().join("dangling")).unwrap();
+    let (queue, _events) = TransferQueue::new(2);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: local(),
+            items: vec![
+                path(&from.path().join("dangling")),
+                path(&from.path().join("good.txt")),
+            ],
+            target: local(),
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    let done = settled(&queue, id).await;
+    assert_eq!(std::fs::read(to.path().join("good.txt")).unwrap(), b"good");
+    assert_eq!(done.state, TransferState::Failed);
+    assert_eq!(done.errors.len(), 1, "{:?}", done.errors);
+    assert!(done.errors[0].contains("dangling"));
+}

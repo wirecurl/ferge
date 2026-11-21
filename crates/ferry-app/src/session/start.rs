@@ -226,9 +226,9 @@ impl Session {
 
         let recent = self.render_recent(cx);
         let shortcuts = if cfg!(target_os = "macos") {
-            "⌘T new tab · ⌘L address · ⌘D save favorite · ⌘B sidebar · type to filter"
+            "⌘T new tab · ⌘\\ split · ⌘L address · ⌘D save favorite · type to filter"
         } else {
-            "Ctrl+T new tab · Ctrl+L address · Ctrl+D save favorite · Ctrl+B sidebar · type to filter"
+            "Ctrl+T new tab · Ctrl+\\ split · Ctrl+L address · Ctrl+D save favorite · type to filter"
         };
         div()
             .id("start-page")

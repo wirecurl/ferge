@@ -10,6 +10,7 @@ mod interaction;
 mod prompts;
 mod runtime;
 mod session;
+mod transfers;
 mod vault;
 mod workspace;
 

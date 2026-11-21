@@ -6,6 +6,7 @@
 //! window gone) counts as "declined".
 
 use ferry_core::interaction::{HostKeyDecision, HostKeyPrompt};
+use ferry_core::transfer::{Conflict, ConflictDecision};
 use futures::channel::{mpsc, oneshot};
 use secrecy::SecretString;
 
@@ -22,6 +23,12 @@ pub(crate) enum PromptRequest {
     },
     Secret(SecretRequest),
     MasterPassword(MasterPasswordRequest),
+    /// A transfer would replace an existing file. Dropping the reply cancels
+    /// the transfer.
+    Conflict {
+        conflict: Conflict,
+        reply: oneshot::Sender<ConflictDecision>,
+    },
     /// A problem that does not stop the current work, shown as a notification.
     Notice(String),
 }
@@ -134,6 +141,14 @@ impl Prompter {
             return None;
         }
         answer.await.ok().flatten()
+    }
+
+    pub(crate) async fn conflict(&self, conflict: Conflict) -> Option<ConflictDecision> {
+        let (reply, answer) = oneshot::channel();
+        if !self.send(PromptRequest::Conflict { conflict, reply }) {
+            return None;
+        }
+        answer.await.ok()
     }
 
     pub(crate) fn notice(&self, message: String) {

@@ -2081,6 +2081,7 @@ dependencies = [
  "clap",
  "ferry-core",
  "futures",
+ "tempfile",
  "tokio",
 ]
 

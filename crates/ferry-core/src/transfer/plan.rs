@@ -93,7 +93,14 @@ impl Plan {
                 .file_name()
                 .and_then(|name| EntryName::new(name).ok())
                 .ok_or_else(|| Error::InvalidPath(item.as_str().into()))?;
-            let metadata = source.stat(item).await?;
+            // One unreadable item (e.g. a dangling link) must not stop the rest.
+            let metadata = match source.stat(item).await {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    problems.push(super::describe(item, &error));
+                    continue;
+                }
+            };
             let target = target_dir.join(&name);
             if !metadata.is_dir() {
                 plan.files.push(PlannedFile::new(
@@ -119,7 +126,7 @@ impl Plan {
                     match chunk {
                         Ok(chunk) => entries.extend(chunk),
                         Err(error) => {
-                            problems.push(format!("{dir}: {error}"));
+                            problems.push(super::describe(&dir, &error));
                             break;
                         }
                     }
@@ -150,7 +157,7 @@ impl Plan {
                                 metadata.size,
                                 metadata.modified,
                             )),
-                            Err(error) => problems.push(format!("{child}: {error}")),
+                            Err(error) => problems.push(super::describe(&child, &error)),
                         },
                         EntryKind::Other => {
                             problems.push(format!("{child}: not a regular file, skipped"));
@@ -176,9 +183,9 @@ impl Plan {
                 Ok(_) => problems.push(format!("{dir}: a file with this name exists")),
                 Err(Error::NotFound { .. }) => match target.mkdir(dir).await {
                     Ok(()) | Err(Error::AlreadyExists { .. }) => {}
-                    Err(error) => problems.push(format!("{dir}: {error}")),
+                    Err(error) => problems.push(super::describe(dir, &error)),
                 },
-                Err(error) => problems.push(format!("{dir}: {error}")),
+                Err(error) => problems.push(super::describe(dir, &error)),
             }
         }
         problems

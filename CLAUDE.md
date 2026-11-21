@@ -4,8 +4,9 @@ PLAN.md is the binding source for technology, architecture and performance budge
 
 ## Layout
 
-- `crates/ferry-core` – UI-independent core: remote backends, listings, `library` (SQLite:
-  favorites, folders, history), `secrets` (keyring / encrypted file). Never depends on GPUI.
+- `crates/ferry-core` – UI-independent core: remote backends, listings, `transfer` (queue,
+  pause/resume, conflicts), `library` (SQLite: favorites, folders, history), `secrets`
+  (keyring / encrypted file). Never depends on GPUI.
 - `crates/ferry-app` – GPUI desktop application (binary `ferry`).
 - `crates/ferry-bench` – benchmark harness for the PLAN.md budgets.
 
@@ -40,6 +41,7 @@ dirs, unicode, hidden files, symlinks incl. a dangling one). Tests that need the
 ./testserver/up.sh
 cargo build --release
 cargo run --release -p ferry-bench   # prints measurements and a budget table; exit 1 = budget missed
+                                     # also reports transfer throughput (256 MiB up/down, vs. OpenSSH sftp)
 ```
 
 The harness starts the release binary in hidden `--bench startup|interaction` modes. The app

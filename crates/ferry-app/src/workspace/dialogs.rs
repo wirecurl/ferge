@@ -7,6 +7,7 @@
 
 use ferry_core::interaction::{HostKeyDecision, HostKeyPrompt};
 use ferry_core::library::{BookmarkDraft, BookmarkId, FolderId};
+use ferry_core::transfer::{Conflict, ConflictAction, ConflictDecision, TransferId};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
@@ -65,6 +66,11 @@ pub(super) enum ActivePrompt {
         error: Option<SharedString>,
         _submits: Vec<Subscription>,
     },
+    Conflict {
+        conflict: Conflict,
+        reply: futures::channel::oneshot::Sender<ConflictDecision>,
+        apply_to_all: bool,
+    },
 }
 
 impl ActivePrompt {
@@ -73,6 +79,7 @@ impl ActivePrompt {
             Self::HostKey { session, .. }
             | Self::Secret { session, .. }
             | Self::Master { session, .. } => *session,
+            Self::Conflict { .. } => None,
         }
     }
 }
@@ -149,6 +156,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Withdraws the conflict questions of a transfer that settled.
+    pub(super) fn drop_conflicts_of(
+        &mut self,
+        transfer: TransferId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let of_transfer = |request: &PromptRequest| matches!(request, PromptRequest::Conflict { conflict, .. } if conflict.transfer == transfer);
+        self.queued_prompts
+            .retain(|prompt| !of_transfer(&prompt.request));
+        if matches!(
+            &self.prompt,
+            Some(ActivePrompt::Conflict { conflict, .. }) if conflict.transfer == transfer
+        ) {
+            self.prompt = None;
+            self.show_next_prompt(window, cx);
+        }
+        cx.notify();
+    }
+
     fn show_next_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.prompt.is_some() {
             return;
@@ -157,14 +184,10 @@ impl Workspace {
             self.restore_focus(window, cx);
             return;
         };
-        // Show the tab that is asking.
-        if let Some(index) = session.and_then(|id| {
-            self.sessions
-                .iter()
-                .position(|candidate| candidate.read(cx).id() == id)
-        }) && index != self.active
-        {
-            self.active = index;
+        // Show the tab and pane that is asking.
+        if let Some((tab, pane)) = session.and_then(|id| self.locate(id, cx)) {
+            self.active = tab;
+            self.tabs[tab].focused = pane;
             self.update_title(window, cx);
         }
         self.prompt = match request {
@@ -218,6 +241,14 @@ impl Workspace {
                     _submits: submits,
                 })
             }
+            PromptRequest::Conflict { conflict, reply } => {
+                window.focus(&self.prompt_focus, cx);
+                Some(ActivePrompt::Conflict {
+                    conflict,
+                    reply,
+                    apply_to_all: false,
+                })
+            }
             PromptRequest::Notice(message) => {
                 window.push_notification(Notification::error(message), cx);
                 None
@@ -237,6 +268,28 @@ impl Workspace {
     ) {
         if let Some(ActivePrompt::HostKey { reply, .. }) = self.prompt.take() {
             let _ = reply.send(decision);
+        }
+        self.show_next_prompt(window, cx);
+    }
+
+    /// `None` dismisses the question, which cancels the transfer.
+    fn answer_conflict(
+        &mut self,
+        action: Option<ConflictAction>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ActivePrompt::Conflict {
+            reply,
+            apply_to_all,
+            ..
+        }) = self.prompt.take()
+            && let Some(action) = action
+        {
+            let _ = reply.send(ConflictDecision {
+                action,
+                apply_to_all,
+            });
         }
         self.show_next_prompt(window, cx);
     }
@@ -315,6 +368,7 @@ impl Workspace {
             }
             Some(ActivePrompt::Secret { .. }) => self.answer_secret(false, window, cx),
             Some(ActivePrompt::Master { .. }) => self.answer_master(false, window, cx),
+            Some(ActivePrompt::Conflict { .. }) => self.answer_conflict(None, window, cx),
             None => {}
         }
     }
@@ -651,6 +705,11 @@ impl Workspace {
                 error,
                 ..
             } => Self::render_master_prompt(request, input, confirm.as_ref(), error.as_ref(), cx),
+            ActivePrompt::Conflict {
+                conflict,
+                apply_to_all,
+                ..
+            } => self.render_conflict_prompt(conflict, *apply_to_all, cx),
         };
         Some(
             Self::overlay(PROMPT_CONTEXT)
@@ -838,6 +897,125 @@ impl Workspace {
                             .label(if request.create { "Create" } else { "Unlock" })
                             .on_click(answer(true)),
                     ),
+            )
+    }
+
+    fn render_conflict_prompt(
+        &self,
+        conflict: &Conflict,
+        apply_to_all: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let theme = cx.theme();
+        let (muted, code_bg) = (theme.muted_foreground, theme.muted);
+        let name = conflict.path.file_name().unwrap_or("/").to_owned();
+        let folder = conflict
+            .path
+            .parent()
+            .map(|parent| parent.to_string())
+            .unwrap_or_default();
+        let newer = match (conflict.source_modified, conflict.existing_modified) {
+            (Some(new), Some(old)) if new > old => Some(true),
+            (Some(new), Some(old)) if new < old => Some(false),
+            _ => None,
+        };
+        let describe = |label: &'static str, size: u64, modified, highlight: bool| {
+            h_flex()
+                .gap_2()
+                .child(div().w(px(72.)).text_color(muted).child(label))
+                .child(crate::format::size(size))
+                .child(div().text_color(muted).child("·"))
+                .child(
+                    div()
+                        .when(highlight, |this| {
+                            this.font_weight(gpui::FontWeight::SEMIBOLD)
+                        })
+                        .child(crate::format::date(modified)),
+                )
+                .when(highlight, |this| {
+                    this.child(div().text_xs().text_color(muted).child("newer"))
+                })
+        };
+        Self::card(cx)
+            .w(px(500.))
+            .track_focus(&self.prompt_focus)
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(format!("Replace “{name}”?")),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .child(format!("A file with this name already exists in {folder}.")),
+            )
+            .child(
+                v_flex()
+                    .p_3()
+                    .gap_1()
+                    .rounded_md()
+                    .bg(code_bg)
+                    .text_sm()
+                    .child(describe(
+                        "Existing",
+                        conflict.existing_size,
+                        conflict.existing_modified,
+                        newer == Some(false),
+                    ))
+                    .child(describe(
+                        "New",
+                        conflict.source_size,
+                        conflict.source_modified,
+                        newer == Some(true),
+                    )),
+            )
+            .child(
+                Checkbox::new("conflict-apply-all")
+                    .label("Do the same for all conflicts in this transfer")
+                    .checked(apply_to_all)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        if let Some(ActivePrompt::Conflict { apply_to_all, .. }) = &mut this.prompt
+                        {
+                            *apply_to_all = *checked;
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(Self::conflict_buttons(cx))
+    }
+
+    fn conflict_buttons(cx: &mut Context<Self>) -> gpui::Div {
+        let decide = |action: ConflictAction| {
+            cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
+                this.answer_conflict(Some(action), window, cx);
+            })
+        };
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("conflict-stop")
+                    .ghost()
+                    .label("Stop transfer")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.answer_conflict(None, window, cx);
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("conflict-skip")
+                    .label("Skip")
+                    .on_click(decide(ConflictAction::Skip)),
+            )
+            .child(
+                Button::new("conflict-keep")
+                    .label("Keep both")
+                    .on_click(decide(ConflictAction::KeepBoth)),
+            )
+            .child(
+                Button::new("conflict-replace")
+                    .primary()
+                    .label("Replace")
+                    .on_click(decide(ConflictAction::Overwrite)),
             )
     }
 }

@@ -70,7 +70,7 @@ fn finish_file(transfer: &Transfer, file: &PlannedFile, outcome: Result<Outcome>
             drop(state);
             transfer
                 .control()
-                .record_error(format!("{}: {error}", file.source));
+                .record_error(super::describe(&file.source, &error));
         }
     }
 }
@@ -184,7 +184,9 @@ async fn choose_destination(
             path: file.target.clone(),
         });
     }
-    let same_file = Arc::ptr_eq(&transfer.source, &transfer.target) && file.source == file.target;
+    let same_remote = Arc::ptr_eq(&transfer.source, &transfer.target)
+        || (transfer.source.is_local() && transfer.target.is_local());
+    let same_file = same_remote && file.source == file.target;
     let action = if same_file {
         // Copying a file onto itself can only mean "duplicate".
         ConflictAction::KeepBoth
@@ -219,6 +221,11 @@ async fn resolve(transfer: &Transfer, conflict: Conflict) -> Option<ConflictActi
     let mut remembered = transfer.conflicts.lock().await;
     if let Some(action) = *remembered {
         return Some(action);
+    }
+    // Another file's question may have stopped the transfer while this one
+    // waited for its turn; do not ask again.
+    if transfer.control().stop.is_some() {
+        return None;
     }
     let decision = transfer.resolver.resolve(conflict).await?;
     if decision.apply_to_all {

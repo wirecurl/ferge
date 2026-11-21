@@ -18,6 +18,7 @@ pub mod library;
 pub mod listing;
 pub mod ops;
 pub mod path;
+pub mod quick_look;
 pub mod remote;
 pub mod secrets;
 pub mod settings;

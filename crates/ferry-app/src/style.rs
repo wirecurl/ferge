@@ -124,6 +124,25 @@ pub(crate) trait TypeScale: Styled + Sized {
         self.text_size(em(1.075))
             .font_weight(gpui::FontWeight::SEMIBOLD)
     }
+
+    /// Headings inside a previewed document, level 1 the largest. Only
+    /// content uses these; the interface itself has no headings above
+    /// [`Self::text_title`].
+    fn text_heading(self, level: u8) -> Self {
+        let size = match level {
+            0 | 1 => 1.5,
+            2 => 1.25,
+            3 => 1.1,
+            _ => 1.,
+        };
+        self.text_size(em(size))
+            .line_height(em(size * 1.3))
+            .font_weight(if level <= 2 {
+                gpui::FontWeight::BOLD
+            } else {
+                gpui::FontWeight::SEMIBOLD
+            })
+    }
 }
 
 impl<E: Styled> TypeScale for E {}

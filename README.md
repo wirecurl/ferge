@@ -112,6 +112,16 @@ ferry -F ./ssh_config myserver          # use another SSH client configuration
 In the server panel, type to search, use ↑ ↓ and press Enter to connect (Ctrl+Enter: new tab).
 Favorites and folders are edited from their context menu or the + menu.
 
+## Preview
+
+Space shows the selected file over the panes; the arrow keys keep moving through the folder.
+Ferry shows text and images, spreadsheets (`xlsx`, `xlsm`, `xlsb`, `ods`, `csv`, `tsv`) as a
+grid with a tab per sheet, Word, PowerPoint and OpenDocument files (`docx`, `pptx`, `odt`, `odp`)
+as their text with headings, lists and tables, and PDF pages. All of it is built in and works
+the same for files on servers. On macOS, Quick Look renders office files, including older
+formats and Pages, Numbers and Keynote, as their programs would. Text is read only from its
+start; documents up to 64 MB are read whole.
+
 ## Settings
 
 Settings live in `settings.toml` in the configuration directory (`~/.config/ferry` on Linux,

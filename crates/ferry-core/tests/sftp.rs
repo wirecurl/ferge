@@ -457,3 +457,137 @@ async fn resumes_reads_and_writes_and_replaces_atomically() {
     remote.delete_dir(&scratch).await.unwrap();
     remote.disconnect().await;
 }
+
+async fn settled(
+    queue: &ferry_core::transfer::TransferQueue,
+    id: ferry_core::transfer::TransferId,
+) -> ferry_core::transfer::TransferSnapshot {
+    loop {
+        let snapshot = queue
+            .snapshot()
+            .into_iter()
+            .find(|snapshot| snapshot.id == id)
+            .unwrap();
+        if snapshot.state.is_settled() {
+            return snapshot;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+fn below(base: &RemotePath, relative: &str) -> RemotePath {
+    relative
+        .split('/')
+        .fold(base.clone(), |path, part| path.join(&name(part)))
+}
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
+async fn uploads_and_downloads_a_tree() {
+    use ferry_core::remote::local::LocalRemote;
+    use ferry_core::transfer::{
+        ConflictAction, FixedPolicy, TransferQueue, TransferRequest, TransferState,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let remote: Arc<dyn Remote> = Arc::new(
+        connect(
+            key_options(&dir.path().join("known_hosts")),
+            Arc::new(Scripted::accepting()),
+        )
+        .await
+        .expect("connect"),
+    );
+    let local: Arc<dyn Remote> = Arc::new(LocalRemote::new());
+    let local_path = |path: &Path| RemotePath::parse(path.to_str().unwrap()).unwrap();
+
+    let source = dir.path().join("upload");
+    std::fs::create_dir_all(source.join("nested/deeper")).unwrap();
+    let big: Vec<u8> = (0..4 * 1024 * 1024 + 99_u32)
+        .map(|i| (i % 241) as u8)
+        .collect();
+    std::fs::write(source.join("big.bin"), &big).unwrap();
+    std::fs::write(source.join("nested/small.txt"), b"small").unwrap();
+    std::fs::write(source.join("nested/deeper/empty"), b"").unwrap();
+
+    let scratch = remote
+        .home_dir()
+        .await
+        .unwrap()
+        .join(&name(&format!("transfer-{}", std::process::id())));
+    remote.mkdir(&scratch).await.unwrap();
+
+    let (queue, _events) = TransferQueue::new(4);
+    let up = queue.enqueue(
+        TransferRequest {
+            source: Arc::clone(&local),
+            items: vec![local_path(&source)],
+            target: Arc::clone(&remote),
+            target_dir: scratch.clone(),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Overwrite)),
+    );
+    let uploaded = settled(&queue, up).await;
+    assert_eq!(
+        uploaded.state,
+        TransferState::Completed,
+        "{:?}",
+        uploaded.errors
+    );
+    assert_eq!(uploaded.files_done, 3);
+
+    let back = dir.path().join("back");
+    std::fs::create_dir(&back).unwrap();
+    let down = queue.enqueue(
+        TransferRequest {
+            source: Arc::clone(&remote),
+            items: vec![scratch.join(&name("upload"))],
+            target: Arc::clone(&local),
+            target_dir: local_path(&back),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Overwrite)),
+    );
+    let downloaded = settled(&queue, down).await;
+    assert_eq!(
+        downloaded.state,
+        TransferState::Completed,
+        "{:?}",
+        downloaded.errors
+    );
+    assert_eq!(std::fs::read(back.join("upload/big.bin")).unwrap(), big);
+    assert_eq!(
+        std::fs::read(back.join("upload/nested/small.txt")).unwrap(),
+        b"small"
+    );
+    assert_eq!(
+        std::fs::read(back.join("upload/nested/deeper/empty")).unwrap(),
+        b""
+    );
+    // Times survive the round trip (SFTP keeps whole seconds).
+    let seconds = |path: &Path| {
+        std::fs::metadata(path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    assert_eq!(
+        seconds(&back.join("upload/big.bin")),
+        seconds(&source.join("big.bin"))
+    );
+
+    // Clean up on the server.
+    for file in [
+        "upload/big.bin",
+        "upload/nested/small.txt",
+        "upload/nested/deeper/empty",
+    ] {
+        remote.delete_file(&below(&scratch, file)).await.unwrap();
+    }
+    for folder in ["upload/nested/deeper", "upload/nested", "upload"] {
+        remote.delete_dir(&below(&scratch, folder)).await.unwrap();
+    }
+    remote.delete_dir(&scratch).await.unwrap();
+}

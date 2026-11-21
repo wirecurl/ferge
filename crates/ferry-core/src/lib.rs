@@ -17,6 +17,7 @@ pub mod listing;
 pub mod path;
 pub mod remote;
 pub mod secrets;
+pub mod transfer;
 
 pub use destination::{Destination, SftpTarget};
 pub use entry::{Entry, EntryKind, Metadata};

@@ -39,6 +39,11 @@ pub trait FileWriter: Send {
     /// Appends `data`.
     async fn write(&mut self, data: Bytes) -> Result<()>;
 
+    /// Bytes from the start of the file that are known to be written without
+    /// gaps. Resuming at this offset is always safe, even if the writer was
+    /// dropped in the middle of a write.
+    fn confirmed(&self) -> u64;
+
     /// Waits for all outstanding writes and closes the file. Returns the
     /// file's length, i.e. the start offset plus the bytes written.
     async fn finish(self: Box<Self>) -> Result<u64>;

@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt as _;
-use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _, BufWriter};
+use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
 use super::{ByteStream, FileWriter, ListStream, Remote, reader_stream};
@@ -124,22 +124,28 @@ fn list_blocking(path: &RemotePath, sender: &mpsc::Sender<Result<Vec<Entry>>>) {
     }
 }
 
-/// Buffered sequential writes to a local file.
+/// Sequential writes to a local file. Chunks are large, so there is no extra
+/// buffering; every write is flushed, which keeps [`FileWriter::confirmed`]
+/// exact.
 struct LocalWriter {
     path: RemotePath,
-    file: BufWriter<tokio::fs::File>,
+    file: tokio::fs::File,
     length: u64,
 }
 
 #[async_trait]
 impl FileWriter for LocalWriter {
     async fn write(&mut self, data: Bytes) -> Result<()> {
-        self.file
-            .write_all(&data)
-            .await
-            .map_err(|error| Error::from_io(&self.path, error))?;
+        let io = |error| Error::from_io(&self.path, error);
+        self.file.write_all(&data).await.map_err(io)?;
+        // tokio hands writes to a background thread; wait until it is done.
+        self.file.flush().await.map_err(io)?;
         self.length += data.len() as u64;
         Ok(())
+    }
+
+    fn confirmed(&self) -> u64 {
+        self.length
     }
 
     async fn finish(mut self: Box<Self>) -> Result<u64> {
@@ -220,7 +226,7 @@ impl Remote for LocalRemote {
         }
         Ok(Box::new(LocalWriter {
             path: path.clone(),
-            file: BufWriter::with_capacity(super::READ_CHUNK, file),
+            file,
             length: offset,
         }))
     }

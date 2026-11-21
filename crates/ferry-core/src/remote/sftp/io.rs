@@ -5,6 +5,7 @@
 //! `sftp`, Ferry keeps a window of requests in flight, so throughput is bound
 //! by bandwidth instead of latency.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -246,6 +247,8 @@ pub(super) async fn open_writer(
         offset,
         chunk: chunk.max(1),
         in_flight: FuturesUnordered::new(),
+        confirmed: offset,
+        acknowledged: BTreeMap::new(),
     }))
 }
 
@@ -257,14 +260,30 @@ struct SftpWriter {
     /// Where the next write goes.
     offset: u64,
     chunk: usize,
-    in_flight: FuturesUnordered<BoxFuture<'static, Result<()>>>,
+    in_flight: FuturesUnordered<BoxFuture<'static, Result<(u64, u64)>>>,
+    /// End of the gap-free prefix that the server acknowledged.
+    confirmed: u64,
+    /// Acknowledged ranges beyond `confirmed`, by start offset.
+    acknowledged: BTreeMap<u64, u64>,
 }
 
 impl SftpWriter {
     async fn wait_for_one(&mut self) -> Result<()> {
         match self.in_flight.next().await {
-            Some(result) => result,
+            Some(result) => {
+                let (start, end) = result?;
+                self.acknowledge(start, end);
+                Ok(())
+            }
             None => Ok(()),
+        }
+    }
+
+    /// Records an acknowledged write and advances the gap-free prefix.
+    fn acknowledge(&mut self, start: u64, end: u64) {
+        self.acknowledged.insert(start, end);
+        while let Some(end) = self.acknowledged.remove(&self.confirmed) {
+            self.confirmed = end;
         }
     }
 }
@@ -286,12 +305,13 @@ impl FileWriter for SftpWriter {
             let handle = handle.clone();
             let path = self.path.clone();
             let at = self.offset;
+            let len = (end - start) as u64;
             self.in_flight.push(
                 async move {
                     session
                         .write(handle, at, piece.to_vec())
                         .await
-                        .map(drop)
+                        .map(|_| (at, at + len))
                         .map_err(|error| sftp_error(&path, error))
                 }
                 .boxed(),
@@ -302,11 +322,18 @@ impl FileWriter for SftpWriter {
         Ok(())
     }
 
+    fn confirmed(&self) -> u64 {
+        self.confirmed
+    }
+
     async fn finish(mut self: Box<Self>) -> Result<u64> {
         let mut first_error = None;
         while let Some(result) = self.in_flight.next().await {
-            if let Err(error) = result {
-                first_error.get_or_insert(error);
+            match result {
+                Ok((start, end)) => self.acknowledge(start, end),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
             }
         }
         if let Some(handle) = self.handle.take() {

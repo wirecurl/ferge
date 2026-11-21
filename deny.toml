@@ -1,0 +1,67 @@
+# cargo-deny: licenses, security advisories, banned crates and sources.
+# Run with `cargo deny check`; CI runs it on every push.
+
+[graph]
+# The platforms ferge ships on.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+# Every RUSTSEC advisory fails the check, including unmaintained and yanked
+# crates. An exception needs an entry here with the reason it does not apply.
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    # Unmaintained crates that only GPUI, gpui-component, russh-sftp or
+    # zbus 5 pull in. None has a known vulnerability; they go away with
+    # upgrades of those crates, which are separate, deliberate tasks.
+    { id = "RUSTSEC-2024-0384", reason = "instant: via gpui-component and gpui-base" },
+    { id = "RUSTSEC-2024-0436", reason = "paste: via gpui-component" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: via GPUI (cosmic-text, usvg)" },
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz: via GPUI (usvg)" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; zbus 5 is used by ferge and GPUI" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; zbus 5 is used by ferge and GPUI" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; zbus 5 is used by ferge and GPUI" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: via GPUI, gpui-component and russh-sftp" },
+]
+
+[licenses]
+# Licenses that can be combined with GPL-3.0-or-later.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[licenses.private]
+# ferge's own crates are not published; their license is in LICENSE.
+ignore = true
+
+[bans]
+# GPUI and its dependencies bring several versions of some crates; that is
+# reported, not refused.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

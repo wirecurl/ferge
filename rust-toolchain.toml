@@ -1,0 +1,5 @@
+# The exact compiler for development and CI, pinned like every dependency.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

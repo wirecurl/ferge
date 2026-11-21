@@ -1,16 +1,16 @@
-# Ferry – working notes
+# Ferge – working notes
 
 PLAN.md is the binding source for technology, architecture and performance budgets.
 
 ## Layout
 
-- `crates/ferry-core` – UI-independent core: remote backends, listings, `transfer` (queue,
+- `crates/ferge-core` – UI-independent core: remote backends, listings, `transfer` (queue,
   pause/resume, conflicts), `library` (SQLite: favorites, folders, history), `secrets`
   (keyring / encrypted file), `settings` (TOML file, edited in place, watched), `desktop`
   (desktop fonts via the XDG portal), `document` (previews: spreadsheets, office text, PDF
   pages; bounded against hostile files). Never depends on GPUI.
-- `crates/ferry-app` – GPUI desktop application (binary `ferry`).
-- `crates/ferry-bench` – benchmark harness for the PLAN.md budgets.
+- `crates/ferge-app` – GPUI desktop application (binary `ferge`).
+- `crates/ferge-bench` – benchmark harness for the PLAN.md budgets.
 
 ## Commands
 
@@ -31,9 +31,9 @@ cargo fmt --all --check
 cargo test --workspace -- --include-ignored   # includes SFTP integration tests
 ```
 
-Credentials: user `ferry`, password `ferry`; keys in `.testserver/` (`id_ed25519` without
-passphrase, `id_ed25519_encrypted` with passphrase `ferry`). For working as root: `ferry` may use sudo
-with its password, `ferry-nopasswd` without one, `ferry-nosudo` not at all (same keys and
+Credentials: user `ferge`, password `ferge`; keys in `.testserver/` (`id_ed25519` without
+passphrase, `id_ed25519_encrypted` with passphrase `ferge`). For working as root: `ferge` may use sudo
+with its password, `ferge-nopasswd` without one, `ferge-nosudo` not at all (same keys and
 password); `/root/private/secret.txt` is readable only by root. Fixtures in the login directory:
 `many/` (100,000 files, deterministic names, sparse sizes, spread mtimes) and `tree/` (nested
 dirs, unicode, hidden files, symlinks incl. a dangling one). Tests that need the server are
@@ -44,34 +44,34 @@ dirs, unicode, hidden files, symlinks incl. a dangling one). Tests that need the
 ```sh
 ./testserver/up.sh
 cargo build --release
-cargo run --release -p ferry-bench   # prints measurements and a budget table; exit 1 = budget missed
+cargo run --release -p ferge-bench   # prints measurements and a budget table; exit 1 = budget missed
                                      # also reports transfer throughput (256 MiB up/down, vs. OpenSSH sftp)
 ```
 
 The harness starts the release binary in hidden `--bench startup|interaction` modes. The app
-prints `ferry-bench:` markers to stderr; `ZED_MEASUREMENTS=1` makes GPUI print the CPU time of
+prints `ferge-bench:` markers to stderr; `ZED_MEASUREMENTS=1` makes GPUI print the CPU time of
 every frame, which the harness attributes to the preceding input. Frame budget: 8.33 ms (120 Hz).
 
-Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferry-test/home/ferry/many`.
+Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many`.
 
 To try favorites and saved passwords without touching your own data, point the data directory
 elsewhere and force the encrypted-file store:
-`XDG_DATA_HOME=/tmp/ferry-data FERRY_SECRET_STORE=file cargo run`. Settings work the same way
-with `XDG_CONFIG_HOME=/tmp/ferry-config` (`ferry/settings.toml` below it; the app watches it).
-Benchmark runs (`--bench`) keep everything in memory and never read or write settings. `cargo test -p ferry-core --test keyring -- --ignored` exercises the
+`XDG_DATA_HOME=/tmp/ferge-data FERGE_SECRET_STORE=file cargo run`. Settings work the same way
+with `XDG_CONFIG_HOME=/tmp/ferge-config` (`ferge/settings.toml` below it; the app watches it).
+Benchmark runs (`--bench`) keep everything in memory and never read or write settings. `cargo test -p ferge-core --test keyring -- --ignored` exercises the
 real Secret Service / Keychain.
 
 ## Rules
 
 - All dependency versions are pinned exactly in the root `Cargo.toml`. GPUI comes from
   `gpui-pre =0.3.12` (required by `gpui-component 0.10.0`), not `gpui` from crates.io.
-- No I/O on the UI thread. Network and filesystem work runs on tokio inside ferry-core.
+- No I/O on the UI thread. Network and filesystem work runs on tokio inside ferge-core.
 - For GPUI API questions read the sources in `~/.cargo/registry/src/*/gpui-pre-0.3.12` and
   `~/.cargo/registry/src/*/gpui-component-0.10.0` instead of guessing.
 - Commit messages and authorship never mention AI tools.
-- Look and feel come only from `crates/ferry-app/src/style.rs`, the design system:
+- Look and feel come only from `crates/ferge-app/src/style.rs`, the design system:
   - Sizes are `style::em(x)`, multiples of body text. The theme's rem is body / 0.875, so
-    gpui-component's `text_sm` controls (menus, fields, buttons) match Ferry's body text.
+    gpui-component's `text_sm` controls (menus, fields, buttons) match Ferge's body text.
   - Text sizes: `text_body`, `text_small`, `text_title`. Controls come in two sizes
     (`ControlSize::Regular` in the toolbar, `Compact` in headers and panels).
   - Icon-only buttons are `style::IconButton`, choices are `style::segmented`, related controls

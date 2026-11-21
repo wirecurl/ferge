@@ -1,19 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/ferry-core", "crates/ferry-app", "crates/ferry-bench"]
-default-members = ["crates/ferry-app"]
+members = ["crates/ferge-core", "crates/ferge-app", "crates/ferge-bench"]
+default-members = ["crates/ferge-app"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-repository = "https://github.com/ferry-app/ferry"
+repository = "https://github.com/ferge-app/ferge"
 publish = false
 
 # Every version is pinned exactly. GPUI is pre-1.0; upgrades are deliberate,
 # separate tasks and never happen as a side effect of `cargo update`.
 [workspace.dependencies]
-ferry-core = { path = "crates/ferry-core" }
+ferge-core = { path = "crates/ferge-core" }
 
 # UI. gpui-component 0.10.0 requires exactly gpui-pre 0.3.12.
 gpui = { package = "gpui-pre", version = "=0.3.12" }

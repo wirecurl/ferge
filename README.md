@@ -1,7 +1,7 @@
-# Ferry
+# Ferge
 
 A fast file transfer client for Linux and macOS, written in Rust with
-[GPUI](https://www.gpui.rs/). Ferry is keyboard-first, renders on the GPU and keeps every
+[GPUI](https://www.gpui.rs/). Ferge is keyboard-first, renders on the GPU and keeps every
 network and disk operation off the UI thread, so folders with 100,000 entries scroll, sort and
 filter without dropping a frame.
 
@@ -18,9 +18,9 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 - Transfers between any two panes or tabs: uploads, downloads and server-to-server copies of
   files and whole folders. Copy with Ctrl+C / Ctrl+V, F5 into the other pane, or drag and
   drop, including files dropped from the desktop's file manager. Local files can also be dragged
-  out of Ferry into other applications.
+  out of Ferge into other applications.
 - A transfer queue with progress, speed and time left; up to four files in parallel. Transfers
-  can be paused and resumed in the middle of a file. Files are written as `name.ferry-part` and
+  can be paused and resumed in the middle of a file. Files are written as `name.ferge-part` and
   renamed when complete, keeping their modification time; cancelling removes partial files.
 - Existing files are not overwritten silently: replace, skip or keep both, optionally for the
   rest of a transfer.
@@ -29,11 +29,11 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 - Two file browsers per tab, side by side (one in narrow windows). A server panel in each:
   favorites in folders, `~/.ssh/config` hosts, recent connections, Quick Connect, and a search
   that connects with Enter. Favorites and history are stored in SQLite in the data directory
-  (`~/.local/share/ferry` on Linux).
+  (`~/.local/share/ferge` on Linux).
 - Work as root on any SSH server where your account may use sudo, without logging in as root
   and without setting anything up: the shield button in a pane's header (or "Open as root" /
   "Work as root" where the server refused access) switches the pane to root in the same folder.
-  Ferry finds the server's `sftp-server`, runs it through `sudo` on the existing connection and
+  Ferge finds the server's `sftp-server`, runs it through `sudo` on the existing connection and
   asks for the sudo password only if sudo needs one (a saved login password is tried first; the
   sudo password can be remembered like any other). The pane header is tinted while it lasts.
 - File operations: new folder and file, rename in place, duplicate, delete (folders with their
@@ -41,10 +41,10 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 - An inspector with the details of the selection and editable permissions; optional Kind and
   Permissions columns; hidden files on demand.
 - Passwords and key passphrases can be remembered: in the Secret Service (GNOME Keyring,
-  KeePassXC, KWallet) on Linux and the Keychain on macOS. Without a credential service, Ferry
+  KeePassXC, KWallet) on Linux and the Keychain on macOS. Without a credential service, Ferge
   uses an encrypted file (Argon2id + XChaCha20-Poly1305) protected by a master password.
   Passwords are only saved after they worked; a saved password the server rejects is asked for
-  again. `FERRY_SECRET_STORE=file` forces the encrypted file.
+  again. `FERGE_SECRET_STORE=file` forces the encrypted file.
 - SFTP via [russh](https://github.com/Eugeny/russh): SSH agent, key files (with passphrase
   prompt), keyboard-interactive and password authentication.
 - Reads `~/.ssh/config`: host aliases, `HostName`, `User`, `Port`, `IdentityFile`,
@@ -66,20 +66,20 @@ Requires Rust 1.99 or newer and, on Linux, the usual GPUI dependencies (Vulkan, 
 fontconfig).
 
 ```sh
-cargo install --locked --path crates/ferry-app
-install -Dm644 packaging/linux/dev.ferry.Ferry.desktop ~/.local/share/applications/dev.ferry.Ferry.desktop
+cargo install --locked --path crates/ferge-app
+install -Dm644 packaging/linux/app.ferge.Ferge.desktop ~/.local/share/applications/app.ferge.Ferge.desktop
 # If ~/.cargo/bin is not on the PATH of your desktop session, use an absolute Exec= path:
-sed -i "s|^Exec=ferry|Exec=$HOME/.cargo/bin/ferry|" ~/.local/share/applications/dev.ferry.Ferry.desktop
+sed -i "s|^Exec=ferge|Exec=$HOME/.cargo/bin/ferge|" ~/.local/share/applications/app.ferge.Ferge.desktop
 ```
 
 ## Usage
 
 ```sh
-ferry                                   # this computer on the left, the servers on the right
-ferry myserver                          # an ssh_config alias, opened on the right
-ferry sftp://alice@example.org:2222/srv # user, port and start directory
-ferry /var/log                          # local folder
-ferry -F ./ssh_config myserver          # use another SSH client configuration
+ferge                                   # this computer on the left, the servers on the right
+ferge myserver                          # an ssh_config alias, opened on the right
+ferge sftp://alice@example.org:2222/srv # user, port and start directory
+ferge /var/log                          # local folder
+ferge -F ./ssh_config myserver          # use another SSH client configuration
 ```
 
 | Key (Linux) | Key (macOS) | Action |
@@ -121,7 +121,7 @@ Favorites and folders are edited from their context menu or the + menu.
 ## Preview
 
 Space shows the selected file over the panes; the arrow keys keep moving through the folder.
-Ferry shows text and images, spreadsheets (`xlsx`, `xlsm`, `xlsb`, `ods`, `csv`, `tsv`) as a
+Ferge shows text and images, spreadsheets (`xlsx`, `xlsm`, `xlsb`, `ods`, `csv`, `tsv`) as a
 grid with a tab per sheet, Word, PowerPoint and OpenDocument files (`docx`, `pptx`, `odt`, `odp`)
 as their text with headings, lists and tables, and PDF pages. All of it is built in and works
 the same for files on servers. On macOS, Quick Look renders office files, including older
@@ -131,12 +131,12 @@ and copied with Ctrl+C (⌘C); without a selection, Ctrl+C copies the selected f
 
 ## Settings
 
-Settings live in `settings.toml` in the configuration directory (`~/.config/ferry` on Linux,
-`~/Library/Application Support/ferry` on macOS). The settings window (Ctrl+, or the gear in the
+Settings live in `settings.toml` in the configuration directory (`~/.config/ferge` on Linux,
+`~/Library/Application Support/ferge` on macOS). The settings window (Ctrl+, or the gear in the
 toolbar) edits the same file, and edits made to the file in any editor take effect as soon as
-it is saved. Ferry keeps comments and the order of what is written by hand, and a file that is
+it is saved. Ferge keeps comments and the order of what is written by hand, and a file that is
 a symbolic link (as in a dotfiles repository) stays one. A setting that is left out uses its
-default; a value Ferry cannot use is reported and ignored.
+default; a value Ferge cannot use is reported and ignored.
 
 ```toml
 [appearance]
@@ -158,8 +158,8 @@ See [CLAUDE.md](CLAUDE.md) for build, test and benchmark commands. In short:
 ```sh
 cargo test --workspace
 ./testserver/up.sh && cargo test --workspace -- --include-ignored
-cargo build --release && cargo run --release -p ferry-bench
+cargo build --release && cargo run --release -p ferge-bench
 ```
 
-The workspace has three crates: `ferry-core` (protocols, listings; no UI), `ferry-app` (GPUI
-application) and `ferry-bench` (performance budget checks).
+The workspace has three crates: `ferge-core` (protocols, listings; no UI), `ferge-app` (GPUI
+application) and `ferge-bench` (performance budget checks).

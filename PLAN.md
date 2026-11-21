@@ -1,6 +1,6 @@
-# Ferry – Plan
+# Ferge – Plan
 
-Arbeitsname „Ferry“. Ein schneller, moderner File-Transfer-Client für Linux und macOS, der sich am Bedienkonzept von Transmit 5 orientiert. Eigenes Produkt mit eigenem Namen und Look, kein 1:1-Nachbau.
+Name „Ferge“ (norwegisch für Fähre, im Deutschen dichterisch für Fährmann). Ein schneller, moderner File-Transfer-Client für Linux und macOS, der sich am Bedienkonzept von Transmit 5 orientiert. Eigenes Produkt mit eigenem Namen und Look, kein 1:1-Nachbau.
 
 Hauptplattform: Arch Linux mit dem Wayland-Compositor **niri**. macOS ist Zweitplattform.
 
@@ -37,15 +37,15 @@ Toolchain lokal: Rust 1.99.1, Docker vorhanden, Wayland-Session unter niri.
 
 ```
 crates/
-  ferry-core/   kein UI-Code
+  ferge-core/   kein UI-Code
     remote/       Trait `Remote`: list (Stream), stat, read, write, rename, delete, mkdir, chmod
                   Backends: local, sftp; später ftp/ftps, s3, webdav
     transfer/     Queue, Connection-Pool pro Host, Parallelität, Pause/Resume, Konfliktregeln
     sync/         Diff-Engine (Größe + mtime, optional Checksum), Dry-Run, Ignore-Regeln
     store/        SQLite: Server, Ordner, History, Queue
     secrets/      keyring mit Fallback
-  ferry-app/    GPUI-Oberfläche
-  ferry-bench/  Benchmark-Harness gegen Test-Server
+  ferge-app/    GPUI-Oberfläche
+  ferge-bench/  Benchmark-Harness gegen Test-Server
 ```
 
 Der Core kennt keine UI. Er streamt Events (Listing-Chunks, Fortschritt, Auth-Rückfragen wie Host-Key-Bestätigung oder Passphrase). Die UI bleibt dadurch austauschbar, und der Core ist ohne Fenster testbar.
@@ -85,7 +85,7 @@ Ab Phase 1 automatisiert gemessen:
 
 ### Phase 1 – Fundament (jetzt)
 
-1. Cargo-Workspace mit `ferry-core`, `ferry-app`, `ferry-bench`; Versionen gepinnt.
+1. Cargo-Workspace mit `ferge-core`, `ferge-app`, `ferge-bench`; Versionen gepinnt.
 2. GPUI-Hello-World unter niri bauen und starten: prüfen, dass Wayland, Fractional Scaling und Dekorationen sauber funktionieren.
 3. `Remote`-Trait mit Streaming-Listing; Backends `local` und `sftp`.
 4. SFTP-Auth: Key, ssh-agent, Passwort, `~/.ssh/config`-Aliase, `known_hosts`-Prüfung mit Rückfrage bei unbekanntem Host-Key.
@@ -115,7 +115,7 @@ Richtungen Upload, Download, Mirror. Vorschau als Dry-Run vor der Ausführung, L
 
 Remote-Datei im externen Editor öffnen mit Auto-Upload beim Speichern, Info- und Rechte-Inspector, Paketierung (AUR, Flatpak, signiertes macOS-Bundle).
 
-Als root arbeiten: Ein Pane wechselt per Klick auf root, ohne Root-Login und ohne Einrichtung auf dem Server. Ferry startet über die bestehende SSH-Verbindung zusätzliche SFTP-Kanäle mit `sudo sftp-server` (Pfad automatisch ermittelt, Passwort nur wenn sudo es verlangt, vorher mit `sudo true` geprüft) und hält das Passwort danach nicht im Speicher.
+Als root arbeiten: Ein Pane wechselt per Klick auf root, ohne Root-Login und ohne Einrichtung auf dem Server. Ferge startet über die bestehende SSH-Verbindung zusätzliche SFTP-Kanäle mit `sudo sftp-server` (Pfad automatisch ermittelt, Passwort nur wenn sudo es verlangt, vorher mit `sudo true` geprüft) und hält das Passwort danach nicht im Speicher.
 
 ## Risiken
 

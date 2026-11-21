@@ -1,0 +1,19 @@
+[package]
+name = "ferge-bench"
+description = "Benchmark harness that checks Ferge against its performance budgets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+ferge-core.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

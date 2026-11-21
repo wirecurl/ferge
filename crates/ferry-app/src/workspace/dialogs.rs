@@ -6,7 +6,7 @@
 //! belong to a tab and disappear with it.
 
 use ferry_core::interaction::{HostKeyDecision, HostKeyPrompt};
-use ferry_core::library::{BookmarkDraft, BookmarkId, FolderId};
+use ferry_core::library::{BookmarkDraft, BookmarkId, FolderId, Library};
 use ferry_core::transfer::{Conflict, ConflictAction, ConflictDecision, TransferId};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -34,12 +34,13 @@ const DIALOG_CONTEXT: &str = "FerryDialog";
 /// Shortest master password accepted for a new password file.
 const MIN_MASTER_PASSWORD_LEN: usize = 8;
 
-gpui::actions!(ferry_dialog, [CancelPrompt, CancelDialog]);
+gpui::actions!(ferry_dialog, [CancelPrompt, CancelDialog, ConfirmDialog]);
 
 pub(super) fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([
         gpui::KeyBinding::new("escape", CancelPrompt, Some(PROMPT_CONTEXT)),
         gpui::KeyBinding::new("escape", CancelDialog, Some(DIALOG_CONTEXT)),
+        gpui::KeyBinding::new("enter", ConfirmDialog, Some(DIALOG_CONTEXT)),
     ]);
 }
 
@@ -110,11 +111,16 @@ pub(super) enum FolderPurpose {
     Rename(FolderId),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub(super) enum ConfirmAction {
     DeleteBookmark(BookmarkId),
     DeleteFolder(FolderId),
     ClearHistory,
+    /// Delete files and folders shown in `browser`.
+    DeleteFiles {
+        browser: gpui::WeakEntity<crate::browser::FileBrowser>,
+        items: Vec<(ferry_core::RemotePath, ferry_core::EntryKind)>,
+    },
 }
 
 impl Workspace {
@@ -188,7 +194,7 @@ impl Workspace {
         if let Some((tab, pane)) = session.and_then(|id| self.locate(id, cx)) {
             self.active = tab;
             self.tabs[tab].focused = pane;
-            self.update_title(window, cx);
+            self.sync_active(window, cx);
         }
         self.prompt = match request {
             PromptRequest::HostKey { prompt, reply } => {
@@ -487,8 +493,29 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (title, message, confirm): (SharedString, SharedString, SharedString) = match action {
+        let (title, message, confirm): (SharedString, SharedString, SharedString) = match &action {
+            ConfirmAction::DeleteFiles { items, .. } => {
+                let folders = items
+                    .iter()
+                    .filter(|(_, kind)| *kind == ferry_core::EntryKind::Directory)
+                    .count();
+                let what = match items.as_slice() {
+                    [(path, _)] => format!("“{}”", path.file_name().unwrap_or("/")),
+                    _ => format!("{} items", items.len()),
+                };
+                let contents = if folders > 0 {
+                    " Folders are deleted with everything in them."
+                } else {
+                    ""
+                };
+                (
+                    format!("Delete {what}?").into(),
+                    format!("This cannot be undone.{contents}").into(),
+                    "Delete".into(),
+                )
+            }
             ConfirmAction::DeleteBookmark(id) => {
+                let id = *id;
                 let name = self
                     .snapshot
                     .bookmark(id)
@@ -501,6 +528,7 @@ impl Workspace {
                 )
             }
             ConfirmAction::DeleteFolder(id) => {
+                let id = *id;
                 let name = self
                     .snapshot
                     .folder(id)
@@ -542,15 +570,20 @@ impl Workspace {
         let Some(Dialog::Confirm { action, .. }) = &self.dialog else {
             return;
         };
-        let action = *action;
-        self.change_library(
-            move |library| match action {
-                ConfirmAction::DeleteBookmark(id) => library.delete_bookmark(id),
-                ConfirmAction::DeleteFolder(id) => library.delete_folder(id),
-                ConfirmAction::ClearHistory => library.clear_history(),
-            },
-            cx,
-        );
+        match action.clone() {
+            ConfirmAction::DeleteFiles { browser, items } => {
+                if let Some(browser) = browser.upgrade() {
+                    browser.update(cx, |browser, cx| browser.delete(items, cx));
+                }
+            }
+            ConfirmAction::DeleteBookmark(id) => {
+                self.change_library(move |library| library.delete_bookmark(id), cx);
+            }
+            ConfirmAction::DeleteFolder(id) => {
+                self.change_library(move |library| library.delete_folder(id), cx);
+            }
+            ConfirmAction::ClearHistory => self.change_library(Library::clear_history, cx),
+        }
         self.close_dialog(window, cx);
     }
 
@@ -560,6 +593,13 @@ impl Workspace {
             self.restore_focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// Enter confirms a question; other dialogs handle Enter in their fields.
+    fn confirm_dialog(&mut self, _: &ConfirmDialog, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.dialog, Some(Dialog::Confirm { .. })) {
+            self.run_confirmed(window, cx);
+        }
     }
 
     fn cancel_dialog(&mut self, _: &CancelDialog, window: &mut Window, cx: &mut Context<Self>) {
@@ -685,6 +725,7 @@ impl Workspace {
         Some(
             Self::overlay(DIALOG_CONTEXT)
                 .on_action(cx.listener(Self::cancel_dialog))
+                .on_action(cx.listener(Self::confirm_dialog))
                 .child(card),
         )
     }

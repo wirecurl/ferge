@@ -1,34 +1,30 @@
-//! The main window: tabs, the sidebar with favorites, and dialogs.
+//! The main window: a toolbar, tabs of two file browsers each (this computer
+//! and a server, side by side), the inspector, the transfers and dialogs.
 
 mod dialogs;
-mod sidebar;
+mod library;
+mod toolbar;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ferry_core::Destination;
-use ferry_core::library::{
-    BookmarkDraft, BookmarkId, FolderId, Library, LibraryError, LibrarySnapshot,
-};
-use ferry_core::remote::sftp::{SshConfigSource, configured_hosts};
+use ferry_core::library::{Library, LibrarySnapshot};
 use ferry_core::transfer::{TransferEvent, TransferId};
+use ferry_core::{Destination, Remote, RemotePath};
 use futures::StreamExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
-    div, px,
+    App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::tab::{Tab, TabBar};
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Theme, h_flex, v_flex,
-};
+use gpui_component::input::{InputEvent, InputState};
+use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
-use self::dialogs::{ActivePrompt, Dialog};
+use self::dialogs::{ActivePrompt, ConfirmAction, Dialog};
 use crate::actions;
 use crate::browser::FileBrowser;
+use crate::inspector::{INSPECTOR_WIDTH, Inspector};
 use crate::prompts::{self, PromptRequest, SessionId, TaggedPrompt};
 use crate::runtime;
 use crate::session::{ConnectRequest, Session, SessionContext, SessionEvent};
@@ -38,42 +34,26 @@ use crate::vault::Vault;
 /// Key context of the whole window.
 const WORKSPACE_CONTEXT: &str = "Workspace";
 
-/// Below this window width the sidebar hides itself.
-const SIDEBAR_MIN_WINDOW_WIDTH: gpui::Pixels = px(720.);
+/// Below this width two panes do not fit side by side; one is shown.
+const NARROW_WINDOW_WIDTH: gpui::Pixels = px(860.);
 
 /// Height of the transfer panel.
 const TRANSFER_PANEL_HEIGHT: gpui::Pixels = px(220.);
 
-/// A tab: one pane, or two side by side.
-struct Panes {
-    panes: Vec<Entity<Session>>,
-    /// The pane with the keyboard focus.
-    focused: usize,
-}
-
-impl Panes {
-    fn active(&self) -> &Entity<Session> {
-        &self.panes[self.focused.min(self.panes.len() - 1)]
-    }
-
-    fn other(&self) -> Option<&Entity<Session>> {
-        (self.panes.len() == 2).then(|| &self.panes[1 - self.focused.min(1)])
-    }
-}
-
 gpui::actions!(
     workspace,
     [
-        FocusAddress,
         NewTab,
         CloseTab,
         NextTab,
         PreviousTab,
-        ToggleSidebar,
-        SaveFavorite,
-        /// Shows a second pane next to the current one, or closes it.
+        /// Shows a second file browser next to the current one, or closes it.
         ToggleSplit,
         ToggleTransfers,
+        /// Shows or hides the details of the selection.
+        ToggleInspector,
+        /// Moves the keyboard to the search field.
+        FocusSearch,
     ]
 );
 
@@ -91,25 +71,28 @@ pub(crate) fn bind_keys(cx: &mut App) {
     }
     let context = Some(WORKSPACE_CONTEXT);
     cx.bind_keys([
-        gpui::KeyBinding::new(primary!("l"), FocusAddress, context),
         gpui::KeyBinding::new(primary!("t"), NewTab, context),
         gpui::KeyBinding::new(primary!("w"), CloseTab, context),
         gpui::KeyBinding::new("ctrl-tab", NextTab, context),
         gpui::KeyBinding::new("ctrl-shift-tab", PreviousTab, context),
-        gpui::KeyBinding::new(primary!("b"), ToggleSidebar, context),
-        gpui::KeyBinding::new(primary!("d"), SaveFavorite, context),
         gpui::KeyBinding::new(primary!("\\"), ToggleSplit, context),
         gpui::KeyBinding::new(primary!("j"), ToggleTransfers, context),
+        gpui::KeyBinding::new(primary!("i"), ToggleInspector, context),
+        gpui::KeyBinding::new(primary!("f"), FocusSearch, context),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
         gpui::KeyBinding::new("cmd-shift-]", NextTab, context),
         gpui::KeyBinding::new("cmd-shift-[", PreviousTab, context),
+        gpui::KeyBinding::new("cmd-alt-left", actions::FocusLeftPane, context),
+        gpui::KeyBinding::new("cmd-alt-right", actions::FocusRightPane, context),
     ]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([
         gpui::KeyBinding::new("ctrl-pagedown", NextTab, context),
         gpui::KeyBinding::new("ctrl-pageup", PreviousTab, context),
+        gpui::KeyBinding::new("ctrl-alt-left", actions::FocusLeftPane, context),
+        gpui::KeyBinding::new("ctrl-alt-right", actions::FocusRightPane, context),
     ]);
     dialogs::bind_keys(cx);
 }
@@ -117,12 +100,29 @@ pub(crate) fn bind_keys(cx: &mut App) {
 /// How the window was started.
 #[derive(Debug, Default)]
 pub(crate) struct Options {
-    /// Connect the first tab to this address.
+    /// Connect the server pane of the first tab to this address.
     pub initial: Option<String>,
     /// `-F` from the command line.
     pub ssh_config: Option<PathBuf>,
     /// Keep favorites, history and passwords in memory only (benchmarks).
     pub ephemeral: bool,
+}
+
+/// A tab: one pane, or two side by side.
+struct Panes {
+    panes: Vec<Entity<Session>>,
+    /// The pane with the keyboard.
+    focused: usize,
+}
+
+impl Panes {
+    fn active(&self) -> &Entity<Session> {
+        &self.panes[self.focused.min(self.panes.len() - 1)]
+    }
+
+    fn other(&self) -> Option<&Entity<Session>> {
+        (self.panes.len() == 2).then(|| &self.panes[1 - self.focused.min(1)])
+    }
 }
 
 pub(crate) struct Workspace {
@@ -134,9 +134,7 @@ pub(crate) struct Workspace {
     library: Option<Arc<Library>>,
     snapshot: Arc<LibrarySnapshot>,
     /// Host aliases from the SSH configuration.
-    ssh_hosts: Vec<SharedString>,
-    collapsed: HashSet<FolderId>,
-    sidebar_open: bool,
+    ssh_hosts: Arc<[SharedString]>,
     queued_prompts: VecDeque<TaggedPrompt>,
     prompt: Option<ActivePrompt>,
     dialog: Option<Dialog>,
@@ -145,9 +143,13 @@ pub(crate) struct Workspace {
     transfers_open: bool,
     /// Transfers already seen, so only new ones open the panel.
     seen_transfers: HashSet<TransferId>,
-    /// Background work owned by the window; dropped with it.
+    inspector: Entity<Inspector>,
+    inspector_open: bool,
+    /// The toolbar's search field; it filters the active file browser.
+    filter: Entity<InputState>,
+    /// Background work and subscriptions owned by the window.
     tasks: Vec<Task<()>>,
-    _appearance: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
@@ -191,6 +193,17 @@ impl Workspace {
             warm_up.store().await;
         });
 
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter this folder"));
+        let filter_events =
+            cx.subscribe_in(&filter, window, |this, input, event: &InputEvent, _, cx| {
+                if let InputEvent::Change = event {
+                    let text = input.read(cx).value().to_string();
+                    if let Some(browser) = this.active_browser(cx) {
+                        browser.update(cx, |browser, cx| browser.set_filter(text, cx));
+                    }
+                }
+            });
+
         let mut workspace = Self {
             context: SessionContext {
                 prompts: sender,
@@ -203,9 +216,7 @@ impl Workspace {
             next_session: 0,
             library: None,
             snapshot: Arc::default(),
-            ssh_hosts: Vec::new(),
-            collapsed: HashSet::new(),
-            sidebar_open: true,
+            ssh_hosts: Arc::from([]),
             queued_prompts: VecDeque::new(),
             prompt: None,
             dialog: None,
@@ -213,8 +224,11 @@ impl Workspace {
             transfer_panel: cx.new(TransferPanel::new),
             transfers_open: false,
             seen_transfers: HashSet::new(),
+            inspector: cx.new(|_| Inspector::new()),
+            inspector_open: false,
+            filter,
             tasks: Vec::new(),
-            _appearance: appearance,
+            _subscriptions: vec![appearance, filter_events],
         };
         workspace.tasks = vec![
             prompt_listener,
@@ -223,21 +237,16 @@ impl Workspace {
             Self::load_library(options.ephemeral, cx),
         ];
 
-        let session = workspace.add_tab(window, cx);
-        session.update(cx, |session, cx| match options.initial {
-            Some(address) => match Destination::parse(&address) {
-                Ok(destination) => session.connect(ConnectRequest::to(destination), window, cx),
-                Err(error) => {
-                    tracing::error!(%address, %error, "invalid destination");
-                    session.focus(window, cx);
-                }
-            },
-            None => session.focus(window, cx),
+        let initial = options.initial.and_then(|address| {
+            Destination::parse(&address)
+                .inspect_err(|error| tracing::error!(%address, %error, "invalid destination"))
+                .ok()
         });
+        workspace.add_tab(initial.map(ConnectRequest::to), window, cx);
         workspace
     }
 
-    /// The browser of the active tab, if it is connected (benchmarks).
+    /// The browser of the active pane, if it shows one.
     pub(crate) fn active_browser(&self, cx: &App) -> Option<Entity<FileBrowser>> {
         self.active_session()?.read(cx).browser().cloned()
     }
@@ -261,115 +270,6 @@ impl Workspace {
         })
     }
 
-    // ---------------------------------------------------------------------
-    // Background loading
-
-    fn load_ssh_hosts(&self, cx: &mut Context<Self>) -> Task<()> {
-        let source = self
-            .context
-            .ssh_config
-            .clone()
-            .map_or(SshConfigSource::User, SshConfigSource::File);
-        let lookup = runtime::spawn(cx, async move {
-            tokio::task::spawn_blocking(move || configured_hosts(&source)).await
-        });
-        cx.spawn(async move |this, cx| {
-            let hosts = match lookup.await {
-                Ok(Ok(Ok(hosts))) => hosts,
-                Ok(Ok(Err(error))) => {
-                    tracing::warn!(%error, "could not read the SSH configuration");
-                    Vec::new()
-                }
-                _ => Vec::new(),
-            };
-            let _ = this.update(cx, |workspace, cx| {
-                workspace.ssh_hosts = hosts.into_iter().map(SharedString::from).collect();
-                cx.notify();
-            });
-        })
-    }
-
-    fn load_library(ephemeral: bool, cx: &mut Context<Self>) -> Task<()> {
-        let opening = runtime::spawn(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                let opened = match Library::default_path() {
-                    Some(path) if !ephemeral => Library::open(&path),
-                    _ => Library::open_in_memory(),
-                };
-                let (library, warning) = match opened {
-                    Ok(library) => (library, None),
-                    // Keep working without persistence rather than not at all.
-                    Err(error) => (Library::open_in_memory()?, Some(error.to_string())),
-                };
-                let snapshot = library.snapshot()?;
-                Ok::<_, LibraryError>((Arc::new(library), snapshot, warning))
-            })
-            .await
-        });
-        cx.spawn(async move |this, cx| {
-            let opened = match opening.await {
-                Ok(Ok(result)) => result,
-                Ok(Err(error)) | Err(error) => Err(LibraryError::Invalid(error.to_string())),
-            };
-            let _ = this.update(cx, |workspace, cx| match opened {
-                Ok((library, snapshot, warning)) => {
-                    workspace.library = Some(library);
-                    workspace.set_snapshot(snapshot, cx);
-                    if let Some(warning) = warning {
-                        workspace.notice(format!(
-                            "Favorites could not be opened and will not be saved: {warning}"
-                        ));
-                    }
-                }
-                Err(error) => tracing::error!(%error, "the library is unavailable"),
-            });
-        })
-    }
-
-    /// Runs `change` against the library on the runtime, then reloads it.
-    fn change_library(
-        &mut self,
-        change: impl FnOnce(&Library) -> Result<(), LibraryError> + Send + 'static,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(library) = self.library.clone() else {
-            self.notice("Favorites are still loading. Try again in a moment.".into());
-            return;
-        };
-        let changing = runtime::spawn(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                let result = change(&library).map_err(|error| error.to_string());
-                (result, library.snapshot())
-            })
-            .await
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok((result, snapshot))) = changing.await else {
-                return;
-            };
-            let _ = this.update(cx, |workspace, cx| {
-                match snapshot {
-                    Ok(snapshot) => workspace.set_snapshot(snapshot, cx),
-                    Err(error) => tracing::warn!(%error, "reloading the library failed"),
-                }
-                if let Err(error) = result {
-                    workspace.notice(error);
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn set_snapshot(&mut self, snapshot: LibrarySnapshot, cx: &mut Context<Self>) {
-        self.snapshot = Arc::new(snapshot);
-        let sessions: Vec<Entity<Session>> = self.all_sessions().cloned().collect();
-        for session in sessions {
-            let snapshot = Arc::clone(&self.snapshot);
-            session.update(cx, |session, cx| session.set_library(snapshot, cx));
-        }
-        cx.notify();
-    }
-
     /// Shows `message` as a notification. Goes through the prompt channel
     /// because showing it needs the window, which is not at hand everywhere.
     fn notice(&self, message: String) {
@@ -379,8 +279,12 @@ impl Workspace {
         });
     }
 
+    fn is_narrow(window: &Window) -> bool {
+        window.viewport_size().width < NARROW_WINDOW_WIDTH
+    }
+
     // ---------------------------------------------------------------------
-    // Tabs
+    // Tabs and panes
 
     /// Creates a pane; the caller places it in a tab.
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Session> {
@@ -388,7 +292,8 @@ impl Workspace {
         self.next_session += 1;
         let context = self.context.clone();
         let snapshot = Arc::clone(&self.snapshot);
-        let session = cx.new(|cx| Session::new(id, context, snapshot, window, cx));
+        let hosts = Arc::clone(&self.ssh_hosts);
+        let session = cx.new(|cx| Session::new(id, context, snapshot, hosts, window, cx));
         let events = cx.subscribe_in(&session, window, Self::on_session_event);
         self.session_events.insert(id, events);
         session
@@ -406,17 +311,33 @@ impl Workspace {
         self.drop_prompts_of(id, window, cx);
     }
 
-    /// Opens a new tab with one pane and makes it active.
-    fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<Session> {
-        let session = self.new_session(window, cx);
+    /// Opens a tab with this computer on the left and the servers (or
+    /// `server`) on the right, and makes it active.
+    fn add_tab(
+        &mut self,
+        server: Option<ConnectRequest>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Session> {
+        let local = self.new_session(window, cx);
+        let remote = self.new_session(window, cx);
+        local.update(cx, |pane, cx| {
+            pane.connect(
+                ConnectRequest::to(Destination::Local { path: None }),
+                window,
+                cx,
+            );
+        });
+        if let Some(request) = server {
+            remote.update(cx, |pane, cx| pane.connect(request, window, cx));
+        }
         self.tabs.push(Panes {
-            panes: vec![session.clone()],
-            focused: 0,
+            panes: vec![local, remote.clone()],
+            focused: 1,
         });
         self.active = self.tabs.len() - 1;
-        self.update_title(window, cx);
-        cx.notify();
-        session
+        self.focus_pane(1, window, cx);
+        remote
     }
 
     fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -424,10 +345,8 @@ impl Workspace {
             return;
         }
         self.active = index;
-        let session = self.tabs[index].active().clone();
-        session.update(cx, |session, cx| session.focus(window, cx));
-        self.update_title(window, cx);
-        cx.notify();
+        let focused = self.tabs[index].focused;
+        self.focus_pane(focused, window, cx);
     }
 
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -439,8 +358,7 @@ impl Workspace {
             self.discard_session(pane, window, cx);
         }
         if self.tabs.is_empty() {
-            self.add_tab(window, cx)
-                .update(cx, |session, cx| session.focus(window, cx));
+            self.add_tab(None, window, cx);
             return;
         }
         if self.active > index || self.active == self.tabs.len() {
@@ -450,7 +368,7 @@ impl Workspace {
         self.activate(active, window, cx);
     }
 
-    /// Gives the keyboard focus to pane `pane` of the active tab.
+    /// Gives the keyboard to pane `pane` of the active tab.
     fn focus_pane(&mut self, pane: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
@@ -461,14 +379,33 @@ impl Workspace {
         tab.focused = pane;
         let session = tab.panes[pane].clone();
         session.update(cx, |session, cx| session.focus(window, cx));
-        self.update_title(window, cx);
-        cx.notify();
+        self.sync_active(window, cx);
     }
 
-    fn update_title(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Marks the active pane, follows it with the inspector, the search field
+    /// and the window title.
+    fn sync_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active = self.active_session().cloned();
+        let sessions: Vec<Entity<Session>> = self.all_sessions().cloned().collect();
+        for session in sessions {
+            let is_active = active.as_ref() == Some(&session);
+            session.update(cx, |session, cx| session.set_active(is_active, cx));
+        }
+        let browser = self.active_browser(cx);
+        self.inspector.update(cx, |inspector, cx| {
+            inspector.set_browser(browser.as_ref(), cx);
+        });
+        let filter = browser
+            .map(|browser| browser.read(cx).filter().to_owned())
+            .unwrap_or_default();
+        if self.filter.read(cx).value().as_ref() != filter {
+            self.filter
+                .update(cx, |input, cx| input.set_value(filter, window, cx));
+        }
         if let Some(session) = self.active_session() {
             window.set_window_title(&session.read(cx).window_title(cx));
         }
+        cx.notify();
     }
 
     fn on_session_event(
@@ -481,7 +418,7 @@ impl Workspace {
         match event {
             SessionEvent::Changed => {
                 if self.active_session() == Some(session) {
-                    self.update_title(window, cx);
+                    self.sync_active(window, cx);
                 }
                 cx.notify();
             }
@@ -489,74 +426,51 @@ impl Workspace {
                 destination,
                 bookmark,
             } => {
-                let (destination, bookmark) = (destination.clone(), *bookmark);
-                self.change_library(
-                    move |library| library.record_connection(&destination, bookmark),
-                    cx,
-                );
+                // This computer is not a connection worth remembering.
+                if !matches!(destination, Destination::Local { .. }) {
+                    let (destination, bookmark) = (destination.clone(), *bookmark);
+                    self.change_library(
+                        move |library| library.record_connection(&destination, bookmark),
+                        cx,
+                    );
+                }
             }
             SessionEvent::Abandoned => {
                 let id = session.read(cx).id();
                 self.drop_prompts_of(id, window, cx);
             }
-            SessionEvent::SaveAsFavorite(destination) => {
-                let draft = BookmarkDraft {
-                    folder: None,
-                    name: String::new(),
-                    destination: destination.clone(),
-                    identity_file: None,
-                };
-                self.open_editor(None, &draft, window, cx);
+            SessionEvent::Library(action) => self.on_library_action(action.clone(), window, cx),
+            SessionEvent::OpenInNewTab(request) => {
+                self.add_tab(Some(request.clone()), window, cx);
+            }
+            SessionEvent::ConfirmDelete { browser, items } => {
+                self.confirm(
+                    ConfirmAction::DeleteFiles {
+                        browser: browser.clone(),
+                        items: items.clone(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            SessionEvent::Failed(message) => self.notice(message.clone()),
+            SessionEvent::Focused => {
+                let id = session.read(cx).id();
+                if let Some((tab, pane)) = self.locate(id, cx)
+                    && tab == self.active
+                {
+                    self.tabs[tab].focused = pane;
+                    self.sync_active(window, cx);
+                }
             }
         }
-    }
-
-    /// Opens `request` in the active tab, or in a new one.
-    fn open(
-        &mut self,
-        request: ConnectRequest,
-        new_tab: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let session = match self.active_session() {
-            Some(session) if !new_tab => session.clone(),
-            _ => self.add_tab(window, cx),
-        };
-        session.update(cx, |session, cx| session.connect(request, window, cx));
-        cx.notify();
-    }
-
-    fn open_bookmark(
-        &mut self,
-        id: BookmarkId,
-        new_tab: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(bookmark) = self.snapshot.bookmark(id) else {
-            return;
-        };
-        let request = ConnectRequest {
-            destination: bookmark.destination.clone(),
-            bookmark: Some(id),
-            identity_file: bookmark.identity_file.clone(),
-        };
-        self.open(request, new_tab, window, cx);
     }
 
     // ---------------------------------------------------------------------
     // Actions
 
-    fn on_focus_address(&mut self, _: &FocusAddress, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session) = self.active_session() {
-            session.update(cx, |session, cx| session.focus_address(window, cx));
-        }
-    }
-
     fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_tab(window, cx)
-            .update(cx, |session, cx| session.focus(window, cx));
+        self.add_tab(None, window, cx);
     }
 
     fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -575,17 +489,12 @@ impl Workspace {
         self.activate(previous, window, cx);
     }
 
-    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        cx.notify();
-    }
-
     fn on_toggle_split(&mut self, _: &ToggleSplit, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
         if tab.panes.len() == 2 {
-            // Close the other pane and stay where the focus is.
+            // Keep the pane with the keyboard; close the other.
             let other = 1 - tab.focused.min(1);
             let closed = self.tabs[self.active].panes.remove(other);
             self.tabs[self.active].focused = 0;
@@ -593,28 +502,27 @@ impl Workspace {
             self.focus_pane(0, window, cx);
             return;
         }
-        // The classic layout: a server on one side, this computer on the other.
-        let remote_shown = tab
+        // The new side shows the servers next to this computer, and this
+        // computer next to a server; this computer goes left.
+        let local_shown = tab
             .active()
             .read(cx)
             .browser()
-            .is_some_and(|browser| !browser.read(cx).remote().is_local());
+            .is_some_and(|browser| browser.read(cx).remote().is_local());
         let pane = self.new_session(window, cx);
-        let tab = &mut self.tabs[self.active];
-        tab.panes.push(pane.clone());
-        tab.focused = 1;
-        pane.update(cx, |pane, cx| {
-            if remote_shown {
+        if local_shown {
+            self.tabs[self.active].panes.push(pane);
+        } else {
+            pane.update(cx, |pane, cx| {
                 pane.connect(
                     ConnectRequest::to(Destination::Local { path: None }),
                     window,
                     cx,
                 );
-            } else {
-                pane.focus(window, cx);
-            }
-        });
-        cx.notify();
+            });
+            self.tabs[self.active].panes.insert(0, pane);
+        }
+        self.focus_pane(1, window, cx);
     }
 
     fn on_focus_other_pane(
@@ -631,8 +539,26 @@ impl Workspace {
         }
     }
 
-    /// F5: copies the selection of the focused pane into the other pane's
-    /// folder. Without a second pane it refreshes, as F5 traditionally does.
+    fn on_focus_left(
+        &mut self,
+        _: &actions::FocusLeftPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_pane(0, window, cx);
+    }
+
+    fn on_focus_right(
+        &mut self,
+        _: &actions::FocusRightPane,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_pane(1, window, cx);
+    }
+
+    /// Copies the selection of the active pane into the other pane's folder.
+    /// Without a second pane, F5 refreshes as it traditionally does.
     fn on_copy_to_other_pane(
         &mut self,
         _: &actions::CopyToOtherPane,
@@ -650,7 +576,7 @@ impl Workspace {
             .and_then(|other| other.read(cx).browser().cloned());
         let Some(target) = target else {
             if tab.other().is_some() {
-                self.notice("Open a folder in the other pane first.".into());
+                self.notice("Connect the other side to a folder first.".into());
             } else {
                 source.update(cx, FileBrowser::reload);
             }
@@ -669,6 +595,20 @@ impl Workspace {
     fn on_toggle_transfers(&mut self, _: &ToggleTransfers, _: &mut Window, cx: &mut Context<Self>) {
         self.transfers_open = !self.transfers_open;
         cx.notify();
+    }
+
+    fn on_toggle_inspector(
+        &mut self,
+        _: &ToggleInspector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.inspector_open = !self.inspector_open;
+        self.sync_active(window, cx);
+    }
+
+    fn on_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.update(cx, |input, cx| input.focus(window, cx));
     }
 
     fn on_transfer_event(
@@ -704,8 +644,8 @@ impl Workspace {
     /// Reloads every pane that shows `dir` on `remote`.
     fn refresh_listings_of(
         &mut self,
-        remote: &Arc<dyn ferry_core::Remote>,
-        dir: &ferry_core::RemotePath,
+        remote: &Arc<dyn Remote>,
+        dir: &RemotePath,
         cx: &mut Context<Self>,
     ) {
         let browsers: Vec<Entity<FileBrowser>> = self
@@ -725,181 +665,33 @@ impl Workspace {
         }
     }
 
-    fn on_save_favorite(&mut self, _: &SaveFavorite, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(location) = self
-            .active_session()
-            .and_then(|session| session.read(cx).location(cx))
-        else {
-            return;
-        };
-        let draft = BookmarkDraft {
-            folder: None,
-            name: String::new(),
-            destination: location,
-            identity_file: None,
-        };
-        self.open_editor(None, &draft, window, cx);
-    }
-
     // ---------------------------------------------------------------------
     // Rendering
 
-    fn render_tabs(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let this = cx.entity().downgrade();
-        let tabs: Vec<Tab> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                let session = tab.active().read(cx);
-                let close = {
-                    let this = this.clone();
-                    Button::new(("close-tab", index))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .on_click(move |_: &ClickEvent, window, cx| {
-                            cx.stop_propagation();
-                            let _ = this.update(cx, |workspace, cx| {
-                                workspace.close_tab(index, window, cx);
-                            });
-                        })
-                };
-                let icon = if session.is_connecting() {
-                    IconName::LoaderCircle
-                } else if session.browser().is_some() {
-                    IconName::Globe
-                } else {
-                    IconName::Plus
-                };
-                Tab::new()
-                    .prefix(div().pl_2().child(Icon::new(icon).size_3p5()))
-                    .label(session.title(cx))
-                    .suffix(close)
-            })
-            .collect();
-        let new_tab = Button::new("new-tab")
-            .ghost()
-            .small()
-            .icon(IconName::Plus)
-            .tooltip("New tab")
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.on_new_tab(&NewTab, window, cx);
-            }));
-        let sidebar_toggle = Button::new("toggle-sidebar")
-            .ghost()
-            .small()
-            .icon(Icon::new(gpui_component_assets::IconName::PanelLeft))
-            .tooltip("Toggle sidebar")
-            .selected(self.sidebar_visible(window))
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.on_toggle_sidebar(&ToggleSidebar, window, cx);
-            }));
-        let split = Button::new("toggle-split")
-            .ghost()
-            .small()
-            .icon(Icon::new(gpui_component_assets::IconName::PanelRight))
-            .tooltip("Split view")
-            .selected(
-                self.tabs
-                    .get(self.active)
-                    .is_some_and(|tab| tab.panes.len() == 2),
-            )
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.on_toggle_split(&ToggleSplit, window, cx);
-            }));
-        let transfers = self.render_transfers_toggle(cx);
-        TabBar::new("tabs")
-            .small()
-            .prefix(h_flex().px_1().child(sidebar_toggle))
-            .suffix(
-                h_flex()
-                    .px_1()
-                    .gap_1()
-                    .child(new_tab)
-                    .child(split)
-                    .child(transfers),
-            )
-            .selected_index(self.active)
-            .on_click(move |index: &usize, window, cx| {
-                let index = *index;
-                let _ = this.update(cx, |workspace, cx| workspace.activate(index, window, cx));
-            })
-            .children(tabs)
-    }
-
-    /// The tab bar button that shows the transfers, with overall progress.
-    fn render_transfers_toggle(&self, cx: &mut Context<Self>) -> Button {
-        let panel = self.transfer_panel.read(cx);
-        let label: Option<SharedString> = match panel.overall_progress() {
-            Some(progress) if panel.active_count() > 0 => {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "a percentage between 0 and 100"
-                )]
-                let percent = (progress * 100.0).round() as u32;
-                Some(format!("{percent}%").into())
-            }
-            _ => None,
-        };
-        Button::new("toggle-transfers")
-            .ghost()
-            .small()
-            .icon(IconName::ArrowDown)
-            .when_some(label, Button::label)
-            .tooltip("Transfers")
-            .selected(self.transfers_open)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.on_toggle_transfers(&ToggleTransfers, window, cx);
-            }))
-    }
-
-    /// The panes of the active tab, side by side.
-    fn render_panes(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = cx.theme();
-        let (border, accent) = (theme.border, theme.primary);
+    /// The panes of the active tab: side by side, or only the active one in
+    /// a narrow window.
+    fn render_panes(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+        let border = cx.theme().border;
         let Some(tab) = self.tabs.get(self.active) else {
             return h_flex().flex_1().min_w_0();
         };
-        let split = tab.panes.len() == 2;
+        let narrow = Self::is_narrow(window);
         let focused = tab.focused;
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .items_stretch()
-            .children(tab.panes.iter().enumerate().map(|(index, pane)| {
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .when(index > 0, |this| this.border_l_1().border_color(border))
-                    // In a split, a thin line marks where the keyboard goes.
-                    .when(split, |this| {
-                        this.child(
-                            div()
-                                .h(px(2.))
-                                .flex_shrink_0()
-                                .when(index == focused, |line| line.bg(accent)),
-                        )
-                    })
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, _: &gpui::MouseDownEvent, window, cx| {
-                            if let Some(tab) = this.tabs.get_mut(this.active)
-                                && tab.focused != index
-                            {
-                                tab.focused = index;
-                                this.update_title(window, cx);
-                                cx.notify();
-                            }
-                        }),
-                    )
-                    .child(div().flex_1().min_h_0().child(pane.clone()))
-            }))
-    }
-
-    fn sidebar_visible(&self, window: &Window) -> bool {
-        self.sidebar_open && window.viewport_size().width >= SIDEBAR_MIN_WINDOW_WIDTH
+        h_flex().flex_1().min_w_0().items_stretch().children(
+            tab.panes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !narrow || *index == focused)
+                .map(|(index, pane)| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .when(index > 0 && !narrow, |this| {
+                            this.border_l_1().border_color(border)
+                        })
+                        .child(pane.clone())
+                }),
+        )
     }
 }
 
@@ -907,37 +699,43 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (background, foreground, border) = (theme.background, theme.foreground, theme.border);
-        let sidebar = self
-            .sidebar_visible(window)
-            .then(|| self.render_sidebar(cx));
-        let content = self.render_panes(cx);
+        let content = self.render_panes(window, cx);
         v_flex()
             .relative()
             .size_full()
             .key_context(WORKSPACE_CONTEXT)
-            .on_action(cx.listener(Self::on_focus_address))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_previous_tab))
-            .on_action(cx.listener(Self::on_toggle_sidebar))
-            .on_action(cx.listener(Self::on_save_favorite))
             .on_action(cx.listener(Self::on_toggle_split))
             .on_action(cx.listener(Self::on_toggle_transfers))
+            .on_action(cx.listener(Self::on_toggle_inspector))
+            .on_action(cx.listener(Self::on_focus_search))
             .on_action(cx.listener(Self::on_focus_other_pane))
+            .on_action(cx.listener(Self::on_focus_left))
+            .on_action(cx.listener(Self::on_focus_right))
             .on_action(cx.listener(Self::on_copy_to_other_pane))
             .bg(background)
             .text_color(foreground)
-            .child(self.render_tabs(window, cx))
+            .child(self.render_toolbar(window, cx))
+            .children(self.render_tabs(cx))
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .when_some(sidebar, |this, sidebar| {
-                        this.child(sidebar.border_r_1().border_color(border))
-                    })
-                    .child(content),
+                    .child(content)
+                    .when(self.inspector_open, |this| {
+                        this.child(
+                            div()
+                                .w(INSPECTOR_WIDTH)
+                                .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(border)
+                                .child(self.inspector.clone()),
+                        )
+                    }),
             )
             .when(self.transfers_open, |this| {
                 this.child(

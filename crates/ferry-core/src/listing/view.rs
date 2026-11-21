@@ -277,6 +277,8 @@ pub struct DirectoryView {
     pending_sort: Option<SortOrder>,
     /// Lower-cased filter text; empty means no filter.
     filter: String,
+    /// Whether names starting with a dot are left out.
+    hide_hidden: bool,
 }
 
 impl DirectoryView {
@@ -368,11 +370,11 @@ impl DirectoryView {
         }
         let mut added = self.store.sorted(self.sort, first..index(self.store.len));
         self.order = self.store.merge(self.sort, &self.order, &added);
-        if self.filter.is_empty() {
-            self.visible.clone_from(&self.order);
-        } else {
+        if self.is_filtering() {
             added.retain(|&index| self.matches(index));
             self.visible = self.store.merge(self.sort, &self.visible, &added);
+        } else {
+            self.visible.clone_from(&self.order);
         }
     }
 
@@ -435,7 +437,8 @@ impl DirectoryView {
         if folded == self.filter {
             return;
         }
-        let narrowing = !self.filter.is_empty() && folded.contains(self.filter.as_str());
+        let narrowing =
+            (!self.filter.is_empty() || self.hide_hidden) && folded.contains(self.filter.as_str());
         self.filter = folded;
         if narrowing {
             // Every match of the longer filter also matched the shorter one.
@@ -447,25 +450,46 @@ impl DirectoryView {
         }
     }
 
-    fn refilter(&mut self) {
-        if self.filter.is_empty() {
-            self.visible.clone_from(&self.order);
+    /// Shows or hides entries whose names start with a dot.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        if self.hide_hidden != show {
+            return;
+        }
+        self.hide_hidden = !show;
+        if self.hide_hidden {
+            let mut visible = std::mem::take(&mut self.visible);
+            visible.retain(|&index| self.matches(index));
+            self.visible = visible;
         } else {
+            self.refilter();
+        }
+    }
+
+    /// Whether entries whose names start with a dot are shown.
+    pub fn shows_hidden(&self) -> bool {
+        !self.hide_hidden
+    }
+
+    fn is_filtering(&self) -> bool {
+        !self.filter.is_empty() || self.hide_hidden
+    }
+
+    fn refilter(&mut self) {
+        if self.is_filtering() {
             self.visible = self
                 .order
                 .iter()
                 .copied()
                 .filter(|&index| self.matches(index))
                 .collect();
+        } else {
+            self.visible.clone_from(&self.order);
         }
     }
 
     fn matches(&self, index: u32) -> bool {
-        self.store
-            .get(index)
-            .keys
-            .folded
-            .contains(self.filter.as_str())
+        let folded = &self.store.get(index).keys.folded;
+        !(self.hide_hidden && folded.starts_with('.')) && folded.contains(self.filter.as_str())
     }
 }
 
@@ -696,6 +720,28 @@ mod tests {
         assert_eq!(view.position("Report.pdf"), Some(2));
         view.set_filter("");
         assert_eq!(view.len(), 5);
+    }
+
+    #[test]
+    fn hides_dot_files_together_with_the_filter() {
+        let mut view = DirectoryView::new(SortOrder::default());
+        view.extend(vec![file(".env"), file("env.txt"), file(".bashrc")]);
+        view.set_show_hidden(false);
+        assert_eq!(names(&view), ["env.txt"]);
+        view.set_filter("env");
+        assert_eq!(names(&view), ["env.txt"]);
+        view.extend(vec![file(".env.local"), file("environment")]);
+        assert_eq!(names(&view), ["env.txt", "environment"]);
+        view.set_show_hidden(true);
+        assert_eq!(
+            names(&view),
+            [".env", ".env.local", "env.txt", "environment"]
+        );
+        view.set_filter("");
+        view.set_show_hidden(false);
+        assert_eq!(view.len(), 2);
+        assert_eq!(view.total_len(), 5);
+        assert!(!view.shows_hidden());
     }
 
     #[test]

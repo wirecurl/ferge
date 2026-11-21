@@ -1,26 +1,34 @@
 //! Rendering of the file browser. Only visible rows are built.
 
+use std::fmt::Write as _;
 use std::ops::Range;
 
 use ferry_core::listing::SortColumn;
 use ferry_core::{EntryKind, RemotePath};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, ClickEvent, Context, ElementId, ExternalDragPayload,
-    ExternalPaths, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    AnyElement, AppContext as _, ClickEvent, Context, ExternalDragPayload, ExternalPaths,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, px, uniform_list,
 };
-use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_component::input::Input;
+use gpui_component::menu::ContextMenuExt as _;
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use super::{DraggedEntries, FileBrowser, LoadState, ROW_HEIGHT};
 use crate::{actions, format};
 
 const SIZE_WIDTH: gpui::Pixels = px(96.);
 const DATE_WIDTH: gpui::Pixels = px(136.);
+const KIND_WIDTH: gpui::Pixels = px(120.);
+const PERMISSIONS_WIDTH: gpui::Pixels = px(96.);
 
 impl Render for FileBrowser {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.flush_pending();
+        if self.rename_when_listed.is_some() {
+            self.rename_new_entry(window, cx);
+        }
         v_flex()
             .size_full()
             .key_context(actions::FILE_LIST)
@@ -46,6 +54,14 @@ impl Render for FileBrowser {
             .on_action(cx.listener(Self::on_select_all))
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_new_folder))
+            .on_action(cx.listener(Self::on_new_file))
+            .on_action(cx.listener(Self::on_rename))
+            .on_action(cx.listener(Self::on_commit_rename))
+            .on_action(cx.listener(Self::on_cancel_rename))
+            .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_duplicate))
+            .on_action(cx.listener(Self::on_copy_address))
             .on_key_down(cx.listener(Self::on_key_down))
             // Clicking anywhere in the browser makes it the keyboard target.
             .on_mouse_down(
@@ -54,7 +70,6 @@ impl Render for FileBrowser {
                     window.focus(&this.focus, cx);
                 }),
             )
-            .child(self.render_path_bar(cx))
             .child(self.render_header(cx))
             .child(self.render_list(cx))
             .child(self.render_status(cx))
@@ -62,58 +77,6 @@ impl Render for FileBrowser {
 }
 
 impl FileBrowser {
-    fn render_path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let ancestors = self.path.ancestors_from_root();
-        let last = ancestors.len().saturating_sub(1);
-        let crumbs = ancestors.into_iter().enumerate().map(|(index, path)| {
-            let label: SharedString = path
-                .file_name()
-                .map_or_else(|| "/".into(), |name| name.to_owned().into());
-            let is_current = index == last;
-            h_flex()
-                .gap_1()
-                .when(index > 1, |this| {
-                    this.child(div().text_color(muted).child("/"))
-                })
-                .child(
-                    div()
-                        .id(ElementId::NamedInteger("crumb".into(), index as u64))
-                        .px_1()
-                        .rounded_sm()
-                        .when(is_current, |this| {
-                            this.font_weight(gpui::FontWeight::SEMIBOLD)
-                        })
-                        .when(!is_current, |this| {
-                            this.cursor_pointer()
-                                .text_color(muted)
-                                .hover(|style| style.bg(cx.theme().list_hover))
-                        })
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.go_to(path.clone(), cx);
-                        }))
-                        .child(label),
-                )
-        });
-        h_flex()
-            .h(px(32.))
-            .px_3()
-            .gap_1()
-            .flex_shrink_0()
-            .overflow_x_hidden()
-            .text_sm()
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .text_color(muted)
-                    .pr_2()
-                    .child(SharedString::from(self.remote.label().to_owned())),
-            )
-            .children(crumbs)
-    }
-
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let sort = self.view.sort_order();
@@ -163,6 +126,12 @@ impl FileBrowser {
                 "Modified",
                 SortColumn::Modified,
             )))
+            .when(self.options.show_kind, |this| {
+                this.child(div().w(KIND_WIDTH).child("Kind"))
+            })
+            .when(self.options.show_permissions, |this| {
+                this.child(div().w(PERMISSIONS_WIDTH).child("Permissions"))
+            })
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -270,15 +239,7 @@ impl FileBrowser {
                     })
                     .when(is_dir, |this| Self::accept_drops(this, dir_path, cx))
                     .child(Icon::new(icon).size_4().text_color(icon_color))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_x_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(SharedString::from(entry.name.as_str().to_owned())),
-                    )
+                    .child(self.render_name(entry))
                     .child(
                         div()
                             .w(SIZE_WIDTH)
@@ -291,10 +252,67 @@ impl FileBrowser {
                             .w(DATE_WIDTH)
                             .text_color(muted)
                             .child(format::date(entry.metadata.modified)),
-                    );
+                    )
+                    .map(|row| self.optional_columns(row, entry, muted))
+                    // Right-clicking a row outside the selection selects it.
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
+                            this.select_for_menu(index, cx);
+                        }),
+                    )
+                    .context_menu({
+                        let focus = self.focus.clone();
+                        move |menu, _, _| row_menu(menu, &focus, is_dir)
+                    });
                 Some(row.into_any_element())
             })
             .collect()
+    }
+
+    /// Selects the row a context menu opens on, unless it belongs to the
+    /// selection already.
+    fn select_for_menu(&mut self, index: usize, cx: &mut Context<Self>) {
+        let outside = self
+            .view
+            .get(index)
+            .is_some_and(|entry| !self.is_marked(&entry.name));
+        if outside && self.selected != Some(index) {
+            self.select(index, cx);
+        }
+    }
+
+    /// The kind and permission columns, if they are switched on.
+    fn optional_columns(
+        &self,
+        row: gpui::Stateful<gpui::Div>,
+        entry: &ferry_core::Entry,
+        muted: gpui::Hsla,
+    ) -> gpui::Stateful<gpui::Div> {
+        row.when(self.options.show_kind, |this| {
+            this.child(
+                div()
+                    .w(KIND_WIDTH)
+                    .truncate()
+                    .text_color(muted)
+                    .child(format::kind(entry.name.as_str(), entry.kind())),
+            )
+        })
+        .when(self.options.show_permissions, |this| {
+            this.child(
+                div()
+                    .w(PERMISSIONS_WIDTH)
+                    .text_color(muted)
+                    .font_family(crate::fonts::monospace())
+                    .child(
+                        entry
+                            .metadata
+                            .permissions
+                            .map(format::permissions)
+                            .unwrap_or_default(),
+                    ),
+            )
+        })
     }
 
     /// Makes `element` take dragged rows and files from other applications,
@@ -319,16 +337,19 @@ impl FileBrowser {
 
     fn render_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let total = self.view.total_len();
-        let count = match (self.filter.is_empty(), total) {
+        let (shown, hidden) = self.counts();
+        let mut count = match (self.filter.is_empty(), shown) {
             (true, 1) => "1 item".to_owned(),
-            (true, _) => format!("{} items", format::count(total)),
+            (true, _) => format!("{} items", format::count(shown)),
             (false, _) => format!(
                 "{} of {} items",
-                format::count(self.view.len()),
-                format::count(total)
+                format::count(shown),
+                format::count(self.view.total_len())
             ),
         };
+        if hidden > 0 {
+            let _ = write!(count, " · {} hidden", format::count(hidden));
+        }
         let state: Option<SharedString> = match &self.state {
             LoadState::Loading => Some("Loading…".into()),
             LoadState::Revalidating => Some("Updating…".into()),
@@ -393,5 +414,53 @@ impl Render for DragPreview {
             .shadow_md()
             .child(Icon::new(IconName::File).size_4())
             .child(self.label.clone())
+    }
+}
+
+/// The context menu of a row; items dispatch the list's actions.
+fn row_menu(
+    menu: gpui_component::menu::PopupMenu,
+    focus: &gpui::FocusHandle,
+    is_dir: bool,
+) -> gpui_component::menu::PopupMenu {
+    let menu = menu.action_context(focus.clone());
+    let menu = if is_dir {
+        menu.menu("Open", Box::new(actions::Open))
+    } else {
+        menu
+    };
+    menu.menu("Copy to other side", Box::new(actions::CopyToOtherPane))
+        .menu("Copy", Box::new(actions::Copy))
+        .menu("Copy address", Box::new(actions::CopyAddress))
+        .separator()
+        .menu("Rename", Box::new(actions::Rename))
+        .menu("Duplicate", Box::new(actions::Duplicate))
+        .menu("Delete…", Box::new(actions::Delete))
+        .separator()
+        .menu("New folder", Box::new(actions::NewFolder))
+        .menu("New file", Box::new(actions::NewFile))
+}
+
+impl FileBrowser {
+    /// The name label, or the name field while the row is renamed.
+    fn render_name(&self, entry: &ferry_core::Entry) -> AnyElement {
+        if let Some(renaming) = self.renaming()
+            && renaming.name == entry.name
+        {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .key_context(actions::FILE_RENAME)
+                .child(Input::new(&renaming.input).xsmall())
+                .into_any_element();
+        }
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_x_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(SharedString::from(entry.name.as_str().to_owned()))
+            .into_any_element()
     }
 }

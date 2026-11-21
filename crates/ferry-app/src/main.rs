@@ -6,6 +6,7 @@ mod browser;
 mod editor;
 mod fonts;
 mod format;
+mod inspector;
 mod interaction;
 mod prompts;
 mod runtime;

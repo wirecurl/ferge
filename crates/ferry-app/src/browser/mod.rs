@@ -5,6 +5,7 @@
 //! that is linear in the size of the listing but too slow for a frame (full
 //! sorts, rebuilding from a cached listing) runs on GPUI's background executor.
 
+mod ops;
 mod render;
 
 use std::collections::{HashSet, VecDeque};
@@ -13,7 +14,7 @@ use std::time::Instant;
 
 use ferry_core::listing::{self, DirectoryView, ListingCache, ListingEvent, SortColumn, SortOrder};
 use ferry_core::transfer::TransferRequest;
-use ferry_core::{Entry, EntryKind, EntryName, Remote, RemotePath};
+use ferry_core::{Destination, Entry, EntryKind, EntryName, Remote, RemotePath};
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
     App, AppContext as _, Context, FocusHandle, Focusable, Global, KeyDownEvent, ScrollStrategy,
@@ -53,6 +54,26 @@ pub(crate) struct Navigated;
 
 impl gpui::EventEmitter<Navigated> for FileBrowser {}
 
+/// Requests the browser cannot handle on its own.
+#[derive(Clone, Debug)]
+pub(crate) enum BrowserEvent {
+    /// The user wants these deleted; ask before calling [`FileBrowser::delete`].
+    Delete(Vec<(RemotePath, EntryKind)>),
+    /// An operation failed; show `message` to the user.
+    Failed(String),
+}
+
+impl gpui::EventEmitter<BrowserEvent> for FileBrowser {}
+
+/// What the list shows besides names, sizes and dates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ViewOptions {
+    /// Entries whose names start with a dot.
+    pub show_hidden: bool,
+    pub show_kind: bool,
+    pub show_permissions: bool,
+}
+
 /// Items copied with Ctrl+C, waiting to be pasted. Shared by all tabs.
 pub(crate) struct FileClipboard {
     source: Arc<dyn Remote>,
@@ -79,6 +100,12 @@ struct CachedView {
 
 pub(crate) struct FileBrowser {
     remote: Arc<dyn Remote>,
+    /// Where the browser is connected, for addresses of its files.
+    address: Destination,
+    options: ViewOptions,
+    renaming: Option<ops::Renaming>,
+    /// An entry that was just created and should be named once it is listed.
+    rename_when_listed: Option<EntryName>,
     cache: Arc<ListingCache>,
     path: RemotePath,
     back: Vec<RemotePath>,
@@ -117,20 +144,27 @@ pub(crate) struct FileBrowser {
 impl FileBrowser {
     pub(crate) fn new(
         remote: Arc<dyn Remote>,
+        address: &Destination,
         path: RemotePath,
-        window: &mut Window,
+        options: ViewOptions,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The pane decides whether the new list takes the keyboard.
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
         let sort = SortOrder::default();
+        let mut view = DirectoryView::new(sort);
+        view.set_show_hidden(options.show_hidden);
         let mut browser = Self {
             remote,
+            address: address.with_path(None),
+            options,
+            renaming: None,
+            rename_when_listed: None,
             cache: Arc::new(ListingCache::default()),
             path,
             back: Vec::new(),
             forward: Vec::new(),
-            view: DirectoryView::new(sort),
+            view,
             views: VecDeque::new(),
             sort,
             filter: String::new(),
@@ -164,6 +198,42 @@ impl FileBrowser {
 
     pub(crate) fn remote(&self) -> &Arc<dyn Remote> {
         &self.remote
+    }
+
+    pub(crate) fn set_options(&mut self, options: ViewOptions, cx: &mut Context<Self>) {
+        self.options = options;
+        self.view.set_show_hidden(options.show_hidden);
+        self.reselect();
+        self.scroll_to_selection();
+        cx.notify();
+    }
+
+    /// Number of entries the list shows, and how many hidden ones it leaves out.
+    pub(crate) fn counts(&self) -> (usize, usize) {
+        let shown = self.view.len();
+        let hidden = if self.filter.is_empty() {
+            self.view.total_len().saturating_sub(shown)
+        } else {
+            0
+        };
+        (shown, hidden)
+    }
+
+    /// The selected entries with their metadata, for the inspector.
+    pub(crate) fn selected_entries(&self) -> Vec<Entry> {
+        if self.marked.is_empty() {
+            return self
+                .selected
+                .and_then(|row| self.view.get(row))
+                .cloned()
+                .into_iter()
+                .collect();
+        }
+        self.marked
+            .iter()
+            .filter_map(|name| self.view.position(name.as_str()))
+            .filter_map(|row| self.view.get(row).cloned())
+            .collect()
     }
 
     /// Whether nothing is loading, building or sorting.
@@ -223,9 +293,11 @@ impl FileBrowser {
         self.marked.clear();
         self.anchor = None;
         self.notice = None;
+        self.view.set_show_hidden(self.options.show_hidden);
         if let Some(cached) = self.take_parked_view(&self.path.clone()) {
             self.view = cached.view;
             self.view.set_filter("");
+            self.view.set_show_hidden(self.options.show_hidden);
             if self.selected_name.is_none() {
                 self.selected_name = cached.selected;
             }
@@ -357,10 +429,13 @@ impl FileBrowser {
         let generation = self.generation;
         let sort = self.sort;
         let filter = self.filter.clone();
+        let show_hidden = self.options.show_hidden;
         self.build_task = Some(cx.spawn(async move |this, cx| {
             let view = cx
                 .background_spawn(async move {
-                    DirectoryView::with_entries(sort, &filter, entries.to_vec())
+                    let mut view = DirectoryView::with_entries(sort, &filter, entries.to_vec());
+                    view.set_show_hidden(show_hidden);
+                    view
                 })
                 .await;
             let _ = this.update(cx, |browser, cx| {
@@ -382,11 +457,15 @@ impl FileBrowser {
         let snapshot = self.view.snapshot();
         let sort = self.sort;
         let filter = self.filter.clone();
+        let show_hidden = self.options.show_hidden;
         self.build_task = Some(cx.spawn(async move |this, cx| {
             let view = cx
                 .background_spawn(async move {
-                    (!snapshot.matches(&entries))
-                        .then(|| DirectoryView::with_entries(sort, &filter, entries.to_vec()))
+                    (!snapshot.matches(&entries)).then(|| {
+                        let mut view = DirectoryView::with_entries(sort, &filter, entries.to_vec());
+                        view.set_show_hidden(show_hidden);
+                        view
+                    })
                 })
                 .await;
             let _ = this.update(cx, |browser, cx| {
@@ -404,15 +483,16 @@ impl FileBrowser {
     fn install_view(&mut self, view: DirectoryView, cx: &mut Context<Self>) {
         self.build_task = None;
         self.view = view;
-        // Filter or sort may have changed while the view was being built.
+        // Filter, options or sort may have changed while the view was built.
         self.view.set_filter(&self.filter);
+        self.view.set_show_hidden(self.options.show_hidden);
         self.apply_sort_to_view(cx);
         self.reselect();
         self.scroll_to_selection();
         cx.notify();
     }
 
-    fn go_to_parent(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn go_to_parent(&mut self, cx: &mut Context<Self>) {
         let Some(parent) = self.path.parent() else {
             return;
         };
@@ -423,7 +503,7 @@ impl FileBrowser {
         self.navigate(parent, child, cx);
     }
 
-    fn go_back(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
         let Some(previous) = self.back.pop() else {
             return;
         };
@@ -432,7 +512,7 @@ impl FileBrowser {
         self.switch_from(current, None, cx);
     }
 
-    fn go_forward(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn go_forward(&mut self, cx: &mut Context<Self>) {
         let Some(next) = self.forward.pop() else {
             return;
         };
@@ -509,7 +589,20 @@ impl FileBrowser {
         }));
     }
 
-    fn set_filter(&mut self, filter: String, cx: &mut Context<Self>) {
+    /// The type-to-filter text.
+    pub(crate) fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    pub(crate) fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    pub(crate) fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+
+    pub(crate) fn set_filter(&mut self, filter: String, cx: &mut Context<Self>) {
         self.filter = filter;
         // Marks on rows the filter hides would be copied unseen.
         self.marked.clear();
@@ -926,6 +1019,9 @@ impl FileBrowser {
     /// Type-to-filter: printable characters that no binding claimed extend the
     /// filter.
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.is_some() {
+            return;
+        }
         let modifiers = event.keystroke.modifiers;
         if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {
             return;

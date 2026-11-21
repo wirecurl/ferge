@@ -5,9 +5,13 @@ A fast file transfer client for Linux and macOS, written in Rust with
 network and disk operation off the UI thread, so folders with 100,000 entries scroll, sort and
 filter without dropping a frame.
 
-Status: **Phase 3** (see [PLAN.md](PLAN.md)). Browsing local folders and SFTP servers in tabs
-and split panes, favorites, history, saved passwords and transfers work; further protocols and
-sync follow in later phases.
+Status: **Phase 3** (see [PLAN.md](PLAN.md)). Browsing, file operations and transfers between
+this computer and SFTP servers work, with favorites, history and saved passwords; further
+protocols and sync follow in later phases.
+
+The window follows the dual-pane concept of classic file transfer clients: this computer on
+the left, a server on the right. Each side switches between its files and a server panel with
+favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 
 ## Features
 
@@ -22,10 +26,14 @@ sync follow in later phases.
   rest of a transfer.
 - SFTP reads and writes are pipelined (16 requests in flight, up to 256 KiB each) over separate
   data channels, so transfers never block browsing.
-- Tabs, each with its own connection, and a sidebar with favorites in (nested) folders, the
-  hosts from `~/.ssh/config` and the local file system.
-- Quick Connect on every new tab, plus the most recent connections. Favorites and history are
-  stored in SQLite in the data directory (`~/.local/share/ferry` on Linux).
+- Two file browsers per tab, side by side (one in narrow windows). A server panel in each:
+  favorites in folders, `~/.ssh/config` hosts, recent connections, Quick Connect, and a search
+  that connects with Enter. Favorites and history are stored in SQLite in the data directory
+  (`~/.local/share/ferry` on Linux).
+- File operations: new folder and file, rename in place, duplicate, delete (folders with their
+  contents, after asking), copy address; also from a row's context menu.
+- An inspector with the details of the selection and editable permissions; optional Kind and
+  Permissions columns; hidden files on demand.
 - Passwords and key passphrases can be remembered: in the Secret Service (GNOME Keyring,
   KeePassXC, KWallet) on Linux and the Keychain on macOS. Without a credential service, Ferry
   uses an encrypted file (Argon2id + XChaCha20-Poly1305) protected by a master password.
@@ -59,8 +67,8 @@ sed -i "s|^Exec=ferry|Exec=$HOME/.cargo/bin/ferry|" ~/.local/share/applications/
 ## Usage
 
 ```sh
-ferry                                   # Quick Connect, favorites and recent connections
-ferry myserver                          # an ssh_config alias
+ferry                                   # this computer on the left, the servers on the right
+ferry myserver                          # an ssh_config alias, opened on the right
 ferry sftp://alice@example.org:2222/srv # user, port and start directory
 ferry /var/log                          # local folder
 ferry -F ./ssh_config myserver          # use another SSH client configuration
@@ -70,25 +78,34 @@ ferry -F ./ssh_config myserver          # use another SSH client configuration
 |---|---|---|
 | ↑ ↓ PgUp PgDn Home End | same | move the selection |
 | Shift+↑ / Shift+↓, Shift-click, Ctrl-click, Ctrl+A | Shift+↑ / ↓, ⇧-click, ⌘-click, ⌘A | select several items |
-| Ctrl+C / Ctrl+V | ⌘C / ⌘V | copy items, paste (transfer) them into the current folder |
-| F5 | F5 | copy the selection into the other pane (refresh without a split) |
-| Ctrl+\\ | ⌘\\ | split view on/off |
-| Tab | Tab | switch between the two panes |
-| Ctrl+J | ⌘J | show or hide transfers |
 | Enter, Alt+↓ | Enter, ⌘↓ | open folder |
 | Backspace, Alt+↑ | Backspace, ⌘↑ | parent folder (Backspace edits the filter while one is active) |
 | Alt+← / Alt+→ | ⌘[ / ⌘] | back / forward |
-| any character | same | type-to-filter, Esc clears |
+| any character, Ctrl+F | same, ⌘F | filter the folder; Esc clears |
 | Ctrl+1 / 2 / 3 | ⌘1 / 2 / 3 | sort by name / size / date, again to reverse |
 | Ctrl+R | ⌘R | refresh |
-| Ctrl+L | ⌘L | focus the address field |
+| F5, Ctrl+Shift+R | F5, ⌘⇧R | copy the selection to the other side (refresh with one pane) |
+| Ctrl+C / Ctrl+V | ⌘C / ⌘V | copy items, paste (transfer) them into the current folder |
+| Ctrl+Shift+N / Ctrl+Alt+N | ⌘⇧N / ⌘⌥N | new folder / new file |
+| F2 | F2 | rename |
+| Delete | ⌘⌫ | delete, after asking |
+| Ctrl+D | ⌘D | duplicate |
+| Ctrl+Shift+C | ⌘⇧C | copy the address of the selection |
+| Ctrl+H | ⌘⇧. | show or hide hidden files |
+| Ctrl+I | ⌘I | show or hide the inspector |
+| Ctrl+L, Ctrl+Shift+G | ⌘L, ⌘⇧G | go to a folder or address |
+| Ctrl+Shift+K | ⌘⇧K | switch a pane between its files and the servers |
+| Ctrl+E | ⌘E | disconnect |
+| Tab, Ctrl+Alt+← / → | Tab, ⌘⌥← / → | switch between the two sides |
+| Ctrl+\\ | ⌘\\ | one or two file browsers |
+| Ctrl+J | ⌘J | show or hide transfers |
 | Ctrl+T / Ctrl+W | ⌘T / ⌘W | new tab / close tab |
 | Ctrl+Tab, Ctrl+PgDn / Ctrl+Shift+Tab, Ctrl+PgUp | Ctrl+Tab, ⌘⇧] / Ctrl+Shift+Tab, ⌘⇧[ | next / previous tab |
-| Ctrl+D | ⌘D | save the current folder as a favorite |
-| Ctrl+B | ⌘B | show or hide the sidebar |
 
-Favorites are opened with a click (Ctrl/⌘-click opens a new tab); right-click a favorite or a
-folder to edit, duplicate, rename or delete it.
+In the server panel, type to search, use ↑ ↓ and press Enter to connect (Ctrl+Enter: new tab).
+Favorites and folders are edited from their context menu or the + menu.
+
+
 
 ## Development
 

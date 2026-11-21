@@ -475,12 +475,6 @@ async fn settled(
     }
 }
 
-fn below(base: &RemotePath, relative: &str) -> RemotePath {
-    relative
-        .split('/')
-        .fold(base.clone(), |path, part| path.join(&name(part)))
-}
-
 #[tokio::test]
 #[ignore = "requires the test server (./testserver/up.sh)"]
 async fn uploads_and_downloads_a_tree() {
@@ -578,16 +572,17 @@ async fn uploads_and_downloads_a_tree() {
         seconds(&source.join("big.bin"))
     );
 
-    // Clean up on the server.
-    for file in [
-        "upload/big.bin",
-        "upload/nested/small.txt",
-        "upload/nested/deeper/empty",
-    ] {
-        remote.delete_file(&below(&scratch, file)).await.unwrap();
-    }
-    for folder in ["upload/nested/deeper", "upload/nested", "upload"] {
-        remote.delete_dir(&below(&scratch, folder)).await.unwrap();
-    }
+    // Clean up on the server: the whole tree in one call.
+    let deleted = ferry_core::ops::delete(
+        remote.as_ref(),
+        &[(
+            scratch.join(&name("upload")),
+            ferry_core::EntryKind::Directory,
+        )],
+        &|_| {},
+    )
+    .await
+    .expect("delete tree");
+    assert_eq!(deleted, 6);
     remote.delete_dir(&scratch).await.unwrap();
 }

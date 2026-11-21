@@ -14,6 +14,7 @@ mod glob;
 pub mod interaction;
 pub mod library;
 pub mod listing;
+pub mod ops;
 pub mod path;
 pub mod remote;
 pub mod secrets;

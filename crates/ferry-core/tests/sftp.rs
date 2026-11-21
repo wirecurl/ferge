@@ -361,3 +361,99 @@ async fn file_operations_round_trip() {
     remote.delete_dir(&scratch).await.expect("delete scratch");
     remote.disconnect().await;
 }
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
+async fn resumes_reads_and_writes_and_replaces_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = connect(
+        key_options(&dir.path().join("known_hosts")),
+        Arc::new(Scripted::accepting()),
+    )
+    .await
+    .expect("connect");
+    let unique = format!("resume-{}", std::process::id());
+    let scratch = remote.home_dir().await.unwrap().join(&name(&unique));
+    remote.mkdir(&scratch).await.expect("mkdir");
+
+    // An odd size, so the last chunk is short and the window does not divide it.
+    let payload: Vec<u8> = (0..5 * 1024 * 1024 + 4_321_u32)
+        .map(|i| (i.wrapping_mul(31) % 253) as u8)
+        .collect();
+    let file = scratch.join(&name("big.bin"));
+    let split = 2 * 1024 * 1024 + 17;
+
+    // Write the first part, then resume at `split` with the rest.
+    let mut writer = remote.open_writer(&file, 0).await.expect("open");
+    writer
+        .write(Bytes::copy_from_slice(&payload[..split + 1000]))
+        .await
+        .expect("write");
+    assert_eq!(
+        writer.finish().await.expect("finish"),
+        (split + 1000) as u64
+    );
+    let mut writer = remote
+        .open_writer(&file, split as u64)
+        .await
+        .expect("reopen");
+    for chunk in payload[split..].chunks(700_000) {
+        writer
+            .write(Bytes::copy_from_slice(chunk))
+            .await
+            .expect("write");
+    }
+    assert_eq!(writer.finish().await.expect("finish"), payload.len() as u64);
+    assert_eq!(remote.stat(&file).await.unwrap().size, payload.len() as u64);
+
+    let whole: Vec<Bytes> = remote
+        .read(&file)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(whole.concat(), payload);
+    let tail: Vec<Bytes> = remote
+        .read_from(&file, split as u64)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(tail.concat(), payload[split..]);
+    let empty: Vec<Bytes> = remote
+        .read_from(&file, payload.len() as u64)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(empty.concat(), b"");
+
+    // Replace an existing file and keep a modification time.
+    let other = scratch.join(&name("other.bin"));
+    remote
+        .write(
+            &other,
+            futures::stream::iter([Ok(Bytes::from_static(b"old"))]).boxed(),
+        )
+        .await
+        .unwrap();
+    remote.rename_replace(&file, &other).await.expect("replace");
+    assert_eq!(
+        remote.stat(&other).await.unwrap().size,
+        payload.len() as u64
+    );
+    assert!(matches!(
+        remote.stat(&file).await,
+        Err(Error::NotFound { .. })
+    ));
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    remote.set_modified(&other, when).await.expect("set mtime");
+    assert_eq!(remote.stat(&other).await.unwrap().modified, Some(when));
+
+    remote.delete_file(&other).await.unwrap();
+    remote.delete_dir(&scratch).await.unwrap();
+    remote.disconnect().await;
+}

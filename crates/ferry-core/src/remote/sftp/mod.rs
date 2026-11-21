@@ -1,25 +1,28 @@
 //! SFTP over SSH, built on `russh` and `russh-sftp`.
 //!
-//! One SSH connection carries two SFTP channels: a metadata channel for listings
-//! and directory operations, and a lazily opened data channel for file contents.
-//! A large download therefore never delays browsing.
+//! One SSH connection carries several SFTP channels: a metadata channel for
+//! listings and directory operations, and lazily opened data channels for file
+//! contents. Transfers therefore never delay browsing, and parallel transfers
+//! do not share one channel's flow-control window.
 
 mod auth;
 mod config;
 mod handler;
+mod io;
 mod known_hosts;
 
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures::stream::FuturesOrdered;
 use futures::{FutureExt as _, StreamExt as _};
 use russh::client;
+use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, StatusCode};
 use tokio::sync::{OnceCell, mpsc};
 
@@ -27,8 +30,9 @@ pub(crate) use self::config::DEFAULT_PORT;
 use self::config::ResolvedTarget;
 pub use self::config::{KnownHostsSource, SftpOptions, SshConfigSource, configured_hosts};
 use self::handler::{ClientHandler, HostKeyFailure};
+use self::io::ChunkSizes;
 use self::known_hosts::{KnownHosts, host_key_name};
-use super::{ByteStream, ListStream, Remote, reader_stream, write_all};
+use super::{ByteStream, FileWriter, ListStream, Remote};
 use crate::entry::{Entry, Metadata};
 use crate::error::{Error, Result};
 use crate::interaction::{Account, Interaction};
@@ -45,6 +49,12 @@ const READDIR_PIPELINE: usize = 8;
 /// Seconds after which a single SFTP request is considered lost.
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// Data channels per connection; transfers are spread across them.
+const DATA_CHANNELS: usize = 3;
+
+/// OpenSSH extension that renames over an existing target atomically.
+const POSIX_RENAME: &str = "posix-rename@openssh.com";
+
 /// An authenticated SFTP session.
 #[derive(Clone)]
 pub struct SftpRemote {
@@ -58,8 +68,17 @@ struct Inner {
     ssh: client::Handle<ClientHandler>,
     /// Channel for listings and metadata.
     meta: RawSftpSession,
-    /// Channel for file contents, opened on first use.
-    data: OnceCell<SftpSession>,
+    /// Whether the server supports [`POSIX_RENAME`].
+    posix_rename: bool,
+    /// Channels for file contents, opened on first use.
+    data: [OnceCell<DataChannel>; DATA_CHANNELS],
+    next_data: AtomicUsize,
+}
+
+/// An SFTP channel for file contents and the chunk sizes it allows.
+struct DataChannel {
+    session: Arc<RawSftpSession>,
+    chunks: ChunkSizes,
 }
 
 impl fmt::Debug for SftpRemote {
@@ -123,7 +142,7 @@ impl SftpRemote {
         .run()
         .await?;
 
-        let meta = open_raw_session(&ssh).await?;
+        let (meta, extensions) = open_raw_session(&ssh).await?;
         let home = canonical(&meta, ".").await?;
         tracing::info!(remote = %target.label(), %home, "SFTP session ready");
         Ok(Self {
@@ -133,7 +152,9 @@ impl SftpRemote {
                 home,
                 ssh,
                 meta,
-                data: OnceCell::new(),
+                posix_rename: extensions.contains_key(POSIX_RENAME),
+                data: std::array::from_fn(|_| OnceCell::new()),
+                next_data: AtomicUsize::new(0),
             }),
         })
     }
@@ -148,18 +169,29 @@ impl SftpRemote {
             .await;
     }
 
-    async fn data(&self) -> Result<&SftpSession> {
-        self.inner
-            .data
+    /// A data channel; successive calls rotate through [`DATA_CHANNELS`].
+    async fn data(&self) -> Result<&DataChannel> {
+        let index = self.inner.next_data.fetch_add(1, Ordering::Relaxed) % DATA_CHANNELS;
+        self.inner.data[index]
             .get_or_try_init(|| async {
-                let channel = open_sftp_channel(&self.inner.ssh).await?;
-                let config = russh_sftp::client::Config {
-                    request_timeout_secs: REQUEST_TIMEOUT_SECS,
-                    ..russh_sftp::client::Config::default()
+                let (session, extensions) = open_raw_session(&self.inner.ssh).await?;
+                let chunks = if extensions.contains_key(russh_sftp::extensions::LIMITS) {
+                    match session.limits().await {
+                        Ok(limits) => {
+                            ChunkSizes::from_limits(limits.max_read_len, limits.max_write_len)
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "reading SFTP limits failed");
+                            ChunkSizes::SAFE
+                        }
+                    }
+                } else {
+                    ChunkSizes::SAFE
                 };
-                SftpSession::new_with_config(channel.into_stream(), config)
-                    .await
-                    .map_err(|error| Error::protocol("opening the SFTP data channel failed", error))
+                Ok(DataChannel {
+                    session: Arc::new(session),
+                    chunks,
+                })
             })
             .await
     }
@@ -247,7 +279,10 @@ async fn open_sftp_channel(
     Ok(channel)
 }
 
-async fn open_raw_session(ssh: &client::Handle<ClientHandler>) -> Result<RawSftpSession> {
+/// Opens an SFTP channel; returns it with the server's protocol extensions.
+async fn open_raw_session(
+    ssh: &client::Handle<ClientHandler>,
+) -> Result<(RawSftpSession, std::collections::HashMap<String, String>)> {
     let channel = open_sftp_channel(ssh).await?;
     let config = russh_sftp::client::Config {
         request_timeout_secs: REQUEST_TIMEOUT_SECS,
@@ -264,7 +299,7 @@ async fn open_raw_session(ssh: &client::Handle<ClientHandler>) -> Result<RawSftp
             format!("server speaks version {}", version.version),
         ));
     }
-    Ok(session)
+    Ok((session, version.extensions))
 }
 
 async fn canonical(meta: &RawSftpSession, path: &str) -> Result<RemotePath> {
@@ -422,24 +457,25 @@ impl Remote for SftpRemote {
         ))
     }
 
-    async fn read(&self, path: &RemotePath) -> Result<ByteStream> {
-        let file = self
-            .data()
-            .await?
-            .open(path.as_str())
-            .await
-            .map_err(|error| sftp_error(path, error))?;
-        Ok(reader_stream(path.clone(), file))
+    async fn read_from(&self, path: &RemotePath, offset: u64) -> Result<ByteStream> {
+        let channel = self.data().await?;
+        Ok(io::read_stream(
+            Arc::clone(&channel.session),
+            path.clone(),
+            offset,
+            channel.chunks.read,
+        ))
     }
 
-    async fn write(&self, path: &RemotePath, data: ByteStream) -> Result<u64> {
-        let file = self
-            .data()
-            .await?
-            .create(path.as_str())
-            .await
-            .map_err(|error| sftp_error(path, error))?;
-        write_all(path, file, data).await
+    async fn open_writer(&self, path: &RemotePath, offset: u64) -> Result<Box<dyn FileWriter>> {
+        let channel = self.data().await?;
+        io::open_writer(
+            Arc::clone(&channel.session),
+            path,
+            offset,
+            channel.chunks.write,
+        )
+        .await
     }
 
     async fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {
@@ -456,6 +492,63 @@ impl Remote for SftpRemote {
             .await
             .map(drop)
             .map_err(|error| sftp_error(from, error))
+    }
+
+    async fn rename_replace(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {
+        if self.inner.posix_rename {
+            let mut data = Vec::with_capacity(8 + from.as_str().len() + to.as_str().len());
+            for path in [from.as_str(), to.as_str()] {
+                let len = u32::try_from(path.len()).map_err(|_| Error::InvalidPath(path.into()))?;
+                data.extend_from_slice(&len.to_be_bytes());
+                data.extend_from_slice(path.as_bytes());
+            }
+            return match self.inner.meta.extended(POSIX_RENAME, data).await {
+                Ok(russh_sftp::protocol::Packet::Status(status))
+                    if status.status_code == StatusCode::Ok =>
+                {
+                    Ok(())
+                }
+                Ok(russh_sftp::protocol::Packet::Status(status)) => {
+                    Err(sftp_error(from, SftpError::Status(status)))
+                }
+                Ok(_) => Err(Error::protocol("renaming failed", "unexpected reply")),
+                Err(error) => Err(sftp_error(from, error)),
+            };
+        }
+        // Without the extension, plain SFTPv3 RENAME refuses existing targets.
+        match self.inner.meta.remove(to.as_str()).await {
+            Ok(_) => {}
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {}
+            Err(error) => return Err(sftp_error(to, error)),
+        }
+        self.inner
+            .meta
+            .rename(from.as_str(), to.as_str())
+            .await
+            .map(drop)
+            .map_err(|error| sftp_error(from, error))
+    }
+
+    async fn set_modified(&self, path: &RemotePath, time: SystemTime) -> Result<()> {
+        // SFTPv3 times are 32-bit seconds; dates outside that range are skipped.
+        let Some(seconds) = time
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| u32::try_from(elapsed.as_secs()).ok())
+        else {
+            return Ok(());
+        };
+        let attrs = FileAttributes {
+            atime: Some(seconds),
+            mtime: Some(seconds),
+            ..FileAttributes::empty()
+        };
+        self.inner
+            .meta
+            .setstat(path.as_str(), attrs)
+            .await
+            .map(drop)
+            .map_err(|error| sftp_error(path, error))
     }
 
     async fn delete_file(&self, path: &RemotePath) -> Result<()> {

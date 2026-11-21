@@ -8,12 +8,13 @@ pub mod local;
 pub mod sftp;
 
 use std::fmt;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
-use tokio::io::{AsyncRead, AsyncWriteExt as _};
+use tokio::io::AsyncRead;
 
 use crate::entry::{Entry, Metadata};
 use crate::error::{Error, Result};
@@ -28,6 +29,21 @@ pub type ListStream = BoxStream<'static, Result<Vec<Entry>>>;
 /// File contents delivered in chunks.
 pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 
+/// Writes one file front to back. Implementations may keep several writes in
+/// flight; errors of earlier writes surface in a later call or in `finish`.
+///
+/// Dropping a writer without calling [`finish`](FileWriter::finish) abandons
+/// the file: whatever reached the remote stays there.
+#[async_trait]
+pub trait FileWriter: Send {
+    /// Appends `data`.
+    async fn write(&mut self, data: Bytes) -> Result<()>;
+
+    /// Waits for all outstanding writes and closes the file. Returns the
+    /// file's length, i.e. the start offset plus the bytes written.
+    async fn finish(self: Box<Self>) -> Result<u64>;
+}
+
 /// A file system reachable through some protocol.
 ///
 /// Paths are always absolute; use [`Remote::home_dir`] to find a sensible start.
@@ -38,6 +54,11 @@ pub type ByteStream = BoxStream<'static, Result<Bytes>>;
 pub trait Remote: Send + Sync + fmt::Debug + 'static {
     /// Short human-readable description such as `user@example.org` or `Local`.
     fn label(&self) -> &str;
+
+    /// Whether this is the computer Ferry runs on.
+    fn is_local(&self) -> bool {
+        false
+    }
 
     /// The directory a session starts in (the login directory for SFTP).
     async fn home_dir(&self) -> Result<RemotePath>;
@@ -52,16 +73,39 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
     /// Metadata of `path`, following symlinks.
     async fn stat(&self, path: &RemotePath) -> Result<Metadata>;
 
-    /// Opens a file for reading.
-    async fn read(&self, path: &RemotePath) -> Result<ByteStream>;
+    /// Reads a file from `offset` to its end. Chunks arrive in order.
+    async fn read_from(&self, path: &RemotePath, offset: u64) -> Result<ByteStream>;
+
+    /// Reads a whole file.
+    async fn read(&self, path: &RemotePath) -> Result<ByteStream> {
+        self.read_from(path, 0).await
+    }
+
+    /// Opens `path` for writing at `offset`. The file is created if missing;
+    /// at offset 0 it is truncated, otherwise its first `offset` bytes are kept
+    /// (resuming an interrupted transfer).
+    async fn open_writer(&self, path: &RemotePath, offset: u64) -> Result<Box<dyn FileWriter>>;
 
     /// Creates or truncates `path` and writes `data` to it. Returns the number of
     /// bytes written.
-    async fn write(&self, path: &RemotePath, data: ByteStream) -> Result<u64>;
+    async fn write(&self, path: &RemotePath, mut data: ByteStream) -> Result<u64> {
+        let mut writer = self.open_writer(path, 0).await?;
+        while let Some(chunk) = data.next().await {
+            writer.write(chunk?).await?;
+        }
+        writer.finish().await
+    }
 
     /// Renames `from` to `to`. Fails with [`Error::AlreadyExists`] instead of
     /// replacing an existing target.
     async fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<()>;
+
+    /// Renames `from` to `to`, replacing `to` if it exists: atomically where
+    /// the protocol supports it.
+    async fn rename_replace(&self, from: &RemotePath, to: &RemotePath) -> Result<()>;
+
+    /// Sets the modification (and access) time of a file.
+    async fn set_modified(&self, path: &RemotePath, time: SystemTime) -> Result<()>;
 
     /// Deletes a file or symlink.
     async fn delete_file(&self, path: &RemotePath) -> Result<()>;
@@ -87,29 +131,4 @@ where
     tokio_util::io::ReaderStream::with_capacity(reader, READ_CHUNK)
         .map(move |chunk| chunk.map_err(|error| Error::from_io(&path, error)))
         .boxed()
-}
-
-/// Drains `data` into `writer`, then flushes and shuts the writer down.
-pub(crate) async fn write_all<W>(
-    path: &RemotePath,
-    mut writer: W,
-    mut data: ByteStream,
-) -> Result<u64>
-where
-    W: tokio::io::AsyncWrite + Unpin + Send,
-{
-    let mut written = 0_u64;
-    while let Some(chunk) = data.next().await {
-        let chunk = chunk?;
-        writer
-            .write_all(&chunk)
-            .await
-            .map_err(|error| Error::from_io(path, error))?;
-        written += chunk.len() as u64;
-    }
-    writer
-        .shutdown()
-        .await
-        .map_err(|error| Error::from_io(path, error))?;
-    Ok(written)
 }

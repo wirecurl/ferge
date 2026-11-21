@@ -3,11 +3,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use std::time::SystemTime;
+
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::StreamExt as _;
+use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _, BufWriter};
 use tokio::sync::mpsc;
 
-use super::{ByteStream, ListStream, Remote, reader_stream, write_all};
+use super::{ByteStream, FileWriter, ListStream, Remote, reader_stream};
 use crate::entry::{Entry, EntryKind, Metadata};
 use crate::error::{Error, Result};
 use crate::path::{EntryName, RemotePath};
@@ -120,10 +124,41 @@ fn list_blocking(path: &RemotePath, sender: &mpsc::Sender<Result<Vec<Entry>>>) {
     }
 }
 
+/// Buffered sequential writes to a local file.
+struct LocalWriter {
+    path: RemotePath,
+    file: BufWriter<tokio::fs::File>,
+    length: u64,
+}
+
+#[async_trait]
+impl FileWriter for LocalWriter {
+    async fn write(&mut self, data: Bytes) -> Result<()> {
+        self.file
+            .write_all(&data)
+            .await
+            .map_err(|error| Error::from_io(&self.path, error))?;
+        self.length += data.len() as u64;
+        Ok(())
+    }
+
+    async fn finish(mut self: Box<Self>) -> Result<u64> {
+        self.file
+            .shutdown()
+            .await
+            .map_err(|error| Error::from_io(&self.path, error))?;
+        Ok(self.length)
+    }
+}
+
 #[async_trait]
 impl Remote for LocalRemote {
     fn label(&self) -> &'static str {
         "Local"
+    }
+
+    fn is_local(&self) -> bool {
+        true
     }
 
     async fn home_dir(&self) -> Result<RemotePath> {
@@ -155,20 +190,40 @@ impl Remote for LocalRemote {
         Ok(metadata_from_std(&metadata))
     }
 
-    async fn read(&self, path: &RemotePath) -> Result<ByteStream> {
-        let file = tokio::fs::File::open(to_local(path))
+    async fn read_from(&self, path: &RemotePath, offset: u64) -> Result<ByteStream> {
+        let mut file = tokio::fs::File::open(to_local(path))
             .await
             .map_err(|error| Error::from_io(path, error))?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|error| Error::from_io(path, error))?;
+        }
         Ok(reader_stream(path.clone(), file))
     }
 
-    async fn write(&self, path: &RemotePath, data: ByteStream) -> Result<u64> {
-        let file = tokio::fs::File::create(to_local(path))
+    async fn open_writer(&self, path: &RemotePath, offset: u64) -> Result<Box<dyn FileWriter>> {
+        let io = |error| Error::from_io(path, error);
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(offset == 0)
+            .open(to_local(path))
             .await
-            .map_err(|error| Error::from_io(path, error))?;
-        write_all(path, file, data).await
+            .map_err(io)?;
+        if offset > 0 {
+            // Drop anything past the resume point, e.g. a partly written chunk.
+            file.set_len(offset).await.map_err(io)?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(io)?;
+        }
+        Ok(Box::new(LocalWriter {
+            path: path.clone(),
+            file: BufWriter::with_capacity(super::READ_CHUNK, file),
+            length: offset,
+        }))
     }
-
     async fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {
         // `rename(2)` silently replaces the target. The check below keeps the
         // contract of `Remote::rename`; a concurrent creation of `to` by another
@@ -181,6 +236,24 @@ impl Remote for LocalRemote {
         tokio::fs::rename(to_local(from), to_local(to))
             .await
             .map_err(|error| Error::from_io(from, error))
+    }
+
+    async fn rename_replace(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {
+        // `rename(2)` replaces the target atomically.
+        tokio::fs::rename(to_local(from), to_local(to))
+            .await
+            .map_err(|error| Error::from_io(from, error))
+    }
+
+    async fn set_modified(&self, path: &RemotePath, time: SystemTime) -> Result<()> {
+        let local = to_local(path);
+        let result = tokio::task::spawn_blocking(move || {
+            let file = fs::File::options().write(true).open(local)?;
+            file.set_times(fs::FileTimes::new().set_modified(time).set_accessed(time))
+        })
+        .await
+        .map_err(|error| Error::from_io(path, std::io::Error::other(error)))?;
+        result.map_err(|error| Error::from_io(path, error))
     }
 
     async fn delete_file(&self, path: &RemotePath) -> Result<()> {
@@ -314,5 +387,49 @@ mod tests {
         remote.delete_file(&renamed).await.expect("delete file");
         remote.delete_dir(&subdir).await.expect("delete dir");
         assert_eq!(collect(&remote, &root).await, Vec::new());
+    }
+
+    #[tokio::test]
+    async fn resumes_and_replaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let remote = LocalRemote::new();
+        let root = remote_path(dir.path());
+        let file = root.join(&EntryName::new("f").expect("name"));
+        let other = root.join(&EntryName::new("g").expect("name"));
+
+        let mut writer = remote.open_writer(&file, 0).await.expect("open");
+        writer
+            .write(Bytes::from_static(b"hello world"))
+            .await
+            .expect("write");
+        assert_eq!(writer.finish().await.expect("finish"), 11);
+        // Resuming at 5 drops the rest and continues from there.
+        let mut writer = remote.open_writer(&file, 5).await.expect("reopen");
+        writer
+            .write(Bytes::from_static(b", you"))
+            .await
+            .expect("write");
+        assert_eq!(writer.finish().await.expect("finish"), 10);
+        assert_eq!(fs::read(dir.path().join("f")).expect("read"), b"hello, you");
+
+        let tail: Vec<Bytes> = remote
+            .read_from(&file, 7)
+            .await
+            .expect("open")
+            .try_collect()
+            .await
+            .expect("read");
+        assert_eq!(tail.concat(), b"you");
+
+        fs::write(dir.path().join("g"), b"old").expect("write");
+        remote.rename_replace(&file, &other).await.expect("replace");
+        assert_eq!(fs::read(dir.path().join("g")).expect("read"), b"hello, you");
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        remote.set_modified(&other, when).await.expect("mtime");
+        assert_eq!(
+            remote.stat(&other).await.expect("stat").modified,
+            Some(when)
+        );
+        assert!(remote.is_local());
     }
 }

@@ -115,6 +115,8 @@ Richtungen Upload, Download, Mirror. Vorschau als Dry-Run vor der Ausführung, L
 
 Remote-Datei im externen Editor öffnen mit Auto-Upload beim Speichern, Info- und Rechte-Inspector, Paketierung (AUR, Flatpak, signiertes macOS-Bundle).
 
+Als root arbeiten: Ein Pane wechselt per Klick auf root, ohne Root-Login und ohne Einrichtung auf dem Server. Ferry startet über die bestehende SSH-Verbindung zusätzliche SFTP-Kanäle mit `sudo sftp-server` (Pfad automatisch ermittelt, Passwort nur wenn sudo es verlangt, vorher mit `sudo true` geprüft) und hält das Passwort danach nicht im Speicher.
+
 ## Risiken
 
 - **GPUI-API vor 1.0.** Doku dünn, oft hilft nur der Quellcode von Zed und `gpui-component`. Versionen pinnen, Upgrades als eigene Aufgabe.

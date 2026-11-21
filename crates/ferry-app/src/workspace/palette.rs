@@ -80,6 +80,12 @@ pub(crate) fn commands() -> Vec<Command> {
             IconName::Unplug,
         ),
         (
+            "Work as root",
+            Box::new(actions::ToggleRoot),
+            pane,
+            IconName::ShieldUser,
+        ),
+        (
             "Quick look",
             Box::new(actions::Preview),
             list,

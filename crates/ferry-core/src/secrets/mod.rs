@@ -65,6 +65,12 @@ pub enum SecretId {
     },
     /// The passphrase of a private key file.
     KeyPassphrase(PathBuf),
+    /// The password `sudo` asks `user` for on an SSH server, to work as root.
+    SudoPassword {
+        user: String,
+        host: String,
+        port: u16,
+    },
 }
 
 impl SecretId {
@@ -73,6 +79,7 @@ impl SecretId {
         match self {
             Self::Password { user, host, port } => format!("password:{user}@{host}:{port}"),
             Self::KeyPassphrase(path) => format!("passphrase:{}", path.display()),
+            Self::SudoPassword { user, host, port } => format!("sudo:{user}@{host}:{port}"),
         }
     }
 
@@ -83,6 +90,9 @@ impl SecretId {
                 format!("Ferry: password for {user}@{host}:{port}")
             }
             Self::KeyPassphrase(path) => format!("Ferry: passphrase for {}", path.display()),
+            Self::SudoPassword { user, host, port } => {
+                format!("Ferry: sudo password for {user}@{host}:{port}")
+            }
         }
     }
 }

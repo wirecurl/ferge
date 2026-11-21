@@ -30,6 +30,12 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
   favorites in folders, `~/.ssh/config` hosts, recent connections, Quick Connect, and a search
   that connects with Enter. Favorites and history are stored in SQLite in the data directory
   (`~/.local/share/ferry` on Linux).
+- Work as root on any SSH server where your account may use sudo, without logging in as root
+  and without setting anything up: the shield button in a pane's header (or "Open as root" /
+  "Work as root" where the server refused access) switches the pane to root in the same folder.
+  Ferry finds the server's `sftp-server`, runs it through `sudo` on the existing connection and
+  asks for the sudo password only if sudo needs one (a saved login password is tried first; the
+  sudo password can be remembered like any other). The pane header is tinted while it lasts.
 - File operations: new folder and file, rename in place, duplicate, delete (folders with their
   contents, after asking), copy address; also from a row's context menu.
 - An inspector with the details of the selection and editable permissions; optional Kind and

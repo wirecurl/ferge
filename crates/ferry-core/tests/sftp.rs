@@ -15,7 +15,7 @@ use ferry_core::interaction::{
     Account, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt,
 };
 use ferry_core::remote::sftp::{KnownHostsSource, SftpOptions, SftpRemote, SshConfigSource};
-use ferry_core::{EntryKind, EntryName, Error, HostKeyError, Remote, RemotePath};
+use ferry_core::{ElevationError, EntryKind, EntryName, Error, HostKeyError, Remote, RemotePath};
 use futures::{StreamExt as _, TryStreamExt as _};
 use secrecy::SecretString;
 
@@ -33,6 +33,8 @@ struct Scripted {
     passwords: Mutex<Vec<&'static str>>,
     host_prompts: Mutex<Vec<HostKeyPrompt>>,
     passphrase_retries: Mutex<Vec<bool>>,
+    sudo_passwords: Mutex<Vec<&'static str>>,
+    sudo_retries: Mutex<Vec<bool>>,
 }
 
 #[async_trait]
@@ -61,6 +63,12 @@ impl Interaction for Scripted {
         _prompts: &[KeyboardPrompt],
     ) -> Option<Vec<SecretString>> {
         None
+    }
+
+    async fn sudo_password(&self, _account: &Account, retry: bool) -> Option<SecretString> {
+        self.sudo_retries.lock().unwrap().push(retry);
+        let mut queue = self.sudo_passwords.lock().unwrap();
+        (!queue.is_empty()).then(|| SecretString::from(queue.remove(0)))
     }
 }
 
@@ -100,6 +108,27 @@ fn key_options(known_hosts: &Path) -> SftpOptions {
 
 async fn connect(options: SftpOptions, interaction: Arc<Scripted>) -> Result<SftpRemote, Error> {
     SftpRemote::connect(options, interaction).await
+}
+
+fn user_options(known_hosts: &Path, user: &str) -> SftpOptions {
+    let mut options = key_options(known_hosts);
+    options.user = Some(user.into());
+    options
+}
+
+fn path(text: &str) -> RemotePath {
+    RemotePath::parse(text).expect("valid path")
+}
+
+async fn read_all(remote: &SftpRemote, file: &RemotePath) -> Vec<u8> {
+    let chunks: Vec<Bytes> = remote
+        .read(file)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    chunks.concat()
 }
 
 fn name(text: &str) -> EntryName {
@@ -585,4 +614,134 @@ async fn uploads_and_downloads_a_tree() {
     .expect("delete tree");
     assert_eq!(deleted, 6);
     remote.delete_dir(&scratch).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
+async fn works_as_root_with_the_sudo_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = connect(
+        key_options(&dir.path().join("known_hosts")),
+        Arc::new(Scripted::accepting()),
+    )
+    .await
+    .expect("connect");
+    let private = path("/root/private");
+    let denied = remote
+        .list(&private)
+        .try_concat()
+        .await
+        .expect_err("denied");
+    assert!(denied.is_permission_denied(), "{denied:?}");
+
+    // A wrong password is asked again; the right one opens the session.
+    let interaction = Arc::new(Scripted::accepting());
+    interaction
+        .sudo_passwords
+        .lock()
+        .unwrap()
+        .extend(["wrong", "ferry"]);
+    let root = remote
+        .elevate(Arc::clone(&interaction) as Arc<dyn Interaction>)
+        .await
+        .expect("elevate");
+    assert_eq!(*interaction.sudo_retries.lock().unwrap(), [false, true]);
+    assert!(root.is_elevated() && !remote.is_elevated());
+    assert_eq!(root.label(), "root@127.0.0.1:2222");
+    assert_eq!(root.account(), remote.account());
+    assert_eq!(root.home_dir().await.unwrap(), path("/home/ferry"));
+
+    let entries: Vec<_> = root
+        .list(&private)
+        .try_concat()
+        .await
+        .expect("list as root");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name.as_str() == "secret.txt")
+    );
+    assert_eq!(
+        read_all(&root, &private.join(&name("secret.txt"))).await,
+        b"only root can read this\n"
+    );
+    let written = private.join(&name("written-as-root.txt"));
+    let data = futures::stream::iter([Ok(Bytes::from_static(b"root was here"))]).boxed();
+    assert_eq!(root.write(&written, data).await.unwrap(), 13);
+    assert_eq!(read_all(&root, &written).await, b"root was here");
+    root.delete_file(&written).await.unwrap();
+
+    // Leaving root closes only its channels; the login session goes on.
+    root.disconnect().await;
+    drop(root);
+    let home: Vec<_> = remote
+        .list(&path("/home/ferry"))
+        .try_concat()
+        .await
+        .unwrap();
+    assert!(home.iter().any(|entry| entry.name.as_str() == "tree"));
+    remote.disconnect().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
+async fn works_as_root_without_asking_when_sudo_needs_no_password() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = connect(
+        user_options(&dir.path().join("known_hosts"), "ferry-nopasswd"),
+        Arc::new(Scripted::accepting()),
+    )
+    .await
+    .expect("connect");
+    let interaction = Arc::new(Scripted::accepting());
+    let root = remote
+        .elevate(Arc::clone(&interaction) as Arc<dyn Interaction>)
+        .await
+        .expect("elevate");
+    assert!(interaction.sudo_retries.lock().unwrap().is_empty());
+    let entries: Vec<_> = root
+        .list(&path("/root/private"))
+        .try_concat()
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
+async fn working_as_root_fails_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let known_hosts = dir.path().join("known_hosts");
+
+    // Not in the sudoers file: sudo's own explanation is passed on.
+    let remote = connect(
+        user_options(&known_hosts, "ferry-nosudo"),
+        Arc::new(Scripted::accepting()),
+    )
+    .await
+    .expect("connect");
+    let interaction = Arc::new(Scripted::accepting());
+    interaction.sudo_passwords.lock().unwrap().push("ferry");
+    let error = remote
+        .elevate(interaction as Arc<dyn Interaction>)
+        .await
+        .expect_err("not allowed");
+    assert!(
+        matches!(
+            &error,
+            Error::Elevation(ElevationError::Refused { message, .. })
+                if message.contains("not in the sudoers file")
+        ),
+        "{error:?}"
+    );
+
+    // Closing the password dialog cancels quietly.
+    let remote = connect(key_options(&known_hosts), Arc::new(Scripted::accepting()))
+        .await
+        .expect("connect");
+    let error = remote
+        .elevate(Arc::new(Scripted::accepting()) as Arc<dyn Interaction>)
+        .await
+        .expect_err("cancelled");
+    assert!(error.is_cancelled(), "{error:?}");
 }

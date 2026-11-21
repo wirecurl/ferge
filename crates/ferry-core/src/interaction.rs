@@ -56,6 +56,15 @@ impl Account {
             port: self.port,
         }
     }
+
+    /// Where the password `sudo` asks for is saved.
+    pub fn sudo_password_id(&self) -> SecretId {
+        SecretId::SudoPassword {
+            user: self.user.clone(),
+            host: self.host.clone(),
+            port: self.port,
+        }
+    }
 }
 
 impl fmt::Display for Account {
@@ -100,6 +109,13 @@ pub trait Interaction: Send + Sync + fmt::Debug {
         instructions: &str,
         prompts: &[KeyboardPrompt],
     ) -> Option<Vec<SecretString>>;
+
+    /// Working as root needs the password `sudo` asks for, usually the
+    /// account's own. `retry`: the previous answer was wrong. `None` cancels.
+    async fn sudo_password(&self, account: &Account, retry: bool) -> Option<SecretString> {
+        let _ = (account, retry);
+        None
+    }
 }
 
 /// An [`Interaction`] that never asks anyone: unknown host keys are rejected and

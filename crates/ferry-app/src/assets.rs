@@ -38,6 +38,7 @@ gpui_component_assets::icon_assets!(
         ArrowUpDown,
         PanelsTopLeft,
         Clock,
+        ShieldUser,
     ]
 );
 

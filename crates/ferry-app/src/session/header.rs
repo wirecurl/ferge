@@ -10,7 +10,8 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, h_flex};
+use gpui_component_assets::IconName as ShieldIcon;
 
 use super::servers::Tab;
 use super::{ConnectRequest, GoTo, LibraryAction, Session, SessionEvent};
@@ -50,9 +51,29 @@ impl Session {
                 .into_any_element(),
             None => self.render_path_bar(cx).into_any_element(),
         };
+        // Working as root is one click away on every server, and plain to
+        // see while it lasts.
+        let root = self.can_work_as_root().then(|| {
+            let on = self.works_as_root();
+            IconButton::new("work-as-root", ShieldIcon::ShieldUser)
+                .size(ControlSize::Compact)
+                .selected(on)
+                .tooltip(if on {
+                    "Stop working as root"
+                } else {
+                    "Work as root"
+                })
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.toggle_root(window, cx);
+                }))
+        });
         header
+            .when(self.works_as_root() && !self.opens_root(), |this| {
+                this.bg(cx.theme().root_fill())
+            })
             .child(switch)
             .child(middle)
+            .children(root)
             .child(self.render_pane_menu(cx))
     }
 
@@ -145,12 +166,14 @@ impl Session {
     /// highlighted.
     fn render_path_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, accent, hover, foreground) = (
+        let (muted, accent, hover, foreground, warning) = (
             theme.muted_foreground,
             theme.blue,
             theme.hover_fill(),
             theme.foreground,
+            theme.root_accent(),
         );
+        let as_root = self.works_as_root() && !self.opens_root();
         let Some(browser) = self.browser() else {
             return h_flex().id("path-bar").flex_1();
         };
@@ -160,10 +183,12 @@ impl Session {
         } else {
             browser.remote_label().to_owned().into()
         };
-        let root_icon = if browser.remote().is_local() {
-            IconName::HardDrive
+        let root_icon: Icon = if browser.remote().is_local() {
+            IconName::HardDrive.into()
+        } else if as_root {
+            ShieldIcon::ShieldUser.into()
         } else {
-            IconName::Globe
+            IconName::Globe.into()
         };
         let ancestors = browser.path().ancestors_from_root();
         let last = ancestors.len().saturating_sub(1);
@@ -196,7 +221,8 @@ impl Session {
                 .map(|this| match path.file_name() {
                     Some(name) => this.child(SharedString::from(name.to_owned())),
                     None => this
-                        .child(Icon::new(root_icon.clone()).size(em(1.)))
+                        .when(as_root, |this| this.text_color(warning))
+                        .child(root_icon.clone().size(em(1.)))
                         .child(label.clone()),
                 });
             h_flex()
@@ -228,6 +254,7 @@ impl Session {
         let this = cx.entity().downgrade();
         let options = self.options;
         let focus = self.browser().map(|browser| browser.focus_handle(cx));
+        let root = self.can_work_as_root().then(|| self.works_as_root());
         IconButton::new("pane-menu", IconName::Ellipsis)
             .size(ControlSize::Compact)
             .tooltip("View options")
@@ -284,9 +311,17 @@ impl Session {
                         let _ = this.update(cx, |session, cx| session.disconnect(window, cx));
                     }
                 };
-                menu.item(PopupMenuItem::new("Add to favorites…").on_click(add))
-                    .separator()
-                    .item(PopupMenuItem::new("Disconnect").on_click(disconnect))
+                menu = menu
+                    .item(PopupMenuItem::new("Add to favorites…").on_click(add))
+                    .separator();
+                if let (Some(on), Some(focus)) = (root, &focus) {
+                    menu = menu.action_context(focus.clone()).menu_with_check(
+                        "Work as root",
+                        on,
+                        Box::new(actions::ToggleRoot),
+                    );
+                }
+                menu.item(PopupMenuItem::new("Disconnect").on_click(disconnect))
             })
     }
 

@@ -26,6 +26,6 @@ pub mod transfer;
 
 pub use destination::{Destination, SftpTarget};
 pub use entry::{Entry, EntryKind, Metadata};
-pub use error::{Error, HostKeyError, Result};
+pub use error::{ElevationError, Error, HostKeyError, Result};
 pub use path::{EntryName, RemotePath};
 pub use remote::Remote;

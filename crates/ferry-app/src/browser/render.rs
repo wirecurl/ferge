@@ -11,11 +11,12 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, uniform_list,
 };
+use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use super::{DraggedEntries, FileBrowser, FileClipboard, LoadState};
+use super::{BrowserEvent, DraggedEntries, FileBrowser, FileClipboard, LoadState};
 use crate::file_type::FileType;
 use crate::style::{self, Palette as _, TypeScale as _, em};
 use crate::{actions, format};
@@ -164,9 +165,23 @@ impl FileBrowser {
                 .text_body()
                 .text_color(cx.theme().muted_foreground);
             let empty = Self::accept_drops(empty, self.path.clone(), cx);
+            // A folder the login may not read opens as root in one click.
+            let root = self.offers_root().then(|| {
+                Button::new("open-as-root")
+                    .label("Open as root")
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                        cx.emit(BrowserEvent::WorkAsRoot);
+                    }))
+            });
             return self
                 .with_folder_menu(empty, cx)
-                .child(message)
+                .child(
+                    v_flex()
+                        .items_center()
+                        .gap_3()
+                        .child(message)
+                        .children(root),
+                )
                 .into_any_element();
         }
         let list = div().id("entries-drop").flex_1().min_h_0();

@@ -855,7 +855,7 @@ impl Workspace {
                     .child(
                         Button::new("secret-ok")
                             .primary()
-                            .label("Log in")
+                            .label(request.confirm)
                             .on_click(answer(true)),
                     ),
             )

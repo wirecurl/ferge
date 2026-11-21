@@ -24,6 +24,8 @@ actions!(
         CancelGoTo,
         /// Switches the pane between its files and the server panel.
         ToggleServers,
+        /// Works as root on the pane's server (through sudo), or stops.
+        ToggleRoot,
         FocusLeftPane,
         FocusRightPane,
     ]

@@ -58,6 +58,11 @@ pub(crate) enum BrowserEvent {
     Delete(Vec<(RemotePath, EntryKind)>),
     /// An operation failed; show `message` to the user.
     Failed(String),
+    /// An operation failed because the server refused access, and working
+    /// as root could help.
+    Denied(String),
+    /// The user asked to work as root.
+    WorkAsRoot,
 }
 
 impl gpui::EventEmitter<BrowserEvent> for FileBrowser {}
@@ -124,6 +129,13 @@ pub(crate) struct FileBrowser {
     /// A short message for the status bar, e.g. after copying.
     notice: Option<SharedString>,
     state: LoadState,
+    /// The listing failed because the server refused access.
+    denied: bool,
+    /// The pane can switch this browser to working as root.
+    can_elevate: bool,
+    /// The rows shown came from another remote (e.g. root's view of the
+    /// folder); they go if the new remote cannot list it.
+    rows_from_other_remote: bool,
     /// Incremented on every navigation; results of older work are dropped.
     generation: u64,
     /// Chunks received since the last frame, merged once per frame.
@@ -171,6 +183,9 @@ impl FileBrowser {
             anchor: None,
             notice: None,
             state: LoadState::Loading,
+            denied: false,
+            can_elevate: false,
+            rows_from_other_remote: false,
             generation: 0,
             pending: Vec::new(),
             listing_task: None,
@@ -195,6 +210,50 @@ impl FileBrowser {
 
     pub(crate) fn remote(&self) -> &Arc<dyn Remote> {
         &self.remote
+    }
+
+    /// Continues on `remote`, e.g. the same server as root: same folder and
+    /// history, fresh listings. What is shown stays until the new listing
+    /// replaces it.
+    pub(crate) fn set_remote(&mut self, remote: Arc<dyn Remote>, cx: &mut Context<Self>) {
+        self.remote = remote;
+        self.cache = Arc::new(ListingCache::default());
+        self.views.clear();
+        self.renaming = None;
+        self.notice = None;
+        self.state = if self.view.total_len() > 0 {
+            LoadState::Revalidating
+        } else {
+            LoadState::Loading
+        };
+        self.load(cx);
+        self.rows_from_other_remote = self.view.total_len() > 0;
+        cx.emit(Navigated);
+        cx.notify();
+    }
+
+    /// Whether failures caused by missing permissions offer to work as root.
+    pub(crate) fn set_can_elevate(&mut self, can_elevate: bool, cx: &mut Context<Self>) {
+        if self.can_elevate != can_elevate {
+            self.can_elevate = can_elevate;
+            cx.notify();
+        }
+    }
+
+    /// Whether the listing failed for lack of permissions while working as
+    /// root is possible.
+    fn offers_root(&self) -> bool {
+        self.can_elevate && self.denied && matches!(self.state, LoadState::Failed(_))
+    }
+
+    /// Tells the pane that an operation failed.
+    fn report(&self, error: &ferry_core::Error, cx: &mut Context<Self>) {
+        let message = error.to_string();
+        cx.emit(if self.can_elevate && error.is_permission_denied() {
+            BrowserEvent::Denied(message)
+        } else {
+            BrowserEvent::Failed(message)
+        });
     }
 
     pub(crate) fn set_options(&mut self, options: ViewOptions, cx: &mut Context<Self>) {
@@ -331,6 +390,8 @@ impl FileBrowser {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
+        self.denied = false;
+        self.rows_from_other_remote = false;
         self.pending.clear();
         self.build_task = None;
         self.navigated_at = Instant::now();
@@ -395,12 +456,21 @@ impl FileBrowser {
                 } else {
                     self.flush_pending();
                 }
+                self.rows_from_other_remote = false;
                 self.state = LoadState::Complete;
                 cx.notify();
             }
             ListingEvent::Failed(error) => {
                 self.flush_pending();
+                if std::mem::take(&mut self.rows_from_other_remote) {
+                    // Never show what this remote may not see.
+                    self.view = DirectoryView::new(self.sort);
+                    self.view.set_show_hidden(self.options.show_hidden);
+                    self.build_task = None;
+                    self.reselect();
+                }
                 tracing::warn!(path = %self.path, %error, "listing failed");
+                self.denied = error.is_permission_denied();
                 self.state = LoadState::Failed(error.to_string());
                 cx.notify();
             }

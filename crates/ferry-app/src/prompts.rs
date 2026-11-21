@@ -42,6 +42,8 @@ pub(crate) struct SecretRequest {
     pub echo: bool,
     /// Offer "Remember" with this initial state; `None` hides the option.
     pub remember: Option<bool>,
+    /// Label of the button that submits the answer.
+    pub confirm: &'static str,
     pub reply: oneshot::Sender<Option<SecretAnswer>>,
 }
 
@@ -116,12 +118,26 @@ impl Prompter {
         echo: bool,
         remember: Option<bool>,
     ) -> Option<SecretAnswer> {
+        self.secret_for(title, message, echo, remember, "Log in")
+            .await
+    }
+
+    /// Like [`Prompter::secret`], for something other than logging in.
+    pub(crate) async fn secret_for(
+        &self,
+        title: String,
+        message: String,
+        echo: bool,
+        remember: Option<bool>,
+        confirm: &'static str,
+    ) -> Option<SecretAnswer> {
         let (reply, answer) = oneshot::channel();
         let request = PromptRequest::Secret(SecretRequest {
             title,
             message,
             echo,
             remember,
+            confirm,
             reply,
         });
         if !self.send(request) {

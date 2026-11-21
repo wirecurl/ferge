@@ -32,7 +32,9 @@ cargo test --workspace -- --include-ignored   # includes SFTP integration tests
 ```
 
 Credentials: user `ferry`, password `ferry`; keys in `.testserver/` (`id_ed25519` without
-passphrase, `id_ed25519_encrypted` with passphrase `ferry`). Fixtures in the login directory:
+passphrase, `id_ed25519_encrypted` with passphrase `ferry`). For working as root: `ferry` may use sudo
+with its password, `ferry-nopasswd` without one, `ferry-nosudo` not at all (same keys and
+password); `/root/private/secret.txt` is readable only by root. Fixtures in the login directory:
 `many/` (100,000 files, deterministic names, sparse sizes, spread mtimes) and `tree/` (nested
 dirs, unicode, hidden files, symlinks incl. a dangling one). Tests that need the server are
 `#[ignore]`d so plain `cargo test` works offline.

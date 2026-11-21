@@ -159,6 +159,10 @@ pub(crate) trait Palette {
     fn inactive_selection(&self) -> Hsla;
     /// The chosen item of a track, lifted above it.
     fn raised_fill(&self) -> Hsla;
+    /// Text and icons that say a pane works as root.
+    fn root_accent(&self) -> Hsla;
+    /// Behind a pane header that works as root, and notes that offer it.
+    fn root_fill(&self) -> Hsla;
 }
 
 impl Palette for Theme {
@@ -190,6 +194,23 @@ impl Palette for Theme {
         } else {
             self.background
         }
+    }
+
+    fn root_accent(&self) -> Hsla {
+        if self.is_dark() {
+            self.warning
+        } else {
+            // Amber text on a light background needs to be darker to read.
+            Hsla {
+                l: self.warning.l * 0.55,
+                ..self.warning
+            }
+        }
+    }
+
+    fn root_fill(&self) -> Hsla {
+        self.warning
+            .opacity(if self.is_dark() { 0.1 } else { 0.14 })
     }
 }
 

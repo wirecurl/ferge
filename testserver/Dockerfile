@@ -2,10 +2,18 @@
 # Start it with ./testserver/up.sh; see CLAUDE.md.
 FROM alpine:3.24
 
-RUN apk add --no-cache openssh-server python3 \
+# Working as root: ferry may use sudo with its password, ferry-nopasswd without
+# one, and ferry-nosudo not at all. sftp-server is the program sudo runs.
+RUN apk add --no-cache openssh-server openssh-sftp-server python3 sudo \
     && ssh-keygen -A \
-    && adduser -D -s /bin/sh ferry \
-    && echo 'ferry:ferry' | chpasswd
+    && for user in ferry ferry-nopasswd ferry-nosudo; do \
+           adduser -D -s /bin/sh "$user" && echo "$user:ferry" | chpasswd; \
+       done \
+    && echo 'ferry ALL=(ALL) ALL' > /etc/sudoers.d/ferry \
+    && echo 'ferry-nopasswd ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ferry-nopasswd \
+    && chmod 0440 /etc/sudoers.d/ferry /etc/sudoers.d/ferry-nopasswd \
+    && install -d -m 0700 /root/private \
+    && echo 'only root can read this' > /root/private/secret.txt
 
 COPY sshd_config /etc/ssh/sshd_config
 COPY generate_fixtures.py /usr/local/bin/generate_fixtures.py

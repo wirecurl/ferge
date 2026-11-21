@@ -33,6 +33,20 @@ struct State {
     pending: Vec<(SecretId, Change)>,
     /// Keyboard-interactive password rounds answered so far.
     keyboard_password_rounds: usize,
+    /// Where the sudo password last handed out came from.
+    sudo_last: Option<SudoOffer>,
+    sudo_checked_saved: bool,
+    sudo_checked_login: bool,
+    /// The saved sudo password was wrong.
+    sudo_saved_rejected: bool,
+}
+
+/// Where a sudo password came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SudoOffer {
+    Saved,
+    Login,
+    Typed,
 }
 
 /// [`Interaction`] for one connection attempt.
@@ -178,6 +192,72 @@ impl Interaction for UiInteraction {
         }
         Some(answers)
     }
+
+    async fn sudo_password(&self, account: &Account, retry: bool) -> Option<SecretString> {
+        self.sudo(account, retry).await
+    }
+}
+
+impl UiInteraction {
+    /// The password sudo asks for: a saved sudo password, else the saved
+    /// login password (sudo usually wants the account's own), else asked.
+    /// `retry`: the previous answer was wrong.
+    async fn sudo(&self, account: &Account, retry: bool) -> Option<SecretString> {
+        let id = account.sudo_password_id();
+        let last = self.state().sudo_last.take();
+        if retry && last == Some(SudoOffer::Saved) {
+            // Forgotten once the login works, unless a new one is remembered.
+            let mut state = self.state();
+            state.sudo_saved_rejected = true;
+            state.pending.push((id.clone(), Change::Forget));
+        }
+        let check_saved = !std::mem::replace(&mut self.state().sudo_checked_saved, true);
+        if check_saved && let Some(saved) = self.vault.lookup(&id, &self.prompter).await {
+            self.state().sudo_last = Some(SudoOffer::Saved);
+            return Some(saved);
+        }
+        let check_login = !std::mem::replace(&mut self.state().sudo_checked_login, true);
+        if check_login
+            && let Some(login) = self
+                .vault
+                .lookup(&account.password_id(), &self.prompter)
+                .await
+        {
+            self.state().sudo_last = Some(SudoOffer::Login);
+            return Some(login);
+        }
+        let saved_rejected = self.state().sudo_saved_rejected;
+        let ask = format!(
+            "Enter the password sudo asks for on {}, usually your own.",
+            account.host
+        );
+        let message = match last {
+            Some(SudoOffer::Typed) => format!("That did not work. {ask}"),
+            _ if saved_rejected => format!("The saved sudo password was not accepted. {ask}"),
+            _ => ask,
+        };
+        let answer = self
+            .prompter
+            .secret_for(
+                "Work as root".to_owned(),
+                message,
+                false,
+                Some(saved_rejected),
+                "Continue",
+            )
+            .await?;
+        let mut state = self.state();
+        state.sudo_last = Some(SudoOffer::Typed);
+        state.pending.retain(|(pending, _)| pending != &id);
+        if answer.remember {
+            state
+                .pending
+                .push((id, Change::Save(answer.secret.clone())));
+        } else if saved_rejected {
+            state.pending.push((id, Change::Forget));
+        }
+        Some(answer.secret)
+    }
 }
 
 fn capitalize(text: &str) -> String {
@@ -273,6 +353,58 @@ mod tests {
                 .is_none()
         );
         drop((interaction, prompter));
+        assert_eq!(prompts.await.unwrap(), [true]);
+    }
+
+    #[tokio::test]
+    async fn sudo_tries_the_saved_login_password_before_asking() {
+        let vault = Vault::ephemeral();
+        let (prompter, prompts) = answering("typed", true);
+        vault
+            .save(
+                account().password_id(),
+                SecretString::from("login"),
+                &prompter,
+            )
+            .await;
+        let interaction = UiInteraction::new(prompter.clone(), Arc::clone(&vault));
+        let first = interaction.sudo_password(&account(), false).await.unwrap();
+        assert_eq!(first.expose_secret(), "login");
+        // sudo wants another password: ask, and remember it once it worked.
+        let typed = interaction.sudo_password(&account(), true).await.unwrap();
+        assert_eq!(typed.expose_secret(), "typed");
+        interaction.commit().await;
+        let saved = vault.lookup(&account().sudo_password_id(), &prompter).await;
+        assert_eq!(saved.unwrap().expose_secret(), "typed");
+        drop((interaction, prompter));
+        assert_eq!(prompts.await.unwrap(), [false]);
+    }
+
+    #[tokio::test]
+    async fn sudo_forgets_a_rejected_saved_password_unless_remembered() {
+        let vault = Vault::ephemeral();
+        let (prompter, prompts) = answering("new", false);
+        vault
+            .save(
+                account().sudo_password_id(),
+                SecretString::from("old"),
+                &prompter,
+            )
+            .await;
+        let interaction = UiInteraction::new(prompter.clone(), Arc::clone(&vault));
+        let saved = interaction.sudo_password(&account(), false).await.unwrap();
+        assert_eq!(saved.expose_secret(), "old");
+        let typed = interaction.sudo_password(&account(), true).await.unwrap();
+        assert_eq!(typed.expose_secret(), "new");
+        interaction.commit().await;
+        assert!(
+            vault
+                .lookup(&account().sudo_password_id(), &prompter)
+                .await
+                .is_none()
+        );
+        drop((interaction, prompter));
+        // Asked once, with "Remember" ticked because a saved one existed.
         assert_eq!(prompts.await.unwrap(), [true]);
     }
 }

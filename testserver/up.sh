@@ -1,7 +1,8 @@
 #!/bin/sh
 # Starts the SFTP test server on 127.0.0.1:2222 and waits until it is ready.
 #
-#   user ferry, password ferry
+#   user ferry, password ferry (sudo with password; ferry-nopasswd and
+#   ferry-nosudo for the other cases)
 #   keys .testserver/id_ed25519 (no passphrase) and
 #        .testserver/id_ed25519_encrypted (passphrase "ferry")
 #   client config .testserver/ssh_config (host alias "ferry-test")

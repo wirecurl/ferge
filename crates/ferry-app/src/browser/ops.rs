@@ -101,7 +101,7 @@ impl FileBrowser {
                     browser.selected_name = Some(new_name);
                     browser.reload(cx);
                 }
-                Ok(Err(error)) => cx.emit(BrowserEvent::Failed(error.to_string())),
+                Ok(Err(error)) => browser.report(&error, cx),
                 Err(error) => cx.emit(BrowserEvent::Failed(error.to_string())),
             });
         })
@@ -171,7 +171,7 @@ impl FileBrowser {
                     browser.rename_when_listed = Some(name);
                     browser.reload(cx);
                 }
-                Ok(Err(error)) => cx.emit(BrowserEvent::Failed(error.to_string())),
+                Ok(Err(error)) => browser.report(&error, cx),
                 Err(error) => cx.emit(BrowserEvent::Failed(error.to_string())),
             });
         })
@@ -252,7 +252,7 @@ impl FileBrowser {
                 browser.notice = None;
                 match result {
                     Ok(Ok(_)) => {}
-                    Ok(Err(error)) => cx.emit(BrowserEvent::Failed(error.to_string())),
+                    Ok(Err(error)) => browser.report(&error, cx),
                     Err(error) => cx.emit(BrowserEvent::Failed(error.to_string())),
                 }
                 // Reload either way: some items may be gone.

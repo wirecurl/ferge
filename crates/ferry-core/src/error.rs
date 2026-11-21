@@ -79,6 +79,10 @@ pub enum Error {
     #[error("authentication failed for {user}@{host}")]
     AuthenticationFailed { user: String, host: String },
 
+    /// Working as root on the server was not possible.
+    #[error(transparent)]
+    Elevation(#[from] ElevationError),
+
     /// The SSH client configuration could not be used.
     #[error("SSH configuration: {0}")]
     Config(String),
@@ -123,6 +127,52 @@ impl Error {
     pub fn is_authentication(&self) -> bool {
         matches!(self, Self::AuthenticationFailed { .. })
     }
+
+    /// Whether the user called the operation off, e.g. by closing a password
+    /// dialog. Nothing needs to be reported.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Elevation(ElevationError::Cancelled))
+    }
+
+    /// Whether the server refused access, so working as root could help.
+    pub fn is_permission_denied(&self) -> bool {
+        matches!(self, Self::PermissionDenied { .. })
+    }
+}
+
+/// Reasons working as root (through `sudo`) was not possible.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ElevationError {
+    /// The user did not enter the sudo password.
+    #[error("working as root was cancelled")]
+    Cancelled,
+
+    /// The server does not run commands for this account (`ForceCommand`,
+    /// SFTP-only accounts).
+    #[error("{host} does not run commands for this account, which working as root needs")]
+    CommandsRefused { host: String },
+
+    /// `sudo` is not installed.
+    #[error("sudo is not installed on {host}")]
+    NoSudo { host: String },
+
+    /// No `sftp-server` program was found to run as root.
+    #[error("{host} has no sftp-server program that could run as root")]
+    NoSftpServer { host: String },
+
+    /// `sudo` refused, e.g. because the account may not use it. `message` is
+    /// what sudo said.
+    #[error("sudo on {host} refused: {message}")]
+    Refused { host: String, message: String },
+
+    /// `sudo` accepted, but no SFTP session came up.
+    #[error("the SFTP server did not start as root on {host}")]
+    NotStarted {
+        host: String,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Reasons a server's host key was not trusted.

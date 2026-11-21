@@ -4,14 +4,19 @@
 //! listings and directory operations, and lazily opened data channels for file
 //! contents. Transfers therefore never delay browsing, and parallel transfers
 //! do not share one channel's flow-control window.
+//!
+//! [`SftpRemote::elevate`] opens another set of channels on the same
+//! connection whose SFTP server runs as root (see [`elevate`]).
 
 mod auth;
 mod config;
+mod elevate;
 mod handler;
 mod io;
 mod known_hosts;
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
@@ -34,7 +39,7 @@ use self::io::ChunkSizes;
 use self::known_hosts::{KnownHosts, host_key_name};
 use super::{ByteStream, FileWriter, ListStream, Remote};
 use crate::entry::{Entry, Metadata};
-use crate::error::{Error, Result};
+use crate::error::{ElevationError, Error, Result};
 use crate::interaction::{Account, Interaction};
 use crate::path::{EntryName, RemotePath};
 
@@ -55,6 +60,9 @@ const DATA_CHANNELS: usize = 3;
 /// OpenSSH extension that renames over an existing target atomically.
 const POSIX_RENAME: &str = "posix-rename@openssh.com";
 
+/// An SSH channel that carries (or will carry) an SFTP session.
+type SftpChannel = russh::Channel<client::Msg>;
+
 /// An authenticated SFTP session.
 #[derive(Clone)]
 pub struct SftpRemote {
@@ -65,7 +73,10 @@ struct Inner {
     label: String,
     account: Account,
     home: RemotePath,
-    ssh: client::Handle<ClientHandler>,
+    /// Shared with the root session opened from this one, if any.
+    ssh: Arc<client::Handle<ClientHandler>>,
+    /// The SFTP server runs as root (through sudo).
+    elevated: bool,
     /// Channel for listings and metadata.
     meta: RawSftpSession,
     /// Whether the server supports [`POSIX_RENAME`].
@@ -90,9 +101,15 @@ impl fmt::Debug for SftpRemote {
 }
 
 impl SftpRemote {
-    /// The authenticated account, e.g. to save its password.
+    /// The authenticated account, e.g. to save its password. A root session
+    /// keeps the account it was opened from.
     pub fn account(&self) -> &Account {
         &self.inner.account
+    }
+
+    /// Whether the SFTP server of this session runs as root.
+    pub fn is_elevated(&self) -> bool {
+        self.inner.elevated
     }
 
     /// Connects, verifies the host key, authenticates and opens the SFTP subsystem.
@@ -142,7 +159,7 @@ impl SftpRemote {
         .run()
         .await?;
 
-        let (meta, extensions) = open_raw_session(&ssh).await?;
+        let (meta, extensions) = start_session(open_sftp_channel(&ssh).await?).await?;
         let home = canonical(&meta, ".").await?;
         tracing::info!(remote = %target.label(), %home, "SFTP session ready");
         Ok(Self {
@@ -150,7 +167,8 @@ impl SftpRemote {
                 label: target.label(),
                 account: target.account(),
                 home,
-                ssh,
+                ssh: Arc::new(ssh),
+                elevated: false,
                 meta,
                 posix_rename: extensions.contains_key(POSIX_RENAME),
                 data: std::array::from_fn(|_| OnceCell::new()),
@@ -159,9 +177,79 @@ impl SftpRemote {
         })
     }
 
-    /// Closes the connection gracefully. Outstanding operations fail.
+    /// Opens a session on the same connection whose SFTP server runs as root,
+    /// through sudo. Asks `interaction` for the sudo password if sudo needs
+    /// one; nothing has to be configured on the server.
+    ///
+    /// The new session is independent: dropping it (or this one) leaves the
+    /// other working. Its label names root; its account stays the login's.
+    pub async fn elevate(&self, interaction: Arc<dyn Interaction>) -> Result<Self> {
+        if self.inner.elevated {
+            return Ok(self.clone());
+        }
+        let ssh = &self.inner.ssh;
+        let account = &self.inner.account;
+        let host = account.host.clone();
+        let command = elevate::prepare(ssh, &host, |retry| {
+            let interaction = Arc::clone(&interaction);
+            async move { interaction.sudo_password(account, retry).await }
+        })
+        .await?;
+        let not_started = |error: Error| match error {
+            Error::Protocol { source, .. } => Error::Elevation(ElevationError::NotStarted {
+                host: host.clone(),
+                source,
+            }),
+            other => other,
+        };
+        // Every channel opens now: the password is not kept for later.
+        let open = || async {
+            let channel = command.open(ssh, &host).await?;
+            start_session(channel).await.map_err(not_started)
+        };
+        let (meta, data) = futures::try_join!(
+            open(),
+            futures::future::try_join_all((0..DATA_CHANNELS).map(|_| async {
+                let (session, extensions) = open().await?;
+                Ok::<_, Error>(DataChannel::new(session, &extensions).await)
+            })),
+        )?;
+        drop(command);
+        let (meta, extensions) = meta;
+        let home = canonical(&meta, ".").await.map_err(not_started)?;
+        tracing::info!(remote = %self.inner.label, "SFTP session as root ready");
+        let mut data = data.into_iter();
+        Ok(Self {
+            inner: Arc::new(Inner {
+                label: Account {
+                    user: "root".to_owned(),
+                    ..account.clone()
+                }
+                .to_string(),
+                account: account.clone(),
+                home,
+                ssh: Arc::clone(ssh),
+                elevated: true,
+                meta,
+                posix_rename: extensions.contains_key(POSIX_RENAME),
+                data: std::array::from_fn(|_| OnceCell::new_with(data.next())),
+                next_data: AtomicUsize::new(0),
+            }),
+        })
+    }
+
+    /// Closes the connection gracefully. Outstanding operations fail. For a
+    /// root session, only its own channels close.
     pub async fn disconnect(&self) {
         let _ = self.inner.meta.close_session();
+        if self.inner.elevated {
+            for channel in &self.inner.data {
+                if let Some(channel) = channel.get() {
+                    let _ = channel.session.close_session();
+                }
+            }
+            return;
+        }
         let _ = self
             .inner
             .ssh
@@ -174,26 +262,32 @@ impl SftpRemote {
         let index = self.inner.next_data.fetch_add(1, Ordering::Relaxed) % DATA_CHANNELS;
         self.inner.data[index]
             .get_or_try_init(|| async {
-                let (session, extensions) = open_raw_session(&self.inner.ssh).await?;
-                let chunks = if extensions.contains_key(russh_sftp::extensions::LIMITS) {
-                    match session.limits().await {
-                        Ok(limits) => {
-                            ChunkSizes::from_limits(limits.max_read_len, limits.max_write_len)
-                        }
-                        Err(error) => {
-                            tracing::debug!(%error, "reading SFTP limits failed");
-                            ChunkSizes::SAFE
-                        }
-                    }
-                } else {
-                    ChunkSizes::SAFE
-                };
-                Ok(DataChannel {
-                    session: Arc::new(session),
-                    chunks,
-                })
+                let channel = open_sftp_channel(&self.inner.ssh).await?;
+                let (session, extensions) = start_session(channel).await?;
+                Ok(DataChannel::new(session, &extensions).await)
             })
             .await
+    }
+}
+
+impl DataChannel {
+    /// Wraps a fresh session, asking the server for its chunk sizes.
+    async fn new(session: RawSftpSession, extensions: &HashMap<String, String>) -> Self {
+        let chunks = if extensions.contains_key(russh_sftp::extensions::LIMITS) {
+            match session.limits().await {
+                Ok(limits) => ChunkSizes::from_limits(limits.max_read_len, limits.max_write_len),
+                Err(error) => {
+                    tracing::debug!(%error, "reading SFTP limits failed");
+                    ChunkSizes::SAFE
+                }
+            }
+        } else {
+            ChunkSizes::SAFE
+        };
+        Self {
+            session: Arc::new(session),
+            chunks,
+        }
     }
 }
 
@@ -265,9 +359,7 @@ fn handshake_error(error: russh::Error, failure: &HostKeyFailure) -> Error {
     }
 }
 
-async fn open_sftp_channel(
-    ssh: &client::Handle<ClientHandler>,
-) -> Result<russh::Channel<client::Msg>> {
+async fn open_sftp_channel(ssh: &client::Handle<ClientHandler>) -> Result<SftpChannel> {
     let channel = ssh
         .channel_open_session()
         .await
@@ -279,11 +371,9 @@ async fn open_sftp_channel(
     Ok(channel)
 }
 
-/// Opens an SFTP channel; returns it with the server's protocol extensions.
-async fn open_raw_session(
-    ssh: &client::Handle<ClientHandler>,
-) -> Result<(RawSftpSession, std::collections::HashMap<String, String>)> {
-    let channel = open_sftp_channel(ssh).await?;
+/// Starts SFTP on `channel`; returns the session with the server's protocol
+/// extensions.
+async fn start_session(channel: SftpChannel) -> Result<(RawSftpSession, HashMap<String, String>)> {
     let config = russh_sftp::client::Config {
         request_timeout_secs: REQUEST_TIMEOUT_SECS,
         ..russh_sftp::client::Config::default()

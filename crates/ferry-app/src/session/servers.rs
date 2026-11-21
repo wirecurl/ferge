@@ -11,7 +11,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity,
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
@@ -23,6 +23,7 @@ use gpui_component::{
 use secrecy::SecretString;
 
 use super::{ConnectRequest, Session, SessionEvent};
+use crate::style::{self, Palette as _, TypeScale as _};
 
 /// Something in the server panel that needs one of the window's dialogs.
 #[derive(Clone, Debug)]
@@ -60,8 +61,8 @@ enum Row {
     Local,
 }
 
-/// Indentation per folder level.
-const INDENT: f32 = 16.;
+/// Indentation per folder level, in rem.
+const INDENT: f32 = 1.25;
 
 /// Recent connections listed.
 const RECENT_SHOWN: usize = 8;
@@ -399,7 +400,7 @@ impl Session {
         let tab = self.servers.tab;
         let tabs = ButtonGroup::new("server-tabs")
             .small()
-            .outline()
+            .ghost()
             .child(
                 Button::new("tab-servers")
                     .label("Servers")
@@ -432,7 +433,11 @@ impl Session {
                 v_flex()
                     .p_3()
                     .gap_3()
-                    .child(h_flex().justify_center().child(tabs))
+                    .child(
+                        h_flex()
+                            .justify_center()
+                            .child(style::track(cx).child(tabs)),
+                    )
                     .child(content),
             )
     }
@@ -445,7 +450,7 @@ impl Session {
             v_flex()
                 .flex_1()
                 .gap_1()
-                .child(div().text_xs().text_color(muted).child(label))
+                .child(div().text_small().text_color(muted).child(label))
                 .child(Input::new(input))
         };
         v_flex()
@@ -460,7 +465,7 @@ impl Session {
                         v_flex()
                             .w(px(96.))
                             .gap_1()
-                            .child(div().text_xs().text_color(muted).child("Protocol"))
+                            .child(div().text_small().text_color(muted).child("Protocol"))
                             .child(
                                 div()
                                     .h(px(32.))
@@ -487,7 +492,7 @@ impl Session {
                 quick
                     .error
                     .clone()
-                    .map(|error| div().text_sm().text_color(danger).child(error)),
+                    .map(|error| div().text_body().text_color(danger).child(error)),
             )
             .child(
                 h_flex()
@@ -568,37 +573,28 @@ impl Session {
             )
         });
 
-        let section = |title: &'static str| {
-            div()
-                .pt_2()
-                .pb_1()
-                .px_2()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(muted)
-                .child(title)
-        };
+        let hint = (library_empty && query.is_empty()).then(|| {
+            div().px_1().text_small().text_color(muted).child(
+                "Save servers you use often with + above, or with “Add to favorites” in a \
+                 connected pane.",
+            )
+        });
         v_flex()
             .w_full()
-            .max_w(px(640.))
+            .max_w(rems(40.))
             .mx_auto()
-            .child(section("FAVORITES"))
-            .children(favorites)
-            .when(library_empty && query.is_empty(), |this| {
-                this.child(div().px_2().pb_1().text_sm().text_color(muted).child(
-                    "Save servers you use often with + above, or with “Add to favorites” in a \
-                         connected pane.",
-                ))
+            .gap_4()
+            .children(match hint {
+                Some(hint) => Some(
+                    v_flex()
+                        .child(style::section_title("Favorites", cx))
+                        .child(hint),
+                ),
+                None => section("Favorites", favorites, cx),
             })
-            .when(!hosts.is_empty(), |this| {
-                this.child(section("SSH CONFIG")).children(hosts)
-            })
-            .when(!recent.is_empty(), |this| {
-                this.child(section("RECENT")).children(recent)
-            })
-            .when_some(local, |this, local| {
-                this.child(section("THIS COMPUTER")).child(local)
-            })
+            .children(section("SSH config", hosts, cx))
+            .children(section("Recent", recent, cx))
+            .children(section("This computer", local.into_iter().collect(), cx))
     }
 
     /// Recent connections to servers matching `query`.
@@ -710,15 +706,14 @@ impl Session {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let (muted, hover, folder) = (theme.muted_foreground, theme.list_hover, theme.blue);
+        let (muted, hover, folder) = (theme.muted_foreground, theme.hover_fill(), theme.blue);
         let this = cx.entity().downgrade();
         h_flex()
             .id(ElementId::Name(format!("folder-{id:?}").into()))
-            .h(px(30.))
+            .h(rems(2.25))
             .pl(indent(depth))
             .pr_2()
             .gap_2()
-            .rounded_md()
             .cursor_pointer()
             .hover(|style| style.bg(hover))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -793,16 +788,20 @@ impl Session {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let (muted, hover, active) = (theme.muted_foreground, theme.list_hover, theme.list_active);
+        let (muted, hover, active, badge) = (
+            theme.muted_foreground,
+            theme.hover_fill(),
+            theme.list_active,
+            theme.track_fill(),
+        );
         let this = cx.entity().downgrade();
         let clicked = row.clone();
         h_flex()
             .id(id)
-            .h(px(44.))
+            .h(rems(3.25))
             .pl(indent(depth))
             .pr_2()
             .gap_3()
-            .rounded_md()
             .cursor_pointer()
             .when(selected, |this| this.bg(active))
             .when(!selected, |this| this.hover(|style| style.bg(hover)))
@@ -814,13 +813,29 @@ impl Session {
                 }
                 cx.notify();
             }))
-            .child(Icon::new(icon).size_5().text_color(muted))
+            .child(
+                div()
+                    .size(rems(2.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(style::RADIUS)
+                    .bg(badge)
+                    .child(Icon::new(icon).size_4().text_color(muted)),
+            )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().truncate().child(name))
-                    .child(div().text_xs().text_color(muted).truncate().child(detail)),
+                    .child(div().text_body().truncate().child(name))
+                    .child(
+                        div()
+                            .text_small()
+                            .text_color(muted)
+                            .truncate()
+                            .child(detail),
+                    ),
             )
             .context_menu(move |menu, _, _| row_menu(menu, &this, &row))
             .into_any_element()
@@ -883,10 +898,23 @@ fn row_menu(
     }
 }
 
-fn indent(depth: usize) -> gpui::Pixels {
+fn indent(depth: usize) -> gpui::Rems {
     #[expect(clippy::cast_precision_loss, reason = "folder depth is small")]
     let depth = depth.min(8) as f32;
-    px(8. + INDENT * depth)
+    rems(0.625 + INDENT * depth)
+}
+
+/// A titled group of rows; nothing at all without rows.
+fn section(title: &'static str, rows: Vec<AnyElement>, cx: &App) -> Option<gpui::Div> {
+    if rows.is_empty() {
+        return None;
+    }
+    let group = style::group(cx).children(
+        rows.into_iter()
+            .enumerate()
+            .map(|(index, row)| style::divided(div().child(row), index, cx)),
+    );
+    Some(v_flex().child(style::section_title(title, cx)).child(group))
 }
 
 /// "just now", "5 min ago", "3 h ago", "2 days ago".

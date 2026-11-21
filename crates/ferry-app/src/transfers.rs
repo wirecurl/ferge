@@ -18,7 +18,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, ClickEvent, Context, ElementId, Global, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div, px,
+    Window, div, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::progress::Progress;
@@ -27,6 +27,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use crate::format;
 use crate::prompts::{Prompter, TaggedPrompt};
 use crate::runtime;
+use crate::style::{self, TypeScale as _};
 
 /// How often the panel refreshes while something is being copied.
 const TICK: Duration = Duration::from_millis(100);
@@ -216,10 +217,19 @@ impl TransferPanel {
         self.rates = rates;
     }
 
-    fn render_row(&self, snapshot: &TransferSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_row(
+        &self,
+        snapshot: &TransferSnapshot,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let buttons = Self::render_controls(snapshot, cx);
         let theme = cx.theme();
-        let (muted, danger, success) = (theme.muted_foreground, theme.danger, theme.success);
+        let (muted, danger, success, accent) = (
+            theme.muted_foreground,
+            theme.danger,
+            theme.success,
+            theme.blue,
+        );
         let id = snapshot.id;
         let icon = match snapshot.direction {
             Direction::Upload => IconName::ArrowUp,
@@ -234,14 +244,18 @@ impl TransferPanel {
             _ => None,
         };
         let error = first_error(snapshot)
-            .map(|text| div().text_xs().text_color(danger).truncate().child(text));
+            .map(|text| div().text_small().text_color(danger).truncate().child(text));
+        let bar_color = match snapshot.state {
+            TransferState::Completed => success,
+            TransferState::Failed => danger,
+            TransferState::Paused | TransferState::Cancelled => muted,
+            _ => accent,
+        };
         v_flex()
             .id(ElementId::NamedInteger("transfer".into(), id_number(id)))
             .px_3()
             .py_2()
-            .gap_1()
-            .border_b_1()
-            .border_color(theme.border)
+            .gap_1p5()
             .child(
                 h_flex()
                     .gap_2()
@@ -250,8 +264,7 @@ impl TransferPanel {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_body()
                             .child(SharedString::from(snapshot.title.clone())),
                     )
                     .child(
@@ -259,7 +272,7 @@ impl TransferPanel {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_xs()
+                            .text_small()
                             .text_color(muted)
                             .child(SharedString::from(format!(
                                 "{} → {}:{}",
@@ -269,7 +282,7 @@ impl TransferPanel {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_xs()
+                            .text_small()
                             .text_color(muted)
                             .child(status),
                     )
@@ -279,6 +292,8 @@ impl TransferPanel {
             // The bar spans the whole row so a finished transfer reads as full.
             .child(
                 Progress::new(ElementId::NamedInteger("progress".into(), id_number(id)))
+                    .xsmall()
+                    .color(bar_color)
                     .value(percent),
             )
             .children(error)
@@ -410,7 +425,8 @@ impl TransferPanel {
 impl Render for TransferPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, border, background) = (theme.muted_foreground, theme.border, theme.background);
+        let (muted, background) = (theme.muted_foreground, theme.background);
+        let active = self.active_count();
         let finished = self.snapshots.iter().any(|snapshot| {
             matches!(
                 snapshot.state,
@@ -421,26 +437,38 @@ impl Render for TransferPanel {
             .snapshots
             .iter()
             .rev()
-            .map(|snapshot| self.render_row(snapshot, cx).into_any_element())
+            .enumerate()
+            .map(|(index, snapshot)| style::divided(self.render_row(snapshot, cx), index, cx))
             .collect();
+        let empty = rows.is_empty().then(|| {
+            div().px_1().text_small().text_color(muted).child(
+                "Nothing transferred yet. Copy with Ctrl+C and Ctrl+V, with F5 between two \
+                 panes, or drop files onto a folder.",
+            )
+        });
         v_flex()
             .size_full()
             .bg(background)
             .child(
                 h_flex()
-                    .h(px(30.))
+                    .h(rems(2.5))
                     .px_3()
                     .gap_2()
                     .flex_shrink_0()
-                    .border_b_1()
-                    .border_color(border)
                     .child(
                         div()
-                            .text_xs()
+                            .text_body()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(muted)
-                            .child("TRANSFERS"),
+                            .child("Transfers"),
                     )
+                    .when(active > 0, |this| {
+                        this.child(
+                            div()
+                                .text_small()
+                                .text_color(muted)
+                                .child(format!("{active} running")),
+                        )
+                    })
                     .child(div().flex_1())
                     .when(finished, |this| {
                         this.child(
@@ -460,17 +488,13 @@ impl Render for TransferPanel {
                     .id("transfer-list")
                     .flex_1()
                     .min_h_0()
+                    .px_3()
+                    .pb_3()
                     .overflow_y_scroll()
-                    .when(rows.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .p_4()
-                                .text_sm()
-                                .text_color(muted)
-                                .child("Nothing transferred yet. Copy with Ctrl+C / Ctrl+V, F5 between split panes, or drop files onto a folder."),
-                        )
-                    })
-                    .children(rows),
+                    .children(empty)
+                    .when(!rows.is_empty(), |this| {
+                        this.child(style::group(cx).children(rows))
+                    }),
             )
     }
 }

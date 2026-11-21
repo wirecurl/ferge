@@ -15,23 +15,16 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 
 use super::{ConnectRequest, GoTo, LibraryAction, Session, SessionEvent};
 use crate::actions;
-
-/// Height of pane headers; both panes line up.
-pub(super) const HEADER_HEIGHT: gpui::Pixels = px(36.);
+use crate::style::{self, Palette as _, TypeScale as _};
 
 impl Session {
     pub(super) fn render_header(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = cx.theme();
-        let (border, background) = (theme.border, theme.secondary);
         let header = h_flex()
-            .h(HEADER_HEIGHT)
+            .h(style::HEADER_HEIGHT)
             .px_2()
             .gap_1()
             .flex_shrink_0()
-            .border_b_1()
-            .border_color(border)
-            .bg(background)
-            .text_sm();
+            .text_body();
         if self.shows_servers() {
             return self.render_servers_header(header, cx);
         }
@@ -136,7 +129,7 @@ impl Session {
         let (muted, accent, hover, foreground) = (
             theme.muted_foreground,
             theme.blue,
-            theme.list_hover,
+            theme.hover_fill(),
             theme.foreground,
         );
         let Some(browser) = self.browser() else {
@@ -159,13 +152,14 @@ impl Session {
             h_flex()
                 .gap_0p5()
                 .when(index > 1, |this| {
-                    this.child(div().text_color(muted).child("/"))
+                    this.child(div().text_color(muted.opacity(0.6)).child("/"))
                 })
                 .child(
                     div()
                         .id(ElementId::NamedInteger("crumb".into(), index as u64))
-                        .px_1()
-                        .rounded_sm()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded(style::RADIUS)
                         .cursor_pointer()
                         .hover(|style| style.bg(hover))
                         .map(|this| match (current, active) {

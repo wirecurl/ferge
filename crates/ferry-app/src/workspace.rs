@@ -19,10 +19,11 @@ use gpui::{
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use self::dialogs::{ActivePrompt, ConfirmAction, Dialog};
 use crate::actions;
+use crate::appearance::Appearance;
 use crate::browser::FileBrowser;
 use crate::inspector::{INSPECTOR_WIDTH, Inspector};
 use crate::prompts::{self, PromptRequest, SessionId, TaggedPrompt};
@@ -147,6 +148,8 @@ pub(crate) struct Workspace {
     inspector_open: bool,
     /// The toolbar's search field; it filters the active file browser.
     filter: Entity<InputState>,
+    /// The last problem with the settings that was shown.
+    shown_settings_issue: u64,
     /// Background work and subscriptions owned by the window.
     tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -154,9 +157,19 @@ pub(crate) struct Workspace {
 
 impl Workspace {
     pub(crate) fn new(options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Theme::sync_system_appearance(Some(window), cx);
+        Appearance::follow_window(window, cx);
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
+            Appearance::follow_window(window, cx);
+        });
+        // Problems with the settings are shown here, once each.
+        let settings_issues = cx.observe_global::<Appearance>(|this: &mut Self, cx| {
+            let Some(issue) = cx.global::<Appearance>().issue() else {
+                return;
+            };
+            if issue.serial > this.shown_settings_issue {
+                this.shown_settings_issue = issue.serial;
+                this.notice(issue.message.clone());
+            }
         });
 
         let (sender, mut receiver) = prompts::channel();
@@ -228,7 +241,8 @@ impl Workspace {
             inspector_open: false,
             filter,
             tasks: Vec::new(),
-            _subscriptions: vec![appearance, filter_events],
+            shown_settings_issue: 0,
+            _subscriptions: vec![appearance, settings_issues, filter_events],
         };
         workspace.tasks = vec![
             prompt_listener,
@@ -719,7 +733,6 @@ impl Render for Workspace {
             .bg(background)
             .text_color(foreground)
             .child(self.render_toolbar(window, cx))
-            .children(self.render_tabs(cx))
             .child(
                 h_flex()
                     .flex_1()

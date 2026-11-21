@@ -7,17 +7,18 @@ use ferry_core::{Entry, EntryKind, RemotePath};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     ClickEvent, ClipboardItem, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, WeakEntity, Window, div, px,
+    SharedString, Styled as _, Subscription, WeakEntity, Window, div, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::browser::FileBrowser;
+use crate::style::{self, TypeScale as _};
 use crate::{format, runtime};
 
 /// Width of the inspector.
-pub(crate) const INSPECTOR_WIDTH: gpui::Pixels = px(280.);
+pub(crate) const INSPECTOR_WIDTH: gpui::Rems = rems(21.);
 
 /// Who a permission bit is for, in display order.
 const CLASSES: [(&str, u32); 3] = [("Owner", 6), ("Group", 3), ("Everyone", 0)];
@@ -109,18 +110,22 @@ impl Inspector {
             EntryKind::Symlink => (IconName::ExternalLink, muted),
             _ => (IconName::File, muted),
         };
-        let fact = |label: &'static str, value: SharedString| {
-            h_flex()
+        let fact = |index: usize, label: &'static str, value: SharedString| {
+            let row = h_flex()
+                .px_3()
+                .py_1p5()
                 .gap_2()
                 .items_start()
                 .child(
                     div()
-                        .w(px(72.))
+                        .w(rems(5.))
                         .flex_shrink_0()
+                        .text_small()
                         .text_color(muted)
                         .child(label),
                 )
-                .child(div().flex_1().min_w_0().child(value))
+                .child(div().flex_1().min_w_0().text_small().child(value));
+            style::divided(row, index, cx)
         };
         let size: SharedString = if entry.kind() == EntryKind::File {
             format!(
@@ -148,19 +153,19 @@ impl Inspector {
                     ),
             )
             .child(
-                v_flex()
-                    .gap_1p5()
-                    .text_sm()
+                style::group(cx)
                     .child(fact(
+                        0,
                         "Kind",
                         format::kind(entry.name.as_str(), entry.kind()).into(),
                     ))
-                    .child(fact("Size", size))
+                    .child(fact(1, "Size", size))
                     .child(fact(
+                        2,
                         "Modified",
                         format::date(entry.metadata.modified).into(),
                     ))
-                    .child(fact("Where", address.clone().into())),
+                    .child(fact(3, "Where", address.clone().into())),
             )
             .child(
                 Button::new("copy-address")
@@ -188,25 +193,30 @@ impl Inspector {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let theme = cx.theme();
-        let (muted, border) = (theme.muted_foreground, theme.border);
+        let muted = theme.muted_foreground;
         let mode = match &self.editing {
             Some((editing, mode)) if editing == path => *mode,
             _ => current,
         };
         let changed = mode != current;
-        let header = h_flex().gap_1().child(div().w(px(72.))).children(
-            KINDS
-                .iter()
-                .map(|(label, _)| div().w(px(56.)).text_xs().text_color(muted).child(*label)),
-        );
+        let header = h_flex()
+            .gap_1()
+            .child(div().w(rems(5.)))
+            .children(KINDS.iter().map(|(label, _)| {
+                div()
+                    .w(rems(4.))
+                    .text_small()
+                    .text_color(muted)
+                    .child(*label)
+            }));
         let rows = CLASSES.iter().map(|(class, class_shift)| {
             h_flex()
                 .gap_1()
-                .child(div().w(px(72.)).text_sm().child(*class))
+                .child(div().w(rems(5.)).text_small().child(*class))
                 .children(KINDS.iter().map(|(kind, kind_shift)| {
                     let bit = 1 << (class_shift + kind_shift);
                     let path = path.clone();
-                    div().w(px(56.)).child(
+                    div().w(rems(4.)).child(
                         Checkbox::new(SharedString::from(format!("perm-{class}-{kind}")))
                             .checked(mode & bit != 0)
                             .on_click(cx.listener(move |this, checked: &bool, _, cx| {
@@ -222,11 +232,9 @@ impl Inspector {
                     )
                 }))
         });
-        v_flex()
+        style::group(cx)
+            .p_3()
             .gap_2()
-            .pt_3()
-            .border_t_1()
-            .border_color(border)
             .child(
                 h_flex()
                     .justify_between()
@@ -237,8 +245,8 @@ impl Inspector {
                     )
                     .child(
                         div()
-                            .text_sm()
-                            .font_family(crate::fonts::monospace())
+                            .text_small()
+                            .font_family(cx.theme().mono_font_family.clone())
                             .child(format!("{mode:04o} {}", format::permissions(mode))),
                     ),
             )
@@ -272,7 +280,7 @@ impl Inspector {
 impl Render for Inspector {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let (muted, background) = (theme.muted_foreground, theme.sidebar);
+        let (muted, background) = (theme.muted_foreground, theme.background);
         let browser = self.browser.as_ref().and_then(WeakEntity::upgrade);
         let entries = browser
             .as_ref()
@@ -297,7 +305,7 @@ impl Render for Inspector {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(format!("{} items", format::count(entries.len()))),
                     )
-                    .child(div().text_sm().text_color(muted).child(format!(
+                    .child(div().text_body().text_color(muted).child(format!(
                         "{} in {} files",
                         format::size(bytes),
                         format::count(count)
@@ -305,7 +313,7 @@ impl Render for Inspector {
             }
             _ => v_flex()
                 .py_4()
-                .text_sm()
+                .text_body()
                 .text_color(muted)
                 .child("Select a file or folder to see its details."),
         };
@@ -316,16 +324,15 @@ impl Render for Inspector {
             .bg(background)
             .child(
                 div()
-                    .text_xs()
+                    .text_body()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(muted)
-                    .child("INFO"),
+                    .child("Info"),
             )
             .child(body)
             .children(
                 self.status
                     .clone()
-                    .map(|status| div().text_sm().text_color(muted).child(status)),
+                    .map(|status| div().text_body().text_color(muted).child(status)),
             )
     }
 }

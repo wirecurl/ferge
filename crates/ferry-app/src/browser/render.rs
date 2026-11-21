@@ -8,20 +8,29 @@ use ferry_core::{EntryKind, RemotePath};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, ExternalDragPayload, ExternalPaths,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, uniform_list,
+    InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, rems, uniform_list,
 };
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use super::{DraggedEntries, FileBrowser, FileClipboard, LoadState, ROW_HEIGHT};
+use super::{DraggedEntries, FileBrowser, FileClipboard, LoadState};
+use crate::style::{self, Palette as _, TypeScale as _};
 use crate::{actions, format};
 
-const SIZE_WIDTH: gpui::Pixels = px(96.);
-const DATE_WIDTH: gpui::Pixels = px(136.);
-const KIND_WIDTH: gpui::Pixels = px(120.);
-const PERMISSIONS_WIDTH: gpui::Pixels = px(96.);
+const SIZE_WIDTH: Rems = rems(5.5);
+const DATE_WIDTH: Rems = rems(9.5);
+const KIND_WIDTH: Rems = rems(8.);
+const PERMISSIONS_WIDTH: Rems = rems(6.5);
+/// Room for the icon in front of the name.
+const ICON_WIDTH: Rems = rems(1.);
+/// Inset of the rows from the edges of the pane; rows are rounded inside it.
+const LIST_INSET: Rems = rems(0.375);
+/// Space between the edge of a row and its content.
+const ROW_PADDING: Rems = rems(0.5);
+/// [`LIST_INSET`] and [`ROW_PADDING`]: where row contents begin.
+const HEADER_INSET: Rems = rems(0.875);
 
 impl Render for FileBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -101,16 +110,14 @@ impl FileBrowser {
                 .children(arrow)
         };
         h_flex()
-            .h(px(28.))
-            .px_3()
+            .h(rems(1.75))
+            // Lines the titles up with the row contents below.
+            .px(HEADER_INSET)
             .gap_2()
             .flex_shrink_0()
-            .text_xs()
+            .text_caption()
             .text_color(theme.muted_foreground)
-            .bg(theme.list_head)
-            .border_b_1()
-            .border_color(theme.border)
-            .child(div().w(px(16.)))
+            .child(div().w(ICON_WIDTH))
             .child(
                 div()
                     .flex_1()
@@ -121,16 +128,16 @@ impl FileBrowser {
                 "Size",
                 SortColumn::Size,
             )))
-            .child(div().w(DATE_WIDTH).child(column(
+            .child(div().w(DATE_WIDTH).pl_3().child(column(
                 "sort-modified",
                 "Modified",
                 SortColumn::Modified,
             )))
             .when(self.options.show_kind, |this| {
-                this.child(div().w(KIND_WIDTH).child("Kind"))
+                this.child(div().w(KIND_WIDTH).pl_3().child("Kind"))
             })
             .when(self.options.show_permissions, |this| {
-                this.child(div().w(PERMISSIONS_WIDTH).child("Permissions"))
+                this.child(div().w(PERMISSIONS_WIDTH).pl_3().child("Permissions"))
             })
     }
 
@@ -148,7 +155,7 @@ impl FileBrowser {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .text_body()
                 .text_color(cx.theme().muted_foreground);
             let empty = Self::accept_drops(empty, self.path.clone(), cx);
             return self
@@ -163,22 +170,37 @@ impl FileBrowser {
                 uniform_list(
                     "entries",
                     self.view.len(),
-                    cx.processor(|this, range: Range<usize>, _window, cx| {
-                        this.render_rows(range, cx)
+                    cx.processor(|this, range: Range<usize>, window, cx| {
+                        let focused = this.focus.contains_focused(window, cx);
+                        this.render_rows(range, focused, cx)
                     }),
                 )
                 .track_scroll(&self.scroll)
-                .size_full(),
+                .size_full()
+                .px(LIST_INSET)
+                .pb(LIST_INSET),
             )
             .into_any_element()
     }
 
-    fn render_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// Rows `range` of the list. `focused`: the list has the keyboard, so
+    /// its selection shows in the accent color.
+    fn render_rows(
+        &self,
+        range: Range<usize>,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.theme();
-        let (active, even, hover) = (theme.list_active, theme.list_even, theme.list_hover);
-        let (muted, border, folder) =
-            (theme.muted_foreground, theme.list_active_border, theme.blue);
-        let marked_bg = theme.accent;
+        let selection = if focused {
+            theme.list_active
+        } else {
+            theme.inactive_selection()
+        };
+        let hover = theme.hover_fill();
+        let (muted, ring, folder) = (theme.muted_foreground, theme.list_active_border, theme.blue);
+        let multiple = !self.marked.is_empty();
+        let mono = theme.mono_font_family.clone();
         let this = cx.entity().downgrade();
         range
             .filter_map(|index| {
@@ -198,23 +220,27 @@ impl FileBrowser {
                 };
                 let is_dir = entry.kind() == EntryKind::Directory;
                 let dir_path = self.path.join(&entry.name);
+                // One row is selected by the cursor alone; with marked rows,
+                // the cursor is a ring that moves among them.
+                let selected = marked || (cursor && !multiple);
                 let row = h_flex()
                     .id(index)
                     .w_full()
-                    .h(ROW_HEIGHT)
-                    .px_3()
+                    .h(style::ROW_HEIGHT)
+                    .px(ROW_PADDING)
                     .gap_2()
-                    .text_sm()
-                    // Every row reserves the cursor border so content never shifts.
-                    .border_l_2()
+                    .text_body()
+                    // Columns cut their text short rather than wrap it.
+                    .whitespace_nowrap()
+                    .rounded(style::RADIUS)
+                    // Every row reserves the ring so content never shifts.
+                    .border_1()
                     .border_color(gpui::transparent_black())
-                    .when(marked, |this| this.bg(marked_bg))
-                    .when(cursor, |this| this.border_color(border))
-                    .when(cursor && !marked, |this| this.bg(active))
-                    .when(!cursor && !marked && index % 2 == 1, |this| this.bg(even))
-                    .when(!cursor && !marked, |this| {
-                        this.hover(|style| style.bg(hover))
+                    .when(selected, |this| this.bg(selection))
+                    .when(cursor && multiple && focused, |this| {
+                        this.border_color(ring)
                     })
+                    .when(!selected, |this| this.hover(|style| style.bg(hover)))
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         let modifiers = event.modifiers();
                         if modifiers.shift {
@@ -241,22 +267,14 @@ impl FileBrowser {
                         Some(ExternalDragPayload::Files(paths))
                     })
                     .when(is_dir, |this| Self::accept_drops(this, dir_path, cx))
-                    .child(Icon::new(icon).size_4().text_color(icon_color))
+                    .child(
+                        Icon::new(icon)
+                            .size(ICON_WIDTH)
+                            .flex_shrink_0()
+                            .text_color(icon_color),
+                    )
                     .child(self.render_name(entry))
-                    .child(
-                        div()
-                            .w(SIZE_WIDTH)
-                            .text_right()
-                            .text_color(muted)
-                            .child(size),
-                    )
-                    .child(
-                        div()
-                            .w(DATE_WIDTH)
-                            .text_color(muted)
-                            .child(format::date(entry.metadata.modified)),
-                    )
-                    .map(|row| self.optional_columns(row, entry, muted))
+                    .map(|row| self.detail_columns(row, entry, size, muted, &mono))
                     // Right-clicking a row outside the selection selects it.
                     .on_mouse_down(
                         gpui::MouseButton::Right,
@@ -309,17 +327,43 @@ impl FileBrowser {
         }
     }
 
-    /// The kind and permission columns, if they are switched on.
-    fn optional_columns(
+    /// Size and date, then the kind and permission columns if they are
+    /// switched on.
+    fn detail_columns(
         &self,
         row: gpui::Stateful<gpui::Div>,
         entry: &ferry_core::Entry,
+        size: String,
         muted: gpui::Hsla,
+        mono: &SharedString,
     ) -> gpui::Stateful<gpui::Div> {
-        row.when(self.options.show_kind, |this| {
+        row.child(
+            div()
+                .w(SIZE_WIDTH)
+                .flex_shrink_0()
+                .truncate()
+                .text_right()
+                .text_small()
+                .text_color(muted)
+                .child(size),
+        )
+        .child(
+            div()
+                .w(DATE_WIDTH)
+                .flex_shrink_0()
+                .pl_3()
+                .truncate()
+                .text_small()
+                .text_color(muted)
+                .child(format::date(entry.metadata.modified)),
+        )
+        .when(self.options.show_kind, |this| {
             this.child(
                 div()
                     .w(KIND_WIDTH)
+                    .flex_shrink_0()
+                    .pl_3()
+                    .text_small()
                     .truncate()
                     .text_color(muted)
                     .child(format::kind(entry.name.as_str(), entry.kind())),
@@ -329,8 +373,11 @@ impl FileBrowser {
             this.child(
                 div()
                     .w(PERMISSIONS_WIDTH)
+                    .flex_shrink_0()
+                    .pl_3()
+                    .text_small()
                     .text_color(muted)
-                    .font_family(crate::fonts::monospace())
+                    .font_family(mono.clone())
                     .child(
                         entry
                             .metadata
@@ -385,11 +432,11 @@ impl FileBrowser {
         };
         let failed = matches!(self.state, LoadState::Failed(_));
         h_flex()
-            .h(px(26.))
+            .h(rems(1.9))
             .px_3()
             .gap_3()
             .flex_shrink_0()
-            .text_xs()
+            .text_small()
             .text_color(theme.muted_foreground)
             .border_t_1()
             .border_color(theme.border)
@@ -403,7 +450,7 @@ impl FileBrowser {
                     h_flex()
                         .gap_1()
                         .px_2()
-                        .rounded_sm()
+                        .rounded(style::RADIUS)
                         .bg(theme.accent)
                         .text_color(theme.accent_foreground)
                         .child(Icon::new(IconName::Search).size_3())
@@ -432,12 +479,12 @@ impl Render for DragPreview {
             .px_2()
             .py_1()
             .gap_1()
-            .rounded_md()
+            .rounded(style::RADIUS)
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
             .text_color(theme.popover_foreground)
-            .text_sm()
+            .text_body()
             .shadow_md()
             .child(Icon::new(IconName::File).size_4())
             .child(self.label.clone())

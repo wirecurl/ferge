@@ -6,7 +6,8 @@ PLAN.md is the binding source for technology, architecture and performance budge
 
 - `crates/ferry-core` – UI-independent core: remote backends, listings, `transfer` (queue,
   pause/resume, conflicts), `library` (SQLite: favorites, folders, history), `secrets`
-  (keyring / encrypted file). Never depends on GPUI.
+  (keyring / encrypted file), `settings` (TOML file, edited in place, watched), `desktop`
+  (desktop fonts via the XDG portal). Never depends on GPUI.
 - `crates/ferry-app` – GPUI desktop application (binary `ferry`).
 - `crates/ferry-bench` – benchmark harness for the PLAN.md budgets.
 
@@ -52,8 +53,9 @@ Running the app against the test server: `cargo run -- -F .testserver/ssh_config
 
 To try favorites and saved passwords without touching your own data, point the data directory
 elsewhere and force the encrypted-file store:
-`XDG_DATA_HOME=/tmp/ferry-data FERRY_SECRET_STORE=file cargo run`. Benchmark runs (`--bench`)
-keep everything in memory. `cargo test -p ferry-core --test keyring -- --ignored` exercises the
+`XDG_DATA_HOME=/tmp/ferry-data FERRY_SECRET_STORE=file cargo run`. Settings work the same way
+with `XDG_CONFIG_HOME=/tmp/ferry-config` (`ferry/settings.toml` below it; the app watches it).
+Benchmark runs (`--bench`) keep everything in memory and never read or write settings. `cargo test -p ferry-core --test keyring -- --ignored` exercises the
 real Secret Service / Keychain.
 
 ## Rules
@@ -64,3 +66,8 @@ real Secret Service / Keychain.
 - For GPUI API questions read the sources in `~/.cargo/registry/src/*/gpui-pre-0.3.12` and
   `~/.cargo/registry/src/*/gpui-component-0.10.0` instead of guessing.
 - Commit messages and authorship never mention AI tools.
+- Look and feel come from `crates/ferry-app/src/style.rs`: sizes in `rem` (the theme sets rem to
+  the interface font size, so the window follows the font size setting), text through
+  `text_body` / `text_small` / `text_caption`, flat surfaces, rounded `track`s for controls
+  and `group`s for lists of items. Do not use `text_sm` / `text_xs` or fixed pixel sizes for
+  layout.

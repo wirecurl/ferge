@@ -49,8 +49,10 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 - Listings stream in while the server is still sending, are cached per connection and
   revalidated in the background. Going back is instant.
 - Natural, case-insensitive sorting by name, size or date (folders first) and type-to-filter.
-- Follows the system light/dark preference; respects server-side decorations on Wayland
-  compositors such as niri.
+- Uses the desktop's interface and fixed-width fonts and its light or dark preference, and
+  follows changes to them while running; respects server-side decorations on Wayland
+  compositors such as niri. Theme, fonts and font size can be changed in the settings window
+  or in a settings file.
 
 ## Install
 
@@ -101,9 +103,30 @@ ferry -F ./ssh_config myserver          # use another SSH client configuration
 | Ctrl+J | ⌘J | show or hide transfers |
 | Ctrl+T / Ctrl+W | ⌘T / ⌘W | new tab / close tab |
 | Ctrl+Tab, Ctrl+PgDn / Ctrl+Shift+Tab, Ctrl+PgUp | Ctrl+Tab, ⌘⇧] / Ctrl+Shift+Tab, ⌘⇧[ | next / previous tab |
+| Ctrl+, | ⌘, | settings |
 
 In the server panel, type to search, use ↑ ↓ and press Enter to connect (Ctrl+Enter: new tab).
 Favorites and folders are edited from their context menu or the + menu.
+
+## Settings
+
+Settings live in `settings.toml` in the configuration directory (`~/.config/ferry` on Linux,
+`~/Library/Application Support/ferry` on macOS). The settings window (Ctrl+, or the gear in the
+toolbar) edits the same file, and edits made to the file in any editor take effect as soon as
+it is saved. Ferry keeps comments and the order of what is written by hand, and a file that is
+a symbolic link (as in a dotfiles repository) stays one. A setting that is left out uses its
+default; a value Ferry cannot use is reported and ignored.
+
+```toml
+[appearance]
+theme = "dark"              # "system" (default), "light" or "dark"
+font = "Inter"              # interface font; default: the desktop's
+font-size = 14              # in pixels, 6 to 32; default: the desktop's
+mono-font = "JetBrains Mono" # fixed-width text; default: the desktop's
+```
+
+On Linux, "the desktop's" fonts come from the XDG desktop portal (the GNOME interface settings
+that every portal backend provides), including the text scaling factor.
 
 
 

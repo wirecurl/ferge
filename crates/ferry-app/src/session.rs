@@ -31,6 +31,7 @@ use crate::browser::{BrowserEvent, FileBrowser, Navigated, ViewOptions};
 use crate::interaction::UiInteraction;
 use crate::prompts::{Prompter, SessionId, TaggedPrompt};
 use crate::runtime;
+use crate::style::{self, Palette as _, TypeScale as _};
 use crate::vault::Vault;
 
 /// What to connect to, and where it came from.
@@ -473,14 +474,24 @@ impl Session {
         };
         Some(
             h_flex()
+                .mx_2()
+                .mb_1()
                 .px_3()
-                .py_2()
+                .py_1p5()
                 .gap_2()
-                .text_sm()
+                .text_body()
                 .flex_shrink_0()
-                .border_b_1()
-                .border_color(theme.border)
-                .when(failed, |this| this.text_color(theme.danger))
+                .rounded(style::GROUP_RADIUS)
+                .border_1()
+                .map(|this| {
+                    if failed {
+                        this.text_color(theme.danger)
+                            .border_color(theme.danger.opacity(0.4))
+                            .bg(theme.danger.opacity(0.08))
+                    } else {
+                        this.border_color(theme.border).bg(theme.group_fill())
+                    }
+                })
                 .child(Icon::new(icon).size_4())
                 .child(div().flex_1().min_w_0().child(text))
                 .map(|this| {

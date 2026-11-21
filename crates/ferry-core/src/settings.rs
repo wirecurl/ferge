@@ -214,6 +214,15 @@ impl SettingsFile {
         Ok(read_settings(&document))
     }
 
+    /// Writes the commented template if the file does not exist yet, so it
+    /// can be opened in an editor.
+    pub fn create_if_missing(&self) -> Result<(), SettingsError> {
+        if self.read()?.is_none() {
+            self.write(TEMPLATE)?;
+        }
+        Ok(())
+    }
+
     fn read(&self) -> Result<Option<String>, SettingsError> {
         match std::fs::read_to_string(&self.path) {
             Ok(text) => Ok(Some(text)),
@@ -632,6 +641,21 @@ mod tests {
         file.apply(&Change::Theme(ThemePreference::Dark)).unwrap();
         let changed = tokio::time::timeout(Duration::from_secs(5), watcher.changed()).await;
         assert_eq!(changed, Ok(true));
+    }
+
+    #[test]
+    fn creates_the_template_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file(&dir);
+        file.create_if_missing().unwrap();
+        assert_eq!(std::fs::read_to_string(file.path()).unwrap(), TEMPLATE);
+        file.apply(&Change::Theme(ThemePreference::Dark)).unwrap();
+        file.create_if_missing().unwrap();
+        assert!(
+            std::fs::read_to_string(file.path())
+                .unwrap()
+                .contains("dark")
+        );
     }
 
     #[test]

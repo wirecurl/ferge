@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::style::TypeScale as _;
 use ferry_core::library::{BookmarkDraft, BookmarkId, FolderId, LibrarySnapshot};
 use ferry_core::{Destination, RemotePath, SftpTarget};
 use gpui::prelude::FluentBuilder as _;
@@ -294,7 +295,7 @@ impl Render for BookmarkEditor {
         let folder_menu = self.render_folder_menu(cx);
         let theme = cx.theme();
         let (muted, danger) = (theme.muted_foreground, theme.danger);
-        let label = |text: &'static str| div().text_xs().text_color(muted).child(text);
+        let label = |text: &'static str| div().text_small().text_color(muted).child(text);
         let field = |text: &'static str, input: &Entity<InputState>| {
             v_flex()
                 .flex_1()
@@ -370,7 +371,7 @@ impl Render for BookmarkEditor {
             .children(
                 self.error
                     .clone()
-                    .map(|error| div().text_sm().text_color(danger).child(error)),
+                    .map(|error| div().text_body().text_color(danger).child(error)),
             )
             .child(
                 h_flex()

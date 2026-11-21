@@ -1,16 +1,18 @@
 //! Ferry desktop application.
 
 mod actions;
+mod appearance;
 mod bench;
 mod browser;
 mod editor;
-mod fonts;
 mod format;
 mod inspector;
 mod interaction;
 mod prompts;
 mod runtime;
 mod session;
+mod settings_window;
+mod style;
 mod transfers;
 mod vault;
 mod workspace;
@@ -30,7 +32,7 @@ use tracing_subscriber::EnvFilter;
 use crate::workspace::Workspace;
 
 /// Wayland `app_id`, also used by desktop files and compositor window rules.
-const APP_ID: &str = "dev.ferry.Ferry";
+pub(crate) const APP_ID: &str = "dev.ferry.Ferry";
 const APP_NAME: &str = "Ferry";
 
 /// A fast file transfer client.
@@ -69,27 +71,34 @@ fn main() -> ExitCode {
             gpui_component::init(cx);
             actions::bind_keys(cx);
             workspace::bind_keys(cx);
+            settings_window::init(cx);
             cx.background_spawn(async { format::load_time_zone() })
                 .detach();
-            fonts::detect(cx);
+            // Benchmarks must neither read nor change the user's data.
+            let ephemeral = cli.bench.is_some();
+            let startup = appearance::Appearance::init(ephemeral, cx);
 
             let options = workspace::Options {
                 initial: cli.destination,
                 ssh_config: cli.ssh_config,
-                // Benchmarks must neither read nor change the user's data.
-                ephemeral: cli.bench.is_some(),
+                ephemeral,
             };
-            match open_main_window(options, cx) {
-                Ok((window, workspace)) => {
-                    if let Some(scenario) = cli.bench {
-                        bench::start(scenario, window, workspace, started, cx);
+            let bench = cli.bench;
+            cx.spawn(async move |cx| {
+                appearance::Appearance::wait_for_startup(startup, cx).await;
+                cx.update(|cx| match open_main_window(options, cx) {
+                    Ok((window, workspace)) => {
+                        if let Some(scenario) = bench {
+                            bench::start(scenario, window, workspace, started, cx);
+                        }
                     }
-                }
-                Err(error) => {
-                    tracing::error!("failed to open the main window: {error:#}");
-                    cx.quit();
-                }
-            }
+                    Err(error) => {
+                        tracing::error!("failed to open the main window: {error:#}");
+                        cx.quit();
+                    }
+                });
+            })
+            .detach();
         });
     ExitCode::SUCCESS
 }

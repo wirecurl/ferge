@@ -18,15 +18,12 @@ use ferry_core::{Destination, Entry, EntryKind, EntryName, Remote, RemotePath};
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
     App, AppContext as _, Context, FocusHandle, Focusable, Global, KeyDownEvent, ScrollStrategy,
-    SharedString, Task, UniformListScrollHandle, WeakEntity, Window, px,
+    SharedString, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 
 use crate::actions;
 use crate::runtime;
 use crate::transfers::Transfers;
-
-/// Height of one row in the list. Rows must be uniform for virtualization.
-pub(crate) const ROW_HEIGHT: gpui::Pixels = px(26.);
 
 /// Recently shown directories kept with their sorted views, so going back or
 /// up is instant without re-sorting.
@@ -836,9 +833,10 @@ impl FileBrowser {
     }
 
     /// Rows that fit into the list's viewport.
-    fn page_rows(&self) -> isize {
+    fn page_rows(&self, window: &Window) -> isize {
         let height = self.scroll.0.borrow().base_handle.bounds().size.height;
-        let rows = (height / ROW_HEIGHT).floor();
+        let row_height = crate::style::ROW_HEIGHT.to_pixels(window.rem_size());
+        let rows = (height / row_height).floor();
         // Float to int: the value is a small, non-negative row count.
         #[expect(
             clippy::cast_possible_truncation,
@@ -923,17 +921,22 @@ impl FileBrowser {
         self.receive(source, items, target_dir, cx);
     }
 
-    fn on_page_up(&mut self, _: &actions::SelectPageUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_selection(-self.page_rows(), cx);
+    fn on_page_up(
+        &mut self,
+        _: &actions::SelectPageUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_selection(-self.page_rows(window), cx);
     }
 
     fn on_page_down(
         &mut self,
         _: &actions::SelectPageDown,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_selection(self.page_rows(), cx);
+        self.move_selection(self.page_rows(window), cx);
     }
 
     fn on_select_first(

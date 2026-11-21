@@ -25,6 +25,7 @@ use crate::editor::{BookmarkEditor, EditorEvent};
 use crate::prompts::{
     MasterPasswordRequest, PromptRequest, SecretRequest, SessionId, TaggedPrompt,
 };
+use crate::style::TypeScale as _;
 
 /// Key context of the question overlay.
 const PROMPT_CONTEXT: &str = "FerryPrompt";
@@ -667,7 +668,7 @@ impl Workspace {
                     .children(
                         error
                             .clone()
-                            .map(|error| div().text_sm().text_color(danger).child(error)),
+                            .map(|error| div().text_body().text_color(danger).child(error)),
                     )
                     .child(
                         h_flex()
@@ -702,7 +703,7 @@ impl Workspace {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(title.clone()),
                     )
-                    .child(div().text_sm().text_color(muted).child(message.clone()))
+                    .child(div().text_body().text_color(muted).child(message.clone()))
                     .child(
                         h_flex()
                             .gap_2()
@@ -774,7 +775,7 @@ impl Workspace {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Unknown host key"),
             )
-            .child(div().text_sm().child(format!(
+            .child(div().text_body().child(format!(
                 "Ferry has not connected to {} before. Compare the fingerprint with the one \
                  the server's administrator gave you before you trust it.",
                 prompt.host
@@ -787,19 +788,19 @@ impl Workspace {
                     .bg(code_bg)
                     .child(
                         div()
-                            .text_xs()
+                            .text_small()
                             .text_color(muted)
                             .child(prompt.algorithm.clone()),
                     )
                     .child(
                         div()
-                            .text_sm()
-                            .font_family(crate::fonts::monospace())
+                            .text_body()
+                            .font_family(cx.theme().mono_font_family.clone())
                             .child(prompt.fingerprint.clone()),
                     ),
             )
             .when(prompt.other_types_known, |this| {
-                this.child(div().text_sm().text_color(danger).child(
+                this.child(div().text_body().text_color(danger).child(
                     "Keys of other types are already known for this host. The server may have \
                      been reconfigured, or someone may be intercepting the connection.",
                 ))
@@ -855,7 +856,7 @@ impl Workspace {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(request.title.clone()),
             )
-            .child(div().text_sm().child(request.message.clone()))
+            .child(div().text_body().child(request.message.clone()))
             .child(Input::new(input))
             .child(
                 h_flex()
@@ -911,7 +912,7 @@ impl Workspace {
             .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
             .child(
                 div()
-                    .text_sm()
+                    .text_body()
                     .when(request.retry, |this| this.text_color(danger))
                     .child(message),
             )
@@ -919,10 +920,10 @@ impl Workspace {
             .children(confirm.map(|confirm| {
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(muted).child("Repeat it"))
+                    .child(div().text_small().text_color(muted).child("Repeat it"))
                     .child(Input::new(confirm))
             }))
-            .children(error.map(|error| div().text_sm().text_color(danger).child(error.clone())))
+            .children(error.map(|error| div().text_body().text_color(danger).child(error.clone())))
             .child(
                 h_flex()
                     .gap_2()
@@ -974,7 +975,7 @@ impl Workspace {
                         .child(crate::format::date(modified)),
                 )
                 .when(highlight, |this| {
-                    this.child(div().text_xs().text_color(muted).child("newer"))
+                    this.child(div().text_small().text_color(muted).child("newer"))
                 })
         };
         Self::card(cx)
@@ -987,7 +988,7 @@ impl Workspace {
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_body()
                     .child(format!("A file with this name already exists in {folder}.")),
             )
             .child(
@@ -996,7 +997,7 @@ impl Workspace {
                     .gap_1()
                     .rounded_md()
                     .bg(code_bg)
-                    .text_sm()
+                    .text_body()
                     .child(describe(
                         "Existing",
                         conflict.existing_size,

@@ -9,7 +9,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, ClickEvent, Context, ExternalDragPayload, ExternalPaths,
     InteractiveElement as _, IntoElement, ParentElement as _, Rems, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, rems, uniform_list,
+    StatefulInteractiveElement as _, Styled as _, Window, div, uniform_list,
 };
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
@@ -17,21 +17,21 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 
 use super::{DraggedEntries, FileBrowser, FileClipboard, LoadState};
 use crate::file_type::FileType;
-use crate::style::{self, Palette as _, TypeScale as _};
+use crate::style::{self, Palette as _, TypeScale as _, em};
 use crate::{actions, format};
 
-const SIZE_WIDTH: Rems = rems(5.5);
-const DATE_WIDTH: Rems = rems(9.5);
-const KIND_WIDTH: Rems = rems(8.);
-const PERMISSIONS_WIDTH: Rems = rems(6.5);
+const SIZE_WIDTH: Rems = em(5.5);
+const DATE_WIDTH: Rems = em(9.5);
+const KIND_WIDTH: Rems = em(8.);
+const PERMISSIONS_WIDTH: Rems = em(6.5);
 /// Room for the icon in front of the name.
-const ICON_WIDTH: Rems = rems(1.);
+const ICON_WIDTH: Rems = em(1.);
 /// Inset of the rows from the edges of the pane; rows are rounded inside it.
-const LIST_INSET: Rems = rems(0.375);
+const LIST_INSET: Rems = em(0.375);
 /// Space between the edge of a row and its content.
-const ROW_PADDING: Rems = rems(0.5);
+const ROW_PADDING: Rems = em(0.5);
 /// [`LIST_INSET`] and [`ROW_PADDING`]: where row contents begin.
-const HEADER_INSET: Rems = rems(0.875);
+const HEADER_INSET: Rems = em(0.875);
 
 impl Render for FileBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -97,7 +97,7 @@ impl FileBrowser {
                 } else {
                     IconName::ArrowUp
                 })
-                .size_3()
+                .size(em(0.75))
             });
             h_flex()
                 .id(id)
@@ -111,12 +111,12 @@ impl FileBrowser {
                 .children(arrow)
         };
         h_flex()
-            .h(rems(1.75))
+            .h(em(1.875))
             // Lines the titles up with the row contents below.
             .px(HEADER_INSET)
             .gap_2()
             .flex_shrink_0()
-            .text_caption()
+            .text_small()
             .text_color(theme.muted_foreground)
             .child(div().w(ICON_WIDTH))
             .child(
@@ -434,8 +434,8 @@ impl FileBrowser {
         };
         let failed = matches!(self.state, LoadState::Failed(_));
         h_flex()
-            .h(rems(1.9))
-            .px_3()
+            .h(em(2.))
+            .px(style::BAR_PADDING)
             .gap_3()
             .flex_shrink_0()
             .text_small()
@@ -455,7 +455,7 @@ impl FileBrowser {
                         .rounded(style::RADIUS)
                         .bg(theme.accent)
                         .text_color(theme.accent_foreground)
-                        .child(Icon::new(IconName::Search).size_3())
+                        .child(Icon::new(IconName::Search).size(em(0.75)))
                         .child(SharedString::from(self.filter.clone())),
                 )
                 .child("Esc clears")
@@ -548,7 +548,10 @@ impl FileBrowser {
                 .flex_1()
                 .min_w_0()
                 .key_context(actions::FILE_RENAME)
-                .child(Input::new(&renaming.input).xsmall())
+                // The name stays where it was: the field's text starts at the
+                // label's position.
+                .ml(-em(0.3))
+                .child(Input::new(&renaming.input).small().px(em(0.25)))
                 .into_any_element();
         }
         div()

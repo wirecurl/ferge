@@ -25,7 +25,7 @@ use crate::editor::{BookmarkEditor, EditorEvent};
 use crate::prompts::{
     MasterPasswordRequest, PromptRequest, SecretRequest, SessionId, TaggedPrompt,
 };
-use crate::style::TypeScale as _;
+use crate::style::{self, TypeScale as _};
 
 /// Key context of the question overlay.
 const PROMPT_CONTEXT: &str = "FerryPrompt";
@@ -621,7 +621,7 @@ impl Workspace {
             .max_w_full()
             .p_5()
             .gap_3()
-            .rounded_lg()
+            .rounded(style::GROUP_RADIUS)
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
@@ -656,14 +656,10 @@ impl Workspace {
                     error,
                     ..
                 } => Self::card(cx)
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(match purpose {
-                                FolderPurpose::Create { .. } => "New folder",
-                                FolderPurpose::Rename(_) => "Rename folder",
-                            }),
-                    )
+                    .child(div().text_title().child(match purpose {
+                        FolderPurpose::Create { .. } => "New folder",
+                        FolderPurpose::Rename(_) => "Rename folder",
+                    }))
                     .child(Input::new(input))
                     .children(
                         error
@@ -698,11 +694,7 @@ impl Workspace {
                     ..
                 } => Self::card(cx)
                     .track_focus(&self.prompt_focus)
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(title.clone()),
-                    )
+                    .child(div().text_title().child(title.clone()))
                     .child(div().text_body().text_color(muted).child(message.clone()))
                     .child(
                         h_flex()
@@ -770,11 +762,7 @@ impl Workspace {
         };
         Self::card(cx)
             .track_focus(&self.prompt_focus)
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Unknown host key"),
-            )
+            .child(div().text_title().child("Unknown host key"))
             .child(div().text_body().child(format!(
                 "Ferry has not connected to {} before. Compare the fingerprint with the one \
                  the server's administrator gave you before you trust it.",
@@ -784,7 +772,7 @@ impl Workspace {
                 v_flex()
                     .p_3()
                     .gap_1()
-                    .rounded_md()
+                    .rounded(style::RADIUS)
                     .bg(code_bg)
                     .child(
                         div()
@@ -851,11 +839,7 @@ impl Workspace {
                 }))
         });
         Self::card(cx)
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(request.title.clone()),
-            )
+            .child(div().text_title().child(request.title.clone()))
             .child(div().text_body().child(request.message.clone()))
             .child(Input::new(input))
             .child(
@@ -909,7 +893,7 @@ impl Workspace {
             )
         };
         Self::card(cx)
-            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+            .child(div().text_title().child(title))
             .child(
                 div()
                     .text_body()
@@ -981,11 +965,7 @@ impl Workspace {
         Self::card(cx)
             .w(px(500.))
             .track_focus(&self.prompt_focus)
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(format!("Replace “{name}”?")),
-            )
+            .child(div().text_title().child(format!("Replace “{name}”?")))
             .child(
                 div()
                     .text_body()
@@ -995,7 +975,7 @@ impl Workspace {
                 v_flex()
                     .p_3()
                     .gap_1()
-                    .rounded_md()
+                    .rounded(style::RADIUS)
                     .bg(code_bg)
                     .text_body()
                     .child(describe(

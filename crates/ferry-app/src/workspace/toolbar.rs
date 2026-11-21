@@ -3,18 +3,15 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     ClickEvent, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, rems,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, h_flex,
-};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, h_flex};
 
 use super::{NewTab, ToggleInspector, ToggleSplit, ToggleTransfers, Workspace};
 use crate::actions;
 use crate::settings_window::OpenSettings;
-use crate::style::{self, Palette as _, TypeScale as _};
+use crate::style::{self, ControlSize, IconButton, Palette as _, TypeScale as _, em};
 
 impl Workspace {
     pub(super) fn render_toolbar(
@@ -34,7 +31,7 @@ impl Workspace {
                 window.dispatch_action(action.boxed_clone(), cx);
             }
         };
-        let file_tools = style::track(cx)
+        let file_tools = style::track(ControlSize::Regular, cx)
             .child(
                 tool("new-folder", IconName::FolderClosed, "New folder")
                     .disabled(!connected)
@@ -50,7 +47,7 @@ impl Workspace {
                     .disabled(!connected)
                     .on_click(dispatch(Box::new(actions::Delete))),
             );
-        let view_tools = style::track(cx)
+        let view_tools = style::track(ControlSize::Regular, cx)
             .child(
                 tool("toggle-split", IconName::PanelRight, "Two file browsers")
                     .selected(split)
@@ -65,14 +62,28 @@ impl Workspace {
                         this.on_toggle_inspector(&ToggleInspector, window, cx);
                     })),
             )
-            .child(self.render_transfers_toggle(cx))
+            .child(
+                tool("toggle-transfers", IconName::ArrowDown, "Transfers")
+                    .selected(self.transfers_open)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.on_toggle_transfers(&ToggleTransfers, window, cx);
+                    })),
+            )
+            .children(self.render_progress(cx))
             .child(
                 tool("settings", IconName::Settings, "Settings")
                     .on_click(dispatch(Box::new(OpenSettings))),
             );
+        let search = style::field(
+            Input::new(&self.filter)
+                .prefix(Icon::new(IconName::Search).size(ControlSize::Regular.icon()))
+                .cleanable(true),
+            ControlSize::Regular,
+            cx,
+        );
         h_flex()
             .h(style::TOOLBAR_HEIGHT)
-            .px_2()
+            .px(style::BAR_PADDING)
             .gap_2()
             .flex_shrink_0()
             .border_b_1()
@@ -82,13 +93,7 @@ impl Workspace {
             .child(self.render_tabs(cx))
             .children(self.render_narrow_switch(window, cx))
             .child(div().flex_1().min_w_2())
-            .child(
-                div().w(rems(18.)).flex_shrink_1().min_w(rems(8.)).child(
-                    Input::new(&self.filter)
-                        .prefix(Icon::new(IconName::Search).size_4())
-                        .cleanable(true),
-                ),
-            )
+            .child(div().w(em(18.)).flex_shrink_1().min_w(em(8.)).child(search))
             .child(file_tools)
             .child(view_tools)
     }
@@ -113,7 +118,7 @@ impl Workspace {
                 }
             })
         };
-        style::track(cx)
+        style::track(ControlSize::Regular, cx)
             .child(
                 tool("back", IconName::ArrowLeft, "Back")
                     .disabled(!can_go_back)
@@ -155,10 +160,9 @@ impl Workspace {
                 let title = session.title(cx);
                 let active = index == self.active;
                 let close = closable.then(|| {
-                    Button::new(("close-tab", index))
-                        .ghost()
-                        .xsmall()
-                        .icon(Icon::new(IconName::Close).size_3())
+                    IconButton::new(("close-tab", index), IconName::Close)
+                        .size(ControlSize::Compact)
+                        .in_track()
                         .tooltip("Close tab")
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
@@ -167,11 +171,12 @@ impl Workspace {
                 });
                 h_flex()
                     .id(ElementId::NamedInteger("tab".into(), index as u64))
-                    .h(rems(2.))
-                    .pl_2()
-                    // The close button brings its own padding.
-                    .map(|this| if closable { this.pr_0p5() } else { this.pr_2() })
-                    .gap_1p5()
+                    .h(ControlSize::Regular.item())
+                    .pl(em(0.625))
+                    // The close button is a square of its own; text alone
+                    // gets the same space on both sides.
+                    .pr(if closable { em(0.15) } else { em(0.625) })
+                    .gap(em(0.5))
                     .min_w_0()
                     .rounded(style::RADIUS)
                     .cursor_pointer()
@@ -186,12 +191,12 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.activate(index, window, cx);
                     }))
-                    .child(Icon::new(icon).size_4().flex_shrink_0())
-                    .child(div().max_w(rems(11.)).truncate().child(title))
+                    .child(Icon::new(icon).size(em(1.)).flex_shrink_0())
+                    .child(div().max_w(em(12.)).truncate().child(title))
                     .children(close)
             })
             .collect();
-        style::track(cx)
+        style::track(ControlSize::Regular, cx)
             .flex_shrink(1.)
             .min_w_0()
             .overflow_hidden()
@@ -215,58 +220,48 @@ impl Workspace {
         if tab.panes.len() < 2 || !Self::is_narrow(window) {
             return None;
         }
-        let titles: Vec<SharedString> = tab
+        let choices: Vec<(usize, SharedString)> = tab
             .panes
             .iter()
-            .map(|pane| pane.read(cx).title(cx))
+            .enumerate()
+            .map(|(index, pane)| (index, pane.read(cx).title(cx)))
             .collect();
-        let focused = tab.focused;
-        Some(
-            style::track(cx).child(
-                ButtonGroup::new("pane-switch")
-                    .ghost()
-                    .children(titles.into_iter().enumerate().map(|(index, title)| {
-                        Button::new(("pane", index))
-                            .label(title)
-                            .selected(index == focused)
-                    }))
-                    .on_click(cx.listener(|this, clicked: &Vec<usize>, window, cx| {
-                        if let Some(&index) = clicked.first() {
-                            this.focus_pane(index, window, cx);
-                        }
-                    })),
-            ),
-        )
+        let this = cx.entity().downgrade();
+        Some(style::segmented(
+            "pane-switch",
+            ControlSize::Regular,
+            &choices,
+            tab.focused,
+            move |index, window, cx| {
+                let _ = this.update(cx, |workspace, cx| workspace.focus_pane(index, window, cx));
+            },
+            cx,
+        ))
     }
 
-    /// The toolbar button that shows the transfers, with overall progress.
-    fn render_transfers_toggle(&self, cx: &mut Context<Self>) -> Button {
+    /// Overall progress of running transfers, next to their button.
+    fn render_progress(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let panel = self.transfer_panel.read(cx);
-        let label: Option<SharedString> = match panel.overall_progress() {
-            Some(progress) if panel.active_count() > 0 => {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    reason = "a percentage between 0 and 100"
-                )]
-                let percent = (progress * 100.0).round() as u32;
-                Some(format!("{percent}%").into())
-            }
-            _ => None,
-        };
-        tool("toggle-transfers", IconName::ArrowDown, "Transfers")
-            .when_some(label, Button::label)
-            .selected(self.transfers_open)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.on_toggle_transfers(&ToggleTransfers, window, cx);
-            }))
+        let progress = panel
+            .overall_progress()
+            .filter(|_| panel.active_count() > 0)?;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a percentage between 0 and 100"
+        )]
+        let percent = (progress * 100.0).round() as u32;
+        Some(
+            div()
+                .px(em(0.25))
+                .text_small()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{percent}%")),
+        )
     }
 }
 
-/// An icon button inside a track.
-fn tool(id: &'static str, icon: IconName, tooltip: &'static str) -> Button {
-    Button::new(id)
-        .ghost()
-        .icon(Icon::new(icon).size_4())
-        .tooltip(tooltip)
+/// An icon button inside a toolbar track.
+fn tool(id: &'static str, icon: IconName, tooltip: &'static str) -> IconButton {
+    IconButton::new(id, icon).in_track().tooltip(tooltip)
 }

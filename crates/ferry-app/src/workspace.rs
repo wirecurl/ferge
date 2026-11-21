@@ -29,6 +29,7 @@ use crate::inspector::{INSPECTOR_WIDTH, Inspector};
 use crate::prompts::{self, PromptRequest, SessionId, TaggedPrompt};
 use crate::runtime;
 use crate::session::{ConnectRequest, Session, SessionContext, SessionEvent};
+use crate::style::TypeScale as _;
 use crate::transfers::{TransferPanel, Transfers};
 use crate::vault::Vault;
 
@@ -732,6 +733,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_copy_to_other_pane))
             .bg(background)
             .text_color(foreground)
+            // Everything inside inherits body text unless it says otherwise.
+            .text_body()
             .child(self.render_toolbar(window, cx))
             .child(
                 h_flex()

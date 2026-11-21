@@ -15,6 +15,7 @@ use gpui_component::setting::{
 use gpui_component::{ActiveTheme as _, IconName, Root, Sizable as _, h_flex, v_flex};
 
 use crate::appearance::Appearance;
+use crate::style::TypeScale as _;
 
 gpui::actions!(
     ferry,
@@ -97,6 +98,7 @@ impl Render for SettingsView {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .text_body()
             .child(
                 Settings::new("settings")
                     .sidebar_width(px(200.))

@@ -66,8 +66,15 @@ real Secret Service / Keychain.
 - For GPUI API questions read the sources in `~/.cargo/registry/src/*/gpui-pre-0.3.12` and
   `~/.cargo/registry/src/*/gpui-component-0.10.0` instead of guessing.
 - Commit messages and authorship never mention AI tools.
-- Look and feel come from `crates/ferry-app/src/style.rs`: sizes in `rem` (the theme sets rem to
-  the interface font size, so the window follows the font size setting), text through
-  `text_body` / `text_small` / `text_caption`, flat surfaces, rounded `track`s for controls
-  and `group`s for lists of items. Do not use `text_sm` / `text_xs` or fixed pixel sizes for
-  layout.
+- Look and feel come only from `crates/ferry-app/src/style.rs`, the design system:
+  - Sizes are `style::em(x)`, multiples of body text. The theme's rem is body / 0.875, so
+    gpui-component's `text_sm` controls (menus, fields, buttons) match Ferry's body text.
+  - Text sizes: `text_body`, `text_small`, `text_title`. Controls come in two sizes
+    (`ControlSize::Regular` in the toolbar, `Compact` in headers and panels).
+  - Icon-only buttons are `style::IconButton`, choices are `style::segmented`, related controls
+    sit in a `style::track`, fields in bars go through `style::field`, lists of items in a
+    `style::group`. Text buttons are gpui-component `Button`s in their default or `.small()`
+    size.
+  - `cargo test` runs `style::design_rules`, which rejects `text_sm`/`text_xs`, `rems(`,
+    `.xsmall()`, icon buttons from gpui-component, `ButtonGroup` and ad-hoc radii in views.
+    Check visual changes in both themes and at a larger font size before committing.

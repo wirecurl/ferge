@@ -11,19 +11,17 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity,
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rems,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
 };
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use secrecy::SecretString;
 
 use super::{ConnectRequest, Session, SessionEvent};
-use crate::style::{self, Palette as _, TypeScale as _};
+use crate::style::{self, Palette as _, TypeScale as _, em};
 
 /// Something in the server panel that needs one of the window's dialogs.
 #[derive(Clone, Debug)]
@@ -47,7 +45,7 @@ pub(crate) enum LibraryAction {
 
 /// Which part of the panel is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Tab {
+pub(super) enum Tab {
     Servers,
     QuickConnect,
 }
@@ -104,6 +102,16 @@ impl ServerPanel {
 
     pub(super) fn search(&self) -> &Entity<InputState> {
         &self.search
+    }
+
+    pub(super) fn tab(&self) -> Tab {
+        self.tab
+    }
+
+    pub(super) fn show(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Session>) {
+        self.tab = tab;
+        self.focus(window, cx);
+        cx.notify();
     }
 
     pub(super) fn focus(&self, window: &mut Window, cx: &mut Context<Session>) {
@@ -397,30 +405,7 @@ impl Session {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let tab = self.servers.tab;
-        let tabs = ButtonGroup::new("server-tabs")
-            .small()
-            .ghost()
-            .child(
-                Button::new("tab-servers")
-                    .label("Servers")
-                    .selected(tab == Tab::Servers),
-            )
-            .child(
-                Button::new("tab-quick")
-                    .label("Quick Connect")
-                    .selected(tab == Tab::QuickConnect),
-            )
-            .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
-                this.servers.tab = if selected.contains(&1) {
-                    Tab::QuickConnect
-                } else {
-                    Tab::Servers
-                };
-                this.servers.focus(window, cx);
-                cx.notify();
-            }));
-        let content = match tab {
+        let content = match self.servers.tab {
             Tab::Servers => self.render_server_list(cx).into_any_element(),
             Tab::QuickConnect => self.render_quick_connect(cx).into_any_element(),
         };
@@ -430,14 +415,10 @@ impl Session {
             .min_h_0()
             .overflow_y_scroll()
             .child(
-                v_flex()
-                    .p_3()
-                    .gap_3()
-                    .child(
-                        h_flex()
-                            .justify_center()
-                            .child(style::track(cx).child(tabs)),
-                    )
+                div()
+                    .px(style::BAR_PADDING)
+                    .pt_1()
+                    .pb(style::BAR_PADDING)
                     .child(content),
             )
     }
@@ -455,31 +436,14 @@ impl Session {
         };
         v_flex()
             .w_full()
-            .max_w(px(520.))
-            .mx_auto()
+            .max_w(em(36.))
             .gap_3()
+            .child(style::section_title("Connect over SFTP", cx).pb_0())
             .child(
                 h_flex()
                     .gap_3()
-                    .child(
-                        v_flex()
-                            .w(px(96.))
-                            .gap_1()
-                            .child(div().text_small().text_color(muted).child("Protocol"))
-                            .child(
-                                div()
-                                    .h(px(32.))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .child("SFTP"),
-                            ),
-                    )
                     .child(field("Server", &quick.host))
-                    .child(div().w(px(80.)).child(field("Port", &quick.port))),
+                    .child(div().w(em(6.)).child(field("Port", &quick.port))),
             )
             .child(
                 h_flex()
@@ -581,8 +545,6 @@ impl Session {
         });
         v_flex()
             .w_full()
-            .max_w(rems(40.))
-            .mx_auto()
             .gap_4()
             .children(match hint {
                 Some(hint) => Some(
@@ -710,7 +672,7 @@ impl Session {
         let this = cx.entity().downgrade();
         h_flex()
             .id(ElementId::Name(format!("folder-{id:?}").into()))
-            .h(rems(2.25))
+            .h(em(2.25))
             .pl(indent(depth))
             .pr_2()
             .gap_2()
@@ -728,7 +690,7 @@ impl Session {
                 } else {
                     IconName::ChevronRight
                 })
-                .size_3()
+                .size(em(0.75))
                 .text_color(muted),
             )
             .child(
@@ -798,7 +760,7 @@ impl Session {
         let clicked = row.clone();
         h_flex()
             .id(id)
-            .h(rems(3.25))
+            .h(em(3.25))
             .pl(indent(depth))
             .pr_2()
             .gap_3()
@@ -815,14 +777,14 @@ impl Session {
             }))
             .child(
                 div()
-                    .size(rems(2.))
+                    .size(em(2.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded(style::RADIUS)
                     .bg(badge)
-                    .child(Icon::new(icon).size_4().text_color(muted)),
+                    .child(Icon::new(icon).size(em(1.)).text_color(muted)),
             )
             .child(
                 v_flex()
@@ -901,7 +863,7 @@ fn row_menu(
 fn indent(depth: usize) -> gpui::Rems {
     #[expect(clippy::cast_precision_loss, reason = "folder depth is small")]
     let depth = depth.min(8) as f32;
-    rems(0.625 + INDENT * depth)
+    em(0.75 + INDENT * depth)
 }
 
 /// A titled group of rows; nothing at all without rows.

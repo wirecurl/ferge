@@ -31,7 +31,7 @@ use crate::browser::{BrowserEvent, FileBrowser, Navigated, ViewOptions};
 use crate::interaction::UiInteraction;
 use crate::prompts::{Prompter, SessionId, TaggedPrompt};
 use crate::runtime;
-use crate::style::{self, Palette as _, TypeScale as _};
+use crate::style::{self, ControlSize, IconButton, Palette as _, TypeScale as _, em};
 use crate::vault::Vault;
 
 /// What to connect to, and where it came from.
@@ -492,15 +492,14 @@ impl Session {
                         this.border_color(theme.border).bg(theme.group_fill())
                     }
                 })
-                .child(Icon::new(icon).size_4())
+                .child(Icon::new(icon).size(em(1.)))
                 .child(div().flex_1().min_w_0().child(text))
                 .map(|this| {
                     if failed {
                         this.child(
-                            Button::new("dismiss-error")
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Close)
+                            IconButton::new("dismiss-error", IconName::Close)
+                                .size(ControlSize::Compact)
+                                .tooltip("Dismiss")
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.state = ConnectState::Idle;
                                     cx.notify();
@@ -510,7 +509,7 @@ impl Session {
                         this.child(
                             Button::new("cancel-connect")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .label("Cancel")
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.abandon_attempt(cx);

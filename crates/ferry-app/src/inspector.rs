@@ -7,7 +7,7 @@ use ferry_core::{Entry, EntryKind, RemotePath};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     ClickEvent, ClipboardItem, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, WeakEntity, Window, div, rems,
+    SharedString, Styled as _, Subscription, WeakEntity, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
@@ -15,11 +15,11 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 
 use crate::browser::FileBrowser;
 use crate::file_type::FileType;
-use crate::style::{self, TypeScale as _};
+use crate::style::{self, TypeScale as _, em};
 use crate::{format, runtime};
 
 /// Width of the inspector.
-pub(crate) const INSPECTOR_WIDTH: gpui::Rems = rems(21.);
+pub(crate) const INSPECTOR_WIDTH: gpui::Rems = em(21.);
 
 /// Who a permission bit is for, in display order.
 const CLASSES: [(&str, u32); 3] = [("Owner", 6), ("Group", 3), ("Everyone", 0)];
@@ -116,7 +116,7 @@ impl Inspector {
                 .items_start()
                 .child(
                     div()
-                        .w(rems(5.))
+                        .w(em(5.))
                         .flex_shrink_0()
                         .text_small()
                         .text_color(muted)
@@ -146,7 +146,7 @@ impl Inspector {
                     .child(
                         div()
                             .text_center()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_title()
                             .child(SharedString::from(entry.name.as_str().to_owned())),
                     ),
             )
@@ -193,24 +193,19 @@ impl Inspector {
             _ => current,
         };
         let changed = mode != current;
-        let header = h_flex()
-            .gap_1()
-            .child(div().w(rems(5.)))
-            .children(KINDS.iter().map(|(label, _)| {
-                div()
-                    .w(rems(4.))
-                    .text_small()
-                    .text_color(muted)
-                    .child(*label)
-            }));
+        let header = h_flex().gap_1().child(div().w(em(5.))).children(
+            KINDS
+                .iter()
+                .map(|(label, _)| div().w(em(4.)).text_small().text_color(muted).child(*label)),
+        );
         let rows = CLASSES.iter().map(|(class, class_shift)| {
             h_flex()
                 .gap_1()
-                .child(div().w(rems(5.)).text_small().child(*class))
+                .child(div().w(em(5.)).text_small().child(*class))
                 .children(KINDS.iter().map(|(kind, kind_shift)| {
                     let bit = 1 << (class_shift + kind_shift);
                     let path = path.clone();
-                    div().w(rems(4.)).child(
+                    div().w(em(4.)).child(
                         Checkbox::new(SharedString::from(format!("perm-{class}-{kind}")))
                             .checked(mode & bit != 0)
                             .on_click(cx.listener(move |this, checked: &bool, _, cx| {
@@ -296,7 +291,7 @@ impl Render for Inspector {
                     .child(Icon::new(IconName::Copy).size_10().text_color(muted))
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_title()
                             .child(format!("{} items", format::count(entries.len()))),
                     )
                     .child(div().text_body().text_color(muted).child(format!(
@@ -316,12 +311,7 @@ impl Render for Inspector {
             .p_4()
             .gap_3()
             .bg(background)
-            .child(
-                div()
-                    .text_body()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Info"),
-            )
+            .child(div().text_title().child("Info"))
             .child(body)
             .children(
                 self.status

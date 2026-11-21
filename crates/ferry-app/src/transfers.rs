@@ -18,16 +18,15 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, ClickEvent, Context, ElementId, Global, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div, rems,
+    Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::progress::Progress;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::format;
 use crate::prompts::{Prompter, TaggedPrompt};
 use crate::runtime;
-use crate::style::{self, TypeScale as _};
+use crate::style::{self, ControlSize, IconButton, TypeScale as _};
 
 /// How often the panel refreshes while something is being copied.
 const TICK: Duration = Duration::from_millis(100);
@@ -290,12 +289,11 @@ impl TransferPanel {
                     .child(buttons),
             )
             // The bar spans the whole row so a finished transfer reads as full.
-            .child(
-                Progress::new(ElementId::NamedInteger("progress".into(), id_number(id)))
-                    .xsmall()
-                    .color(bar_color)
-                    .value(percent),
-            )
+            .child(style::progress(
+                ElementId::NamedInteger("progress".into(), id_number(id)),
+                percent,
+                bar_color,
+            ))
             .children(error)
     }
 
@@ -303,10 +301,8 @@ impl TransferPanel {
     fn render_controls(snapshot: &TransferSnapshot, cx: &mut Context<Self>) -> gpui::Div {
         let id = snapshot.id;
         let control = |name: &'static str, icon: IconName, tooltip: &'static str| {
-            Button::new(ElementId::NamedInteger(name.into(), id_number(id)))
-                .ghost()
-                .xsmall()
-                .icon(icon)
+            IconButton::new(ElementId::NamedInteger(name.into(), id_number(id)), icon)
+                .size(ControlSize::Compact)
                 .tooltip(tooltip)
         };
         h_flex()
@@ -451,16 +447,11 @@ impl Render for TransferPanel {
             .bg(background)
             .child(
                 h_flex()
-                    .h(rems(2.5))
-                    .px_3()
+                    .h(style::HEADER_HEIGHT)
+                    .px(style::BAR_PADDING)
                     .gap_2()
                     .flex_shrink_0()
-                    .child(
-                        div()
-                            .text_body()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Transfers"),
-                    )
+                    .child(div().text_title().child("Transfers"))
                     .when(active > 0, |this| {
                         this.child(
                             div()
@@ -474,7 +465,7 @@ impl Render for TransferPanel {
                         this.child(
                             Button::new("clear-finished")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .label("Clear finished")
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                     Transfers::queue(cx).clear_finished();

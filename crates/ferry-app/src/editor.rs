@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::style::TypeScale as _;
+use crate::style::{self, ControlSize, TypeScale as _};
 use ferry_core::library::{BookmarkDraft, BookmarkId, FolderId, LibrarySnapshot};
 use ferry_core::{Destination, RemotePath, SftpTarget};
 use gpui::prelude::FluentBuilder as _;
@@ -10,10 +10,10 @@ use gpui::{
     AppContext as _, ClickEvent, Context, Entity, EventEmitter, IntoElement, ParentElement as _,
     PathPromptOptions, Render, SharedString, Styled as _, Subscription, Window, div, px,
 };
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, DropdownButton};
+use gpui_component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{ActiveTheme as _, IconName, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 /// What the editor produced.
 #[derive(Clone, Debug)]
@@ -258,11 +258,7 @@ impl BookmarkEditor {
         let folders = self.folders.clone();
         let current = self.folder;
         DropdownButton::new("folder")
-            .button(
-                Button::new("folder-label")
-                    .icon(IconName::Folder)
-                    .label(self.folder_label()),
-            )
+            .button(Button::new("folder-label").label(self.folder_label()))
             .dropdown_menu(move |menu, _, _| {
                 let pick = |folder: Option<FolderId>| {
                     let this = this.clone();
@@ -328,37 +324,27 @@ impl Render for BookmarkEditor {
                 );
         v_flex()
             .gap_3()
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(if self.id.is_some() {
-                        "Edit favorite"
-                    } else {
-                        "New favorite"
-                    }),
-            )
-            .child(
-                ButtonGroup::new("kind")
-                    .small()
-                    .child(
-                        Button::new("kind-sftp")
-                            .label("SFTP")
-                            .selected(kind == Kind::Sftp),
-                    )
-                    .child(
-                        Button::new("kind-local")
-                            .label("Local")
-                            .selected(kind == Kind::Local),
-                    )
-                    .on_click(cx.listener(|this, selected: &Vec<usize>, _, cx| {
-                        this.kind = if selected.contains(&1) {
-                            Kind::Local
-                        } else {
-                            Kind::Sftp
-                        };
-                        cx.notify();
-                    })),
-            )
+            .child(div().text_title().child(if self.id.is_some() {
+                "Edit favorite"
+            } else {
+                "New favorite"
+            }))
+            .child(style::segmented(
+                "kind",
+                ControlSize::Regular,
+                &[(Kind::Sftp, "SFTP".into()), (Kind::Local, "Local".into())],
+                kind,
+                {
+                    let this = cx.entity().downgrade();
+                    move |kind, _, cx| {
+                        let _ = this.update(cx, |editor: &mut Self, cx| {
+                            editor.kind = kind;
+                            cx.notify();
+                        });
+                    }
+                },
+                cx,
+            ))
             .child(field("Name", &self.name))
             .when(kind == Kind::Sftp, |this| this.child(sftp_fields))
             .child(field("Directory", &self.path))

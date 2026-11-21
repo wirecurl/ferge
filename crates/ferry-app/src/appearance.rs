@@ -44,6 +44,7 @@ pub(crate) struct Issue {
 #[derive(Clone, Debug, PartialEq)]
 struct Applied {
     font: SharedString,
+    /// Body text size.
     font_size: Pixels,
     mono_font: SharedString,
 }
@@ -351,7 +352,8 @@ impl Appearance {
         tracing::debug!(?wanted, "applying fonts");
         Theme::update(cx, |theme| {
             theme.font_family = wanted.font.clone();
-            theme.font_size = wanted.font_size;
+            // Body text is a little smaller than one rem; see `style`.
+            theme.font_size = px(crate::style::rem_for_body(f32::from(wanted.font_size)));
             theme.mono_font_family = wanted.mono_font.clone();
             theme.mono_font_size = wanted.font_size;
         });

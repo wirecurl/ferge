@@ -283,7 +283,7 @@ impl TransferPanel {
                     )
                     .child(
                         div()
-                            .w(px(300.))
+                            .w(px(420.))
                             .flex_shrink_0()
                             .text_xs()
                             .text_color(muted)
@@ -362,8 +362,9 @@ impl TransferPanel {
         );
         let files = if snapshot.files_total > 1 {
             format!(
-                " · {} of {} files",
-                snapshot.files_done, snapshot.files_total
+                " · {} / {} files",
+                format::count(usize::try_from(snapshot.files_done).unwrap_or(usize::MAX)),
+                format::count(usize::try_from(snapshot.files_total).unwrap_or(usize::MAX))
             )
         } else {
             String::new()

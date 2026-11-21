@@ -879,8 +879,12 @@ impl FileBrowser {
         cx: &mut Context<Self>,
     ) {
         if !self.filter.is_empty() {
-            self.set_filter(String::new(), cx);
             // Keep the entry that was found selected and in view.
+            let found = self.selected_name.clone();
+            self.set_filter(String::new(), cx);
+            if found.is_some() {
+                self.selected_name = found;
+            }
             self.reselect();
             self.scroll_to_selection();
         }

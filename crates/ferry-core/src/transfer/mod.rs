@@ -193,6 +193,13 @@ impl ConflictResolver for FixedPolicy {
 pub enum TransferEvent {
     /// A transfer was added, changed state or was removed.
     Changed(TransferId),
+    /// A transfer created its folders and starts writing into `target_dir`
+    /// on `target`; listings of it are out of date from now on.
+    Writing {
+        id: TransferId,
+        target: Arc<dyn Remote>,
+        target_dir: RemotePath,
+    },
     /// A transfer stopped running (completed, failed, paused or cancelled);
     /// listings of `target_dir` on `target` are probably out of date.
     Settled {
@@ -661,6 +668,11 @@ impl Transfer {
         for error in plan.create_dirs(self.target.as_ref()).await {
             self.control().record_error(error);
         }
+        shared.emit(TransferEvent::Writing {
+            id: self.id,
+            target: Arc::clone(&self.target),
+            target_dir: self.target_dir.clone(),
+        });
         copy::copy_files(self, shared, &plan).await;
         Ok(())
     }

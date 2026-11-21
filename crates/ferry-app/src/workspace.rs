@@ -684,6 +684,9 @@ impl Workspace {
                     self.transfers_open = true;
                 }
             }
+            TransferEvent::Writing {
+                target, target_dir, ..
+            } => self.refresh_listings_of(&target, &target_dir, cx),
             TransferEvent::Settled {
                 id,
                 target,
@@ -691,25 +694,35 @@ impl Workspace {
             } => {
                 // Questions of a transfer that stopped can no longer matter.
                 self.drop_conflicts_of(id, window, cx);
-                let browsers: Vec<Entity<FileBrowser>> = self
-                    .all_sessions()
-                    .filter_map(|session| session.read(cx).browser().cloned())
-                    .collect();
-                for browser in browsers {
-                    let shows_target = {
-                        let browser = browser.read(cx);
-                        let same_remote = Arc::ptr_eq(browser.remote(), &target)
-                            || (browser.remote().is_local() && target.is_local());
-                        same_remote && browser.path() == &target_dir
-                    };
-                    if shows_target {
-                        browser.update(cx, FileBrowser::reload);
-                    }
-                }
+                self.refresh_listings_of(&target, &target_dir, cx);
             }
         }
         self.transfer_panel.update(cx, TransferPanel::refresh);
         cx.notify();
+    }
+
+    /// Reloads every pane that shows `dir` on `remote`.
+    fn refresh_listings_of(
+        &mut self,
+        remote: &Arc<dyn ferry_core::Remote>,
+        dir: &ferry_core::RemotePath,
+        cx: &mut Context<Self>,
+    ) {
+        let browsers: Vec<Entity<FileBrowser>> = self
+            .all_sessions()
+            .filter_map(|session| session.read(cx).browser().cloned())
+            .collect();
+        for browser in browsers {
+            let shows_dir = {
+                let browser = browser.read(cx);
+                let same_remote = Arc::ptr_eq(browser.remote(), remote)
+                    || (browser.remote().is_local() && remote.is_local());
+                same_remote && browser.path() == dir
+            };
+            if shows_dir {
+                browser.update(cx, FileBrowser::reload);
+            }
+        }
     }
 
     fn on_save_favorite(&mut self, _: &SaveFavorite, window: &mut Window, cx: &mut Context<Self>) {

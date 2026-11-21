@@ -638,6 +638,15 @@ impl FileBrowser {
         self.move_cursor(index, cx);
     }
 
+    /// Leaves no row selected, as after a click beside the rows.
+    pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.marked.clear();
+        self.anchor = None;
+        self.selected = None;
+        self.selected_name = None;
+        cx.notify();
+    }
+
     fn move_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(entry) = self.view.get(index) else {
             return;
@@ -819,7 +828,10 @@ impl FileBrowser {
         if len == 0 {
             return None;
         }
-        let current = self.selected.unwrap_or(0);
+        // Without a cursor, moving down starts at the top and up at the bottom.
+        let Some(current) = self.selected else {
+            return Some(if delta < 0 { len - 1 } else { 0 });
+        };
         Some(current.saturating_add_signed(delta).min(len - 1))
     }
 

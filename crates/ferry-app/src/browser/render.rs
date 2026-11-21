@@ -12,10 +12,10 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px, uniform_list,
 };
 use gpui_component::input::Input;
-use gpui_component::menu::ContextMenuExt as _;
+use gpui_component::menu::{ContextMenu, ContextMenuExt as _};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
-use super::{DraggedEntries, FileBrowser, LoadState, ROW_HEIGHT};
+use super::{DraggedEntries, FileBrowser, FileClipboard, LoadState, ROW_HEIGHT};
 use crate::{actions, format};
 
 const SIZE_WIDTH: gpui::Pixels = px(96.);
@@ -150,12 +150,15 @@ impl FileBrowser {
                 .justify_center()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground);
-            return Self::accept_drops(empty, self.path.clone(), cx)
+            let empty = Self::accept_drops(empty, self.path.clone(), cx);
+            return self
+                .with_folder_menu(empty, cx)
                 .child(message)
                 .into_any_element();
         }
         let list = div().id("entries-drop").flex_1().min_h_0();
-        Self::accept_drops(list, self.path.clone(), cx)
+        let list = Self::accept_drops(list, self.path.clone(), cx);
+        self.with_folder_menu(list, cx)
             .child(
                 uniform_list(
                     "entries",
@@ -268,6 +271,30 @@ impl FileBrowser {
                 Some(row.into_any_element())
             })
             .collect()
+    }
+
+    /// Makes a right-click on `element` that misses every row open the menu
+    /// of the current folder. The selection is dropped first, so what the menu
+    /// does applies to the folder rather than to rows that are out of sight.
+    fn with_folder_menu(
+        &self,
+        element: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> ContextMenu<gpui::Stateful<gpui::Div>> {
+        let focus = self.focus.clone();
+        let show_hidden = self.options.show_hidden;
+        element
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                    this.clear_selection(cx);
+                }),
+            )
+            .context_menu(move |menu, _, cx| {
+                let can_paste = cx.has_global::<FileClipboard>();
+                folder_menu(menu, &focus, can_paste, show_hidden)
+            })
     }
 
     /// Selects the row a context menu opens on, unless it belongs to the
@@ -439,6 +466,27 @@ fn row_menu(
         .separator()
         .menu("New folder", Box::new(actions::NewFolder))
         .menu("New file", Box::new(actions::NewFile))
+}
+
+/// The context menu of the folder itself, opened beside the rows.
+fn folder_menu(
+    menu: gpui_component::menu::PopupMenu,
+    focus: &gpui::FocusHandle,
+    can_paste: bool,
+    show_hidden: bool,
+) -> gpui_component::menu::PopupMenu {
+    menu.action_context(focus.clone())
+        .menu("New folder", Box::new(actions::NewFolder))
+        .menu("New file", Box::new(actions::NewFile))
+        .menu_with_enable("Paste", Box::new(actions::Paste), can_paste)
+        .separator()
+        .menu("Copy address", Box::new(actions::CopyAddress))
+        .menu("Refresh", Box::new(actions::Refresh))
+        .menu_with_check(
+            "Show hidden files",
+            show_hidden,
+            Box::new(actions::ToggleHiddenFiles),
+        )
 }
 
 impl FileBrowser {

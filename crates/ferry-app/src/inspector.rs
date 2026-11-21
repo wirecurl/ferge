@@ -170,10 +170,13 @@ impl Inspector {
                         cx.write_to_clipboard(ClipboardItem::new_string(address.clone()));
                     }),
             )
+            // A link's own bits mean nothing, and changing them would change
+            // the target's instead.
             .children(
                 entry
                     .metadata
                     .permissions
+                    .filter(|_| entry.kind() != EntryKind::Symlink)
                     .map(|mode| self.render_permissions(&path, mode, cx)),
             )
     }

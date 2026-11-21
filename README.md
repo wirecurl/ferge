@@ -5,9 +5,10 @@ A fast file transfer client for Linux and macOS, written in Rust with
 network and disk operation off the UI thread, so folders with 100,000 entries scroll, sort and
 filter without dropping a frame.
 
-Status: **Phase 3** (see [PLAN.md](PLAN.md)). Browsing, file operations and transfers between
-this computer and SFTP servers work, with favorites, history and saved passwords; further
-protocols and sync follow in later phases.
+Status: **pre-release**, working towards 0.1.0 (see [PLAN.md](PLAN.md) and
+[CHANGELOG.md](CHANGELOG.md)). Browsing, previews, file operations and transfers between this
+computer and SFTP servers work, with favorites, history, saved passwords and working as root;
+FTP/FTPS, S3, WebDAV and sync follow in later phases.
 
 The window follows the dual-pane concept of classic file transfer clients: this computer on
 the left, a server on the right. Each side switches between its files and a server panel with
@@ -62,8 +63,19 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
 
 ## Install
 
-Requires Rust 1.99 or newer and, on Linux, the usual GPUI dependencies (Vulkan, Wayland or X11,
-fontconfig).
+Building needs [rustup](https://rustup.rs/), which installs the compiler version pinned in
+`rust-toolchain.toml` by itself. On Linux, ferge also needs a Vulkan driver and these libraries:
+
+```sh
+# Arch
+sudo pacman -S --needed libxkbcommon libxkbcommon-x11 wayland fontconfig freetype2 libxcb \
+    vulkan-icd-loader
+# Debian, Ubuntu
+sudo apt install pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+    libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev libvulkan1
+```
+
+Then:
 
 ```sh
 cargo install --locked --path crates/ferge-app
@@ -149,8 +161,6 @@ mono-font = "JetBrains Mono" # fixed-width text; default: the desktop's
 On Linux, "the desktop's" fonts come from the XDG desktop portal (the GNOME interface settings
 that every portal backend provides), including the text scaling factor.
 
-
-
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for build, test and benchmark commands. In short:
@@ -158,8 +168,12 @@ See [CLAUDE.md](CLAUDE.md) for build, test and benchmark commands. In short:
 ```sh
 cargo test --workspace
 ./testserver/up.sh && cargo test --workspace -- --include-ignored
+cargo deny check                 # licenses and security advisories of all dependencies
 cargo build --release && cargo run --release -p ferge-bench
 ```
+
+CI runs formatting, clippy, the tests, the SFTP integration tests against the test server and
+`cargo deny` on every push to `main` and every pull request, and the macOS build on `main`.
 
 The workspace has three crates: `ferge-core` (protocols, listings; no UI), `ferge-app` (GPUI
 application) and `ferge-bench` (performance budget checks).

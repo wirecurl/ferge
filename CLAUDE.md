@@ -21,7 +21,11 @@ cargo build --release            # release build
 cargo test --workspace           # all tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
+cargo deny check                 # licenses, advisories, sources (cargo install --locked cargo-deny@0.22.0)
 ```
+
+The compiler is pinned in `rust-toolchain.toml`; CI (`.github/workflows/ci.yml`) runs all of
+the above plus the SFTP integration tests. Actions in workflows are pinned to commit SHAs.
 
 ## Test server
 

@@ -20,6 +20,8 @@ gpui = { package = "gpui-pre", version = "=0.3.12" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["wayland", "x11", "font-kit"] }
 gpui-component = { version = "=0.10.0" }
 gpui-component-assets = { package = "gpui-kit-assets", version = "=0.10.0" }
+# Window-wide text selection (what gpui-component's Root already mounts).
+gpui-base = { version = "=0.10.0" }
 
 # Async runtime and protocol stack.
 tokio = { version = "=1.54.1" }

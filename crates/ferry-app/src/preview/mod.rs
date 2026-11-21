@@ -31,6 +31,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, SvgRenderer,
     Task, UniformListScrollHandle, WeakEntity, Window, div, img, relative, uniform_list,
 };
+use gpui_base::SelectableText;
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 
 use self::document::DocumentView;
@@ -42,6 +43,9 @@ use crate::file_type::FileType;
 use crate::style::{self, ControlSize, IconButton, TypeScale as _, em};
 use crate::{actions, format, runtime};
 
+/// Lines per block of selectable text. Text is selected and copied within
+/// and across blocks; blocks keep the list of lines virtual.
+const CHUNK: usize = 64;
 /// Lines shown at most; longer files end with a note.
 const LINE_LIMIT: usize = 10_000;
 /// Characters shown of a line at most.
@@ -58,7 +62,9 @@ enum Content {
     Nothing,
     Loading,
     Text {
-        lines: Arc<[SharedString]>,
+        /// The lines in blocks of [`CHUNK`], each one selectable text.
+        chunks: Arc<[SharedString]>,
+        lines: usize,
         /// More of the file exists than is shown.
         cut: bool,
     },
@@ -77,7 +83,8 @@ enum Content {
 /// What loading produced, handed from the background to the UI thread.
 enum Loaded {
     Text {
-        lines: Arc<[SharedString]>,
+        chunks: Arc<[SharedString]>,
+        lines: usize,
         cut: bool,
     },
     Image(Arc<RenderImage>, Option<&'static str>),
@@ -196,7 +203,7 @@ impl Preview {
 
     fn show(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
         let content = match loaded {
-            Loaded::Text { lines, cut } => Content::Text { lines, cut },
+            Loaded::Text { chunks, lines, cut } => Content::Text { chunks, lines, cut },
             Loaded::Image(image, note) => Content::Image { image, note },
             Loaded::Sheets(grids) => Content::Sheets(SheetView::new(grids)),
             Loaded::Document(document) => Content::Document(DocumentView::new(document)),
@@ -319,7 +326,11 @@ fn decode(read: Read, svg: &SvgRenderer) -> Loaded {
         ),
         Kind::Text => text_lines(&head).map_or_else(
             || unavailable("This file is not text."),
-            |(lines, cut)| Loaded::Text { lines, cut },
+            |(lines, cut)| Loaded::Text {
+                chunks: chunks(&lines),
+                lines: lines.len(),
+                cut,
+            },
         ),
         Kind::Delimited(delimiter) => {
             let text = String::from_utf8_lossy(&head.bytes);
@@ -389,6 +400,14 @@ fn text_lines(head: &Head) -> Option<(Arc<[SharedString]>, bool)> {
         lines.push(line.into());
     }
     Some((lines.into(), cut))
+}
+
+/// The lines joined into blocks of [`CHUNK`] lines.
+fn chunks(lines: &[SharedString]) -> Arc<[SharedString]> {
+    lines
+        .chunks(CHUNK)
+        .map(|chunk| SharedString::from(chunk.join("\n")))
+        .collect()
 }
 
 /// Runs `action` when dropped.
@@ -522,19 +541,20 @@ impl Preview {
             Content::Sheets(view) => view.render(cx),
             Content::Document(view) => view.render(cx),
             Content::Pages(view) => view.render(window, cx),
-            Content::Text { lines, cut } => self.render_text(lines, *cut, cx),
+            Content::Text { chunks, lines, cut } => self.render_text(chunks, *lines, *cut, cx),
         }
     }
 
     fn render_text(
         &self,
-        lines: &Arc<[SharedString]>,
+        chunks: &Arc<[SharedString]>,
+        lines: usize,
         cut: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
         let (muted, mono) = (theme.muted_foreground, theme.mono_font_family.clone());
-        let shown = Arc::clone(lines);
+        let shown = Arc::clone(chunks);
         let note = cut.then(|| {
             div()
                 .px(style::BAR_PADDING)
@@ -542,33 +562,44 @@ impl Preview {
                 .flex_shrink_0()
                 .text_small()
                 .text_color(muted)
-                .child(format!(
-                    "Showing the first {} lines.",
-                    format::count(lines.len())
-                ))
+                .child(format!("Showing the first {} lines.", format::count(lines)))
         });
         v_flex()
             .flex_1()
             .min_h_0()
             .child(
-                uniform_list("preview-lines", lines.len(), move |range, _, _| {
+                uniform_list("preview-lines", chunks.len(), move |range, _, _| {
                     range
                         .map(|index| {
+                            let first = index * CHUNK + 1;
+                            let last = (first + CHUNK - 1).min(lines);
+                            let numbers = (first..=last)
+                                .map(|number| number.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             h_flex()
-                                .h(em(1.5))
+                                .items_start()
                                 .gap_3()
                                 .font_family(mono.clone())
                                 .text_small()
+                                .line_height(em(1.5))
                                 .whitespace_nowrap()
+                                .overflow_hidden()
                                 .child(
                                     div()
                                         .w(em(3.5))
                                         .flex_shrink_0()
                                         .text_right()
                                         .text_color(muted)
-                                        .child((index + 1).to_string()),
+                                        .child(numbers),
                                 )
-                                .child(shown[index].clone())
+                                .child(
+                                    SelectableText::new(
+                                        ("preview-text", index),
+                                        shown[index].clone(),
+                                    )
+                                    .document_order(index as u64),
+                                )
                         })
                         .collect()
                 })
@@ -584,7 +615,82 @@ impl Preview {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{
+        AppContext as _, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point,
+        px,
+    };
+    use gpui_base::TextSelectionLayer;
+
     use super::*;
+
+    /// The preview over a window, with the selection layer Root provides.
+    struct Host(Entity<Preview>);
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .relative()
+                .child(TextSelectionLayer)
+                .child(self.0.clone())
+        }
+    }
+
+    fn drag(cx: &mut VisualTestContext, from: gpui::Point<Pixels>, to: gpui::Point<Pixels>) {
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn previewed_text_can_be_selected(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let lines: Vec<SharedString> = ["alpha beta", "", "gamma"]
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
+        let preview = cx.new(|_| {
+            let mut preview = Preview::new();
+            preview.content = Content::Text {
+                chunks: chunks(&lines),
+                lines: lines.len(),
+                cut: false,
+            };
+            preview
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host(preview.clone()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        // Find the first line: the card is centered, the text is in it,
+        // right of the line numbers.
+        let (viewport, rem) = cx.update(|window, _| (window.viewport_size(), window.rem_size()));
+        let x = viewport.width * 0.1 + style::BAR_PADDING.to_pixels(rem) + em(4.5).to_pixels(rem);
+        let top = (0_u16..400)
+            .map(|step| viewport.height * 0.07 + px(f32::from(step)))
+            .find(|&y| {
+                // Hit testing follows the pointer.
+                cx.simulate_mouse_move(point(x, y), None, Modifiers::default());
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                    gpui_base::TextSelection::is_selectable_at(point(x, y), window, cx)
+                })
+            })
+            .expect("the text is shown");
+        let line = em(1.5).to_pixels(rem);
+        drag(
+            cx,
+            point(x, top + line * 0.5),
+            point(viewport.width * 0.85, top + line * 2.5),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert_eq!(
+                gpui_base::TextSelection::selected_text(window, cx),
+                "alpha beta\n\ngamma"
+            );
+        });
+    }
 
     fn head(text: &[u8], truncated: bool) -> Head {
         Head {

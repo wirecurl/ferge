@@ -34,6 +34,7 @@ use crate::session::{ConnectRequest, Session, SessionContext, SessionEvent};
 use crate::style::TypeScale as _;
 use crate::transfers::{TransferPanel, Transfers};
 use crate::vault::Vault;
+use gpui_base::TextSelection;
 
 /// Key context of the whole window.
 const WORKSPACE_CONTEXT: &str = "Workspace";
@@ -672,18 +673,36 @@ impl Workspace {
         self.sync_active(window, cx);
     }
 
-    fn on_preview(&mut self, _: &actions::Preview, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_preview(&mut self, _: &actions::Preview, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_open {
+            TextSelection::clear(window, cx);
+        }
         self.set_preview_open(!self.preview_open, cx);
+    }
+
+    /// With the preview open, copying takes the text selected in it; without
+    /// a selection, the files selected in the list are copied as always.
+    fn on_copy_text(&mut self, _: &actions::Copy, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.preview_open {
+            return;
+        }
+        let text = TextSelection::selected_text(window, cx);
+        if text.trim().is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        cx.stop_propagation();
     }
 
     /// Escape that nothing inside wanted closes the preview.
     fn on_clear_filter(
         &mut self,
         _: &actions::ClearFilter,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.preview_open {
+            TextSelection::clear(window, cx);
             self.set_preview_open(false, cx);
         }
     }
@@ -811,6 +830,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_focus_right))
             .on_action(cx.listener(Self::on_copy_to_other_pane))
             .on_action(cx.listener(Self::on_preview))
+            .capture_action(cx.listener(Self::on_copy_text))
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(
                 cx.listener(|this, _: &ActivateTab1, window, cx| this.activate(0, window, cx)),

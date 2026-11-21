@@ -6,14 +6,17 @@ use std::sync::Arc;
 use ferry_core::document::text::{Block, Document};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, IntoElement, ListAlignment, ListState, ParentElement as _, SharedString,
-    Styled as _, div, list, px,
+    AnyElement, App, IntoElement, ListAlignment, ListState, ParentElement as _, Styled as _, div,
+    list, px,
 };
+use gpui_base::SelectableText;
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::format;
 use crate::style::{self, TypeScale as _, em};
 
+/// Pieces a block may have (table cells); keeps text in reading order.
+const PARTS: usize = 1 << 16;
 /// How wide text runs at most, for comfortable reading.
 const MEASURE: f32 = 42.0;
 
@@ -48,7 +51,7 @@ impl DocumentView {
         let last = blocks.len() - 1;
         let truncated = self.truncated;
         let content = list(self.list.clone(), move |index, _, cx| {
-            let block = render_block(&blocks[index], index == 0, cx);
+            let block = render_block(&blocks[index], index, cx);
             let end = (index == last && truncated).then(|| {
                 div()
                     .pt(em(1.))
@@ -78,7 +81,8 @@ impl DocumentView {
     }
 }
 
-fn render_block(block: &Block, first: bool, cx: &App) -> AnyElement {
+fn render_block(block: &Block, index: usize, cx: &App) -> AnyElement {
+    let first = index == 0;
     let theme = cx.theme();
     let (muted, border) = (theme.muted_foreground, theme.border);
     match block {
@@ -86,12 +90,12 @@ fn render_block(block: &Block, first: bool, cx: &App) -> AnyElement {
             .pt(if first { em(0.) } else { em(1.) })
             .pb(em(0.375))
             .text_heading(*level)
-            .child(SharedString::from(text.clone()))
+            .child(selectable(index, 0, text))
             .into_any_element(),
         Block::Paragraph(text) => div()
             .pb(em(0.625))
             .line_height(em(1.5))
-            .child(SharedString::from(text.clone()))
+            .child(selectable(index, 0, text))
             .into_any_element(),
         Block::Item { depth, text } => h_flex()
             .items_start()
@@ -105,21 +109,16 @@ fn render_block(block: &Block, first: bool, cx: &App) -> AnyElement {
                     .text_color(muted)
                     .child("•"),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(SharedString::from(text.clone())),
-            )
+            .child(div().flex_1().min_w_0().child(selectable(index, 0, text)))
             .into_any_element(),
         Block::Table(rows) => {
             let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
             style::group(cx)
                 .my(em(0.5))
                 .text_small()
-                .children(rows.iter().enumerate().map(|(index, row)| {
-                    style::divided(h_flex().items_start(), index, cx).children((0..columns).map(
-                        |column| {
+                .children(rows.iter().enumerate().map(|(row_index, row)| {
+                    style::divided(h_flex().items_start(), row_index, cx).children(
+                        (0..columns).map(|column| {
                             div()
                                 .flex_1()
                                 .min_w_0()
@@ -127,11 +126,13 @@ fn render_block(block: &Block, first: bool, cx: &App) -> AnyElement {
                                 .py(em(0.375))
                                 // Cells after the first are set off by a line.
                                 .when(column > 0, |cell| cell.border_l_1().border_color(border))
-                                .child(SharedString::from(
-                                    row.get(column).cloned().unwrap_or_default(),
+                                .child(selectable(
+                                    index,
+                                    row_index * columns + column,
+                                    row.get(column).map_or("", String::as_str),
                                 ))
-                        },
-                    ))
+                        }),
+                    )
                 }))
                 .into_any_element()
         }
@@ -145,4 +146,11 @@ fn render_block(block: &Block, first: bool, cx: &App) -> AnyElement {
             .child(div().flex_1().h(px(1.)).bg(border))
             .into_any_element(),
     }
+}
+
+/// Text of the document that can be selected and copied. `part` tells the
+/// pieces of one block apart, such as the cells of a table.
+fn selectable(block: usize, part: usize, text: &str) -> SelectableText {
+    SelectableText::new(("preview-block", block * PARTS + part), text.to_owned())
+        .document_order((block * PARTS + part) as u64)
 }

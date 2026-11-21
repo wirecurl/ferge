@@ -10,6 +10,7 @@ use gpui::{
     ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _,
     UniformListScrollHandle, div, uniform_list,
 };
+use gpui_base::SelectableText;
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use super::Preview;
@@ -230,7 +231,15 @@ fn render_grid(
                         let numeric = is_number(&text);
                         cell(width, colors.line)
                             .when(numeric, gpui::Styled::justify_end)
-                            .child(div().min_w_0().truncate().child(text))
+                            .child(
+                                div().min_w_0().truncate().child(
+                                    SelectableText::new(
+                                        ("preview-cell", index * COLUMN_LIMIT + column),
+                                        text,
+                                    )
+                                    .document_order((index * COLUMN_LIMIT + column) as u64),
+                                ),
+                            )
                     }))
             })
             .collect()

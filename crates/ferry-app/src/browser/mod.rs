@@ -629,6 +629,22 @@ impl FileBrowser {
         }
     }
 
+    /// The entries shown, in their order.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &Entry> {
+        (0..self.view.len()).filter_map(|index| self.view.get(index))
+    }
+
+    /// Selects the entry `name` and scrolls it into view, clearing a filter
+    /// that hides it.
+    pub(crate) fn reveal(&mut self, name: &EntryName, cx: &mut Context<Self>) {
+        if self.view.position(name.as_str()).is_none() && !self.filter.is_empty() {
+            self.set_filter(String::new(), cx);
+        }
+        if let Some(index) = self.view.position(name.as_str()) {
+            self.select(index, cx);
+        }
+    }
+
     pub(crate) fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.marked.clear();
         self.anchor = Some(index);

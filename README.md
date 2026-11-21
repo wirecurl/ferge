@@ -103,6 +103,8 @@ ferry -F ./ssh_config myserver          # use another SSH client configuration
 | Ctrl+J | ⌘J | show or hide transfers |
 | Ctrl+T / Ctrl+W | ⌘T / ⌘W | new tab / close tab |
 | Ctrl+Tab, Ctrl+PgDn / Ctrl+Shift+Tab, Ctrl+PgUp | Ctrl+Tab, ⌘⇧] / Ctrl+Shift+Tab, ⌘⇧[ | next / previous tab |
+| Ctrl+K | ⌘K | command palette: commands, servers, tabs and the files of open folders |
+| Space | Space | preview the selected file (while no filter is typed) |
 | Ctrl+, | ⌘, | settings |
 
 In the server panel, type to search, use ↑ ↓ and press Enter to connect (Ctrl+Enter: new tab).

@@ -6,30 +6,6 @@ use gpui::Hsla;
 use gpui_component::Theme;
 use gpui_component_assets::IconName;
 
-// The icons used here beyond those gpui-component ships. Only these are
-// embedded, not the whole icon catalog.
-gpui_component_assets::icon_assets!(
-    pub(crate) FileTypeIcons,
-    [
-        FileArchive,
-        FileBraces,
-        FileCode,
-        FileCog,
-        FileImage,
-        FileKey,
-        FileLock,
-        FileMusic,
-        FileSpreadsheet,
-        FileTerminal,
-        FileVideoCamera,
-        Disc,
-        Package,
-        Presentation,
-        Link,
-        FileQuestionMark,
-    ]
-);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FileType {
     Folder,
@@ -68,6 +44,31 @@ enum Tint {
 }
 
 impl FileType {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 21] = [
+        Self::Folder,
+        Self::Link,
+        Self::Special,
+        Self::Pdf,
+        Self::Image,
+        Self::Video,
+        Self::Audio,
+        Self::Archive,
+        Self::Text,
+        Self::Configuration,
+        Self::WebPage,
+        Self::SourceCode,
+        Self::Script,
+        Self::Document,
+        Self::Spreadsheet,
+        Self::Presentation,
+        Self::DiskImage,
+        Self::Package,
+        Self::Key,
+        Self::Lock,
+        Self::File,
+    ];
+
     pub(crate) fn of(name: &str, kind: EntryKind) -> Self {
         match kind {
             EntryKind::Directory => return Self::Folder,

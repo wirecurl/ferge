@@ -3,6 +3,7 @@
 
 mod dialogs;
 mod library;
+mod palette;
 mod toolbar;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -57,8 +58,16 @@ gpui::actions!(
         ToggleInspector,
         /// Moves the keyboard to the search field.
         FocusSearch,
+        /// Opens the command palette, or closes it.
+        TogglePalette,
     ]
 );
+
+/// The commands of the palette, for tests elsewhere.
+#[cfg(test)]
+pub(crate) fn palette_commands() -> Vec<palette::Command> {
+    palette::commands()
+}
 
 /// Registers the key bindings of this module.
 pub(crate) fn bind_keys(cx: &mut App) {
@@ -82,6 +91,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new(primary!("j"), ToggleTransfers, context),
         gpui::KeyBinding::new(primary!("i"), ToggleInspector, context),
         gpui::KeyBinding::new(primary!("f"), FocusSearch, context),
+        gpui::KeyBinding::new(primary!("k"), TogglePalette, context),
     ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([
@@ -153,6 +163,8 @@ pub(crate) struct Workspace {
     preview_open: bool,
     /// The toolbar's search field; it filters the active file browser.
     filter: Entity<InputState>,
+    /// The command palette while it is open.
+    palette: Option<(Entity<crate::palette::Palette>, Subscription)>,
     /// The last problem with the settings that was shown.
     shown_settings_issue: u64,
     /// Background work and subscriptions owned by the window.
@@ -249,6 +261,7 @@ impl Workspace {
             filter,
             tasks: Vec::new(),
             shown_settings_issue: 0,
+            palette: None,
             _subscriptions: vec![appearance, settings_issues, filter_events],
         };
         workspace.tasks = vec![
@@ -772,6 +785,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_focus_right))
             .on_action(cx.listener(Self::on_copy_to_other_pane))
             .on_action(cx.listener(Self::on_preview))
+            .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_clear_filter))
             .bg(background)
             .text_color(foreground)
@@ -807,6 +821,7 @@ impl Render for Workspace {
                         .child(self.transfer_panel.clone()),
                 )
             })
+            .children(self.palette.as_ref().map(|(palette, _)| palette.clone()))
             .children(self.render_dialog(cx))
             .children(self.render_prompt(cx))
     }

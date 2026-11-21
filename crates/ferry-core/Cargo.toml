@@ -16,6 +16,7 @@ dirs.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
+notify.workspace = true
 keyring-core.workspace = true
 russh.workspace = true
 russh-config.workspace = true
@@ -27,10 +28,12 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util.workspace = true
+toml_edit.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
 zbus-secret-service-keyring-store.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

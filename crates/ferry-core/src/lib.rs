@@ -7,6 +7,7 @@
 //!
 //! [`Interaction`]: interaction::Interaction
 
+pub mod desktop;
 pub mod destination;
 pub mod entry;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod ops;
 pub mod path;
 pub mod remote;
 pub mod secrets;
+pub mod settings;
 pub mod transfer;
 
 pub use destination::{Destination, SftpTarget};

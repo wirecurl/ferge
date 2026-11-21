@@ -39,6 +39,12 @@ chacha20poly1305 = { version = "=0.11.0", default-features = false, features = [
 getrandom = "=0.4.3"
 zeroize = "=1.9.2"
 
+# Settings: a hand-editable TOML file that keeps comments, watched for changes.
+toml_edit = { version = "=0.25.19" }
+notify = { version = "=8.2.2" }
+# Desktop integration (the XDG desktop portal) on Linux.
+zbus = { version = "=5.19.0" }
+
 # Support crates.
 anyhow = "=1.0.104"
 base64ct = "=1.8.3"

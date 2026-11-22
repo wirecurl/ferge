@@ -4,7 +4,8 @@
 #   packaging/release.sh version      prints the version from Cargo.toml
 #   packaging/release.sh check TAG    fails unless the tag, Cargo.toml, CHANGELOG.md
 #                                     and the AppStream metainfo agree on the release
-#   packaging/release.sh notes        prints the CHANGELOG.md section of the version
+#   packaging/release.sh notes        prints the release notes: what to download, then the
+#                                     CHANGELOG.md section of the version
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -45,6 +46,25 @@ check)
     ;;
 notes)
     v=$(version)
+    cat <<EOF
+## Download
+
+| System | Package |
+|---|---|
+| macOS 11 or newer, Apple silicon and Intel | \`ferge-$v-macos.dmg\`, or \`brew install --cask wirecurl/tap/ferge\` |
+| Debian, Ubuntu 22.04 or newer | \`ferge_${v}_amd64.deb\`, \`ferge_${v}_arm64.deb\` |
+| Fedora, openSUSE | \`ferge-$v-1.x86_64.rpm\`, \`ferge-$v-1.aarch64.rpm\` |
+| Any Linux with glibc 2.35 or newer | \`ferge-$v-x86_64-linux.tar.gz\`, \`ferge-$v-aarch64-linux.tar.gz\` |
+
+- **macOS:** ferge is not signed with an Apple Developer ID yet, so macOS asks before the first
+  start: allow it under System Settings → Privacy & Security → Open Anyway.
+- **Linux:** ferge draws with Vulkan; Mesa provides a driver for most graphics cards. The
+  tarball unpacks into \`~/.local\` with
+  \`tar -xzf ferge-$v-x86_64-linux.tar.gz -C ~/.local --strip-components=1\`.
+- **Checksums:** \`sha256sum -c SHA256SUMS --ignore-missing\` in the download folder.
+
+## Changes
+EOF
     awk -v heading="## [$v]" '
         index($0, heading) == 1 { inside = 1; next }
         inside && /^## \[/ { exit }

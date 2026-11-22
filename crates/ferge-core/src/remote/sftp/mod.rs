@@ -9,6 +9,7 @@
 //! connection whose SFTP server runs as root (see [`elevate`]).
 
 mod auth;
+mod clock;
 pub(crate) mod config;
 mod elevate;
 mod handler;
@@ -130,22 +131,47 @@ impl SftpRemote {
             "connecting"
         );
 
+        // Questions go through a clock, so that the time limit for
+        // connecting counts only the time ferge waits for the server.
+        let clock = Arc::new(clock::Clock::default());
+        let interaction: Arc<dyn Interaction> = Arc::new(clock::Timed {
+            inner: interaction,
+            clock: Arc::clone(&clock),
+        });
+        let limit = options.handshake_timeout;
+        clock
+            .limit_to(limit, Self::handshake(options, target, interaction))
+            .await
+    }
+
+    /// The part of [`Self::connect`] that talks to the server.
+    async fn handshake(
+        options: SftpOptions,
+        target: ResolvedTarget,
+        interaction: Arc<dyn Interaction>,
+    ) -> Result<Self> {
+        // Like OpenSSH, a HostKeyAlias is used verbatim, without the port.
+        let key_name = target
+            .host_key_alias
+            .clone()
+            .unwrap_or_else(|| host_key_name(&target.hostname, target.port));
+        let known_hosts = KnownHosts {
+            user_files: target.user_known_hosts.clone(),
+            global_files: target.global_known_hosts.clone(),
+        };
+        // Ask for a key type already recorded first, as OpenSSH does, so a
+        // server with several keys does not look like one with a new key.
+        let known_types = known_hosts.recorded_algorithms(&key_name).await;
         let stream = open_transport(&target, options.connect_timeout).await?;
         let failure = HostKeyFailure::default();
         let handler = ClientHandler::new(
-            // Like OpenSSH, a HostKeyAlias is used verbatim, without the port.
-            target
-                .host_key_alias
-                .clone()
-                .unwrap_or_else(|| host_key_name(&target.hostname, target.port)),
-            KnownHosts {
-                user_files: target.user_known_hosts.clone(),
-                global_files: target.global_known_hosts.clone(),
-            },
+            key_name,
+            known_hosts.clone(),
+            target.strict_host_keys,
             Arc::clone(&interaction),
             Arc::clone(&failure),
         );
-        let mut ssh = client::connect_stream(Arc::new(ssh_config()), stream, handler)
+        let mut ssh = client::connect_stream(Arc::new(ssh_config(&known_types)), stream, handler)
             .await
             .map_err(|error| handshake_error(error, &failure))?;
 
@@ -291,8 +317,36 @@ impl DataChannel {
     }
 }
 
-fn ssh_config() -> client::Config {
+/// Host key algorithms in the order they are asked for: those of `known`
+/// first, then the rest. `ssh-rsa` with SHA-1 signatures is left out, as
+/// OpenSSH has done since 8.8; RSA keys are used with SHA-2.
+fn host_key_algorithms(known: &[russh::keys::Algorithm]) -> Vec<russh::keys::Algorithm> {
+    use russh::keys::{Algorithm, HashAlg};
+    let all: Vec<Algorithm> = russh::Preferred::DEFAULT
+        .key
+        .iter()
+        .filter(|algorithm| !matches!(algorithm, Algorithm::Rsa { hash: None }))
+        .cloned()
+        .collect();
+    let is_known = |algorithm: &Algorithm| {
+        known.iter().any(|known| match (known, algorithm) {
+            (Algorithm::Rsa { .. }, Algorithm::Rsa { hash }) => {
+                matches!(hash, Some(HashAlg::Sha256 | HashAlg::Sha512))
+            }
+            (known, algorithm) => known == algorithm,
+        })
+    };
+    let (mut first, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(is_known);
+    first.extend(rest);
+    first
+}
+
+fn ssh_config(known_types: &[russh::keys::Algorithm]) -> client::Config {
     client::Config {
+        preferred: russh::Preferred {
+            key: Cow::Owned(host_key_algorithms(known_types)),
+            ..russh::Preferred::DEFAULT
+        },
         client_id: russh::SshId::Standard(Cow::Borrowed(concat!(
             "SSH-2.0-ferge_",
             env!("CARGO_PKG_VERSION")
@@ -319,13 +373,20 @@ async fn open_transport(
     };
     if let Some(command) = &target.proxy_command {
         // Like OpenSSH, run the command through the shell so quoting works.
+        // The process ends with the connection, also one given up while it
+        // was being made.
         let exec = format!("exec {command}");
-        return russh_config::Stream::proxy_command("/bin/sh", &["-c", &exec])
-            .await
+        let child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", &exec])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
             .map_err(|source| Error::Connect {
                 target: format!("{} (ProxyCommand)", describe()),
                 source,
-            });
+            })?;
+        return Ok(russh_config::Stream::Child(child));
     }
     let connect = tokio::net::TcpStream::connect((target.hostname.as_str(), target.port));
     let tcp = tokio::time::timeout(timeout, connect)
@@ -713,5 +774,57 @@ impl Remote for SftpRemote {
             .await
             .map(drop)
             .map_err(|error| sftp_error(path, error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use russh::keys::{Algorithm, EcdsaCurve, HashAlg};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_silent_server_times_out() {
+        // Accepts the connection, then says nothing, not even a banner.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let silent = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(socket);
+        });
+        let mut options = SftpOptions::new("127.0.0.1");
+        options.port = Some(port);
+        options.ssh_config = SshConfigSource::Disabled;
+        options.handshake_timeout = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let result =
+            SftpRemote::connect(options, Arc::new(crate::interaction::NonInteractive)).await;
+        assert!(matches!(result, Err(Error::Timeout(_))), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        silent.abort();
+    }
+
+    #[test]
+    fn host_key_algorithms_put_recorded_types_first_and_leave_out_sha1() {
+        let none = host_key_algorithms(&[]);
+        assert_eq!(none.first(), Some(&Algorithm::Ed25519));
+        assert!(!none.contains(&Algorithm::Rsa { hash: None }));
+        assert!(none.contains(&Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512)
+        }));
+
+        let ecdsa = Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        };
+        let known = host_key_algorithms(std::slice::from_ref(&ecdsa));
+        assert_eq!(known.first(), Some(&ecdsa));
+        assert_eq!(known.len(), none.len());
+
+        // An RSA key in known_hosts is recorded as `ssh-rsa`; it is asked
+        // for with SHA-2 signatures.
+        let rsa = host_key_algorithms(&[Algorithm::Rsa { hash: None }]);
+        assert!(matches!(rsa[0], Algorithm::Rsa { hash: Some(_) }));
+        assert!(!rsa.contains(&Algorithm::Rsa { hash: None }));
     }
 }

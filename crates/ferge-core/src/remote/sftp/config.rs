@@ -65,6 +65,9 @@ pub struct SftpOptions {
     pub known_hosts: KnownHostsSource,
     /// Upper bound for establishing the TCP connection.
     pub connect_timeout: Duration,
+    /// Upper bound for the whole connection up to a ready SFTP session, not
+    /// counting the time spent answering questions (host key, passwords).
+    pub handshake_timeout: Duration,
 }
 
 impl SftpOptions {
@@ -81,6 +84,7 @@ impl SftpOptions {
             ssh_config: SshConfigSource::default(),
             known_hosts: KnownHostsSource::default(),
             connect_timeout: Duration::from_secs(15),
+            handshake_timeout: Duration::from_secs(60),
         }
     }
 
@@ -146,6 +150,23 @@ pub(crate) struct ResolvedTarget {
     pub user_known_hosts: Vec<PathBuf>,
     /// Read-only, system-wide known_hosts files.
     pub global_known_hosts: Vec<PathBuf>,
+    /// `StrictHostKeyChecking`: what happens with a host key that is not
+    /// recorded. A changed key is refused whatever this says.
+    pub strict_host_keys: StrictHostKeys,
+}
+
+/// `StrictHostKeyChecking`, as far as it applies to keys that are not
+/// recorded yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StrictHostKeys {
+    /// Ask (OpenSSH's `ask`, and ferge's choice for `no` and `off`, which
+    /// would otherwise accept any key unseen).
+    #[default]
+    Ask,
+    /// `yes`: refuse keys that are not recorded, without asking.
+    Refuse,
+    /// `accept-new`: record new keys without asking.
+    AcceptNew,
 }
 
 impl ResolvedTarget {
@@ -179,6 +200,41 @@ pub(crate) fn resolve(options: &SftpOptions) -> Result<ResolvedTarget> {
     }
     target.identities_only = lookup_option(&normalized, &options.host, "identitiesonly")
         .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
+    target.strict_host_keys =
+        match lookup_option(&normalized, &options.host, "stricthostkeychecking")
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("yes") => StrictHostKeys::Refuse,
+            Some("accept-new") => StrictHostKeys::AcceptNew,
+            _ => StrictHostKeys::Ask,
+        };
+    if matches!(options.known_hosts, KnownHostsSource::Default)
+        && let Some(value) = lookup_option(&normalized, &options.host, "globalknownhostsfile")
+    {
+        let local_user = local_user_name();
+        let home_text = home
+            .as_deref()
+            .map(|home| home.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let tokens = Tokens {
+            alias: &target.alias,
+            hostname: &target.hostname,
+            port: target.port,
+            remote_user: &target.user,
+            local_user: &local_user,
+            home: &home_text,
+        };
+        let files = if value.eq_ignore_ascii_case("none") {
+            Vec::new()
+        } else {
+            value
+                .split_whitespace()
+                .map(|file| expand_path(file, &tokens, home.as_deref()))
+                .collect()
+        };
+        target.global_known_hosts = files;
+    }
     Ok(target)
 }
 
@@ -355,6 +411,7 @@ fn build_target(
         host_key_alias: None,
         user_known_hosts,
         global_known_hosts,
+        strict_host_keys: StrictHostKeys::Ask,
     })
 }
 
@@ -461,23 +518,7 @@ pub(crate) fn is_alias_char(c: char) -> bool {
     is_host_char(c) || matches!(c, '/' | '+' | '~')
 }
 
-/// Unicode format characters that change how text is shown without being
-/// visible themselves: bidirectional controls, zero-width characters, the
-/// soft hyphen and the byte order mark.
-pub(crate) fn is_invisible_format_char(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00AD}'
-            | '\u{061C}'
-            | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-    )
-}
+pub(crate) use crate::interaction::is_invisible_format_char;
 
 /// Characters that are inert in a POSIX shell word.
 fn is_shell_safe_char(c: char) -> bool {
@@ -931,6 +972,34 @@ Match host box
             target.proxy_command.as_deref(),
             Some("nc ok-host.example 22")
         );
+    }
+
+    #[test]
+    fn host_key_checking_and_global_known_hosts() {
+        let target = resolve_text(
+            "Host strict\n  StrictHostKeyChecking yes\n  GlobalKnownHostsFile /etc/a %h-b\n\
+             Host new\n  StrictHostKeyChecking accept-new\n  GlobalKnownHostsFile none\n\
+             Host lax\n  StrictHostKeyChecking no\n",
+            &SftpOptions::new("strict"),
+        );
+        assert_eq!(target.strict_host_keys, StrictHostKeys::Refuse);
+        assert_eq!(
+            target.global_known_hosts,
+            [PathBuf::from("/etc/a"), PathBuf::from("strict-b")]
+        );
+        let target = resolve_text(
+            "Host new\n  StrictHostKeyChecking accept-new\n  GlobalKnownHostsFile none\n",
+            &SftpOptions::new("new"),
+        );
+        assert_eq!(target.strict_host_keys, StrictHostKeys::AcceptNew);
+        assert_eq!(target.global_known_hosts, Vec::<PathBuf>::new());
+        // `no` would accept any unseen key; ferge keeps asking.
+        let target = resolve_text(
+            "Host lax\n  StrictHostKeyChecking no\n",
+            &SftpOptions::new("lax"),
+        );
+        assert_eq!(target.strict_host_keys, StrictHostKeys::Ask);
+        assert_eq!(target.global_known_hosts.len(), 2);
     }
 
     #[test]

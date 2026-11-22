@@ -147,3 +147,56 @@ impl Interaction for NonInteractive {
         None
     }
 }
+
+/// Unicode format characters that change how text is shown without being
+/// visible themselves: bidirectional controls, zero-width characters, the
+/// soft hyphen and the byte order mark.
+pub fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
+/// Text a server chose (a prompt, an explanation, a banner) as it may be
+/// shown in ferge's dialogs: no control characters but line breaks, no
+/// invisible formatting characters that could make it look like something
+/// else, and at most `limit` characters, cut with `…`.
+pub fn server_text(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for (count, c) in text
+        .chars()
+        .filter(|c| *c == '\n' || !(c.is_control() || is_invisible_format_char(*c)))
+        .enumerate()
+    {
+        if count == limit {
+            out.push('…');
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_text_is_plain_and_bounded() {
+        assert_eq!(
+            server_text("Code:\n\x1b[31mred\u{202e}", 100),
+            "Code:\n[31mred"
+        );
+        assert_eq!(server_text("abcdef", 3), "abc…");
+        assert_eq!(server_text("abc", 3), "abc");
+    }
+}

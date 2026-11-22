@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use russh::client;
 use russh::keys::{PublicKey, PublicKeyOrCertificate};
 
+use super::config::StrictHostKeys;
 use super::known_hosts::{KnownHosts, Verdict, fingerprint};
 use crate::error::HostKeyError;
 use crate::interaction::{HostKeyDecision, HostKeyPrompt, Interaction};
@@ -17,25 +18,25 @@ pub(crate) struct ClientHandler {
     /// Name under which the host is recorded, e.g. `[host]:2222`.
     host_key_name: String,
     known_hosts: KnownHosts,
+    strict: StrictHostKeys,
     interaction: Arc<dyn Interaction>,
     failure: HostKeyFailure,
-    /// Key accepted during the initial handshake; re-keying must present the same.
-    accepted: Option<PublicKey>,
 }
 
 impl ClientHandler {
     pub(crate) fn new(
         host_key_name: String,
         known_hosts: KnownHosts,
+        strict: StrictHostKeys,
         interaction: Arc<dyn Interaction>,
         failure: HostKeyFailure,
     ) -> Self {
         Self {
             host_key_name,
             known_hosts,
+            strict,
             interaction,
             failure,
-            accepted: None,
         }
     }
 
@@ -51,6 +52,13 @@ impl ClientHandler {
                 file,
                 line,
             }),
+            Verdict::Unknown { .. } if self.strict == StrictHostKeys::Refuse => {
+                Err(HostKeyError::Rejected { host, fingerprint })
+            }
+            Verdict::Unknown { .. } if self.strict == StrictHostKeys::AcceptNew => {
+                tracing::info!(%host, %fingerprint, "recording a new host key (StrictHostKeyChecking accept-new)");
+                self.known_hosts.remember(&host, key).await
+            }
             Verdict::Unknown { other_types_known } => {
                 let prompt = HostKeyPrompt {
                     host: host.clone(),
@@ -88,24 +96,10 @@ impl client::Handler for ClientHandler {
             });
             return Ok(false);
         };
-        if let Some(accepted) = &self.accepted {
-            // Re-key: the server must keep its identity.
-            let same = accepted.key_data() == key.key_data();
-            if !same {
-                self.fail(HostKeyError::Changed {
-                    host: self.host_key_name.clone(),
-                    fingerprint: fingerprint(key),
-                    file: "(current session)".into(),
-                    line: 0,
-                });
-            }
-            return Ok(same);
-        }
+        // russh asks only during the first key exchange; later ones run
+        // inside the session already encrypted to the key accepted here.
         match self.verify(key).await {
-            Ok(()) => {
-                self.accepted = Some(key.clone());
-                Ok(true)
-            }
+            Ok(()) => Ok(true),
             Err(error) => {
                 self.fail(error);
                 Ok(false)

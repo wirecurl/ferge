@@ -26,6 +26,10 @@ use crate::interaction::{Interaction, KeyboardPrompt};
 
 /// How often a secret may be re-entered before giving up on a method.
 const MAX_SECRET_ATTEMPTS: usize = 3;
+/// Rounds of keyboard-interactive questions taken at most; a server that
+/// asks again and again (or asks nothing, over and over) is not followed
+/// forever.
+const MAX_KEYBOARD_ROUNDS: usize = 10;
 
 /// Servers disconnect after `MaxAuthTries` (default 6) failures. Stop offering
 /// agent keys before that so password authentication still gets its turn.
@@ -328,6 +332,7 @@ impl<'a> Authenticator<'a> {
             .await
             .map_err(Self::protocol)?;
         let mut failed_rounds: usize = 0;
+        let mut rounds: usize = 0;
         loop {
             match response {
                 KeyboardInteractiveAuthResponse::Success => return Ok(Step::Success),
@@ -352,6 +357,11 @@ impl<'a> Authenticator<'a> {
                     instructions,
                     prompts,
                 } => {
+                    rounds += 1;
+                    if rounds > MAX_KEYBOARD_ROUNDS {
+                        tracing::debug!("the server kept asking; keyboard-interactive given up");
+                        return Ok(Step::Skipped);
+                    }
                     let answers = if prompts.is_empty() {
                         Vec::new()
                     } else if let Some(answer) =

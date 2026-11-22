@@ -11,13 +11,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use ferge_core::interaction::{
-    Account, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt,
+    Account, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt, server_text,
 };
 use ferge_core::secrets::SecretId;
 use secrecy::SecretString;
 
 use crate::prompts::Prompter;
 use crate::vault::Vault;
+
+/// Characters of each piece of server text shown in a dialog.
+const SERVER_TEXT_LIMIT: usize = 500;
 
 /// A change to the saved secrets, applied after a successful login.
 #[derive(Debug)]
@@ -172,18 +175,27 @@ impl Interaction for UiInteraction {
                 .await
                 .map(|secret| vec![secret]);
         }
-        let title = if name.is_empty() {
-            "Authentication".to_owned()
-        } else {
-            name.to_owned()
-        };
+        // Everything but the title's host comes from the server, which could
+        // word it like one of ferge's own questions (say, for the passphrase
+        // of a key); the dialog says plainly who is asking.
+        let title = format!("{} asks", account.host);
+        let name = server_text(name, SERVER_TEXT_LIMIT);
+        let instructions = server_text(instructions, SERVER_TEXT_LIMIT);
         let mut answers = Vec::with_capacity(prompts.len());
         for prompt in prompts {
-            let message = if instructions.is_empty() {
-                prompt.text.clone()
-            } else {
-                format!("{instructions}\n{}", prompt.text)
-            };
+            let said: Vec<String> = [
+                name.clone(),
+                instructions.clone(),
+                server_text(&prompt.text, SERVER_TEXT_LIMIT),
+            ]
+            .into_iter()
+            .filter(|part| !part.trim().is_empty())
+            .collect();
+            let message = format!(
+                "The server {} says:\n\u{201c}{}\u{201d}",
+                account.host,
+                said.join("\n")
+            );
             let answer = self
                 .prompter
                 .secret(title.clone(), message, prompt.echo, None)

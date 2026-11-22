@@ -91,6 +91,27 @@ impl KnownHosts {
         })
     }
 
+    /// The key types recorded for `name` (revoked keys left out). Files
+    /// that cannot be read count as recording nothing here; [`Self::check`]
+    /// reports them.
+    pub(crate) async fn recorded_algorithms(&self, name: &str) -> Vec<russh::keys::Algorithm> {
+        let mut found = Vec::new();
+        for file in self.user_files.iter().chain(&self.global_files) {
+            let Ok(Some(text)) = read_if_exists(file).await else {
+                continue;
+            };
+            for (_, entry) in parse_entries(&text, file) {
+                if entry.marker().is_none() && entry_matches(&entry, name) {
+                    let algorithm = entry.public_key().algorithm();
+                    if !found.contains(&algorithm) {
+                        found.push(algorithm);
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// Appends `key` for `name` to the first user file.
     ///
     /// `name` must be one literal host key name; anything that known_hosts

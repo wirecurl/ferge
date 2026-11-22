@@ -654,13 +654,22 @@ impl Remote for SftpRemote {
             }
         }
         let channel = self.data().await?;
-        io::open_writer(
+        let opened = io::open_writer(
             Arc::clone(&channel.session),
             path,
             offset,
             channel.chunks.write,
         )
-        .await
+        .await;
+        match opened {
+            // SFTPv3 answers an exclusive create of an existing name with a
+            // generic failure; tell it apart as the trait promises.
+            Err(error) if offset == 0 && self.lstat(path).await.is_ok() => {
+                tracing::debug!(%path, %error, "exclusive create refused: the name exists");
+                Err(Error::AlreadyExists { path: path.clone() })
+            }
+            opened => opened,
+        }
     }
 
     async fn rename(&self, from: &RemotePath, to: &RemotePath) -> Result<()> {

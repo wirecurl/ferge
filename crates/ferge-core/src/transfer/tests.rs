@@ -585,6 +585,41 @@ async fn a_source_that_sends_without_end_fails_instead_of_filling_the_disk() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_a_bounded_list_of_problems() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    std::fs::create_dir(from.path().join("odd")).unwrap();
+    // Sockets are neither files nor folders: each one is a problem.
+    let sockets: Vec<_> = (0..150)
+        .map(|index| {
+            std::os::unix::net::UnixListener::bind(from.path().join(format!("odd/s{index}")))
+                .unwrap()
+        })
+        .collect();
+    let (queue, _events) = TransferQueue::new(DEFAULT_PARALLEL_FILES);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: local(),
+            items: vec![path(&from.path().join("odd"))],
+            target: local(),
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    let done = settled(&queue, id).await;
+    drop(sockets);
+    assert!(done.errors.len() <= 51, "{}", done.errors.len());
+    assert!(
+        done.errors
+            .iter()
+            .any(|error| error.contains("100 more problems")),
+        "{:?}",
+        done.errors.last()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tells_which_connections_transfers_use() {
     let from = tempfile::tempdir().unwrap();

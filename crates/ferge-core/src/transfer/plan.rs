@@ -67,6 +67,35 @@ impl PlannedFile {
     }
 }
 
+/// Problems kept of a scan; the rest are counted. Below the transfer's own
+/// limit on errors, so the count is shown too.
+const PROBLEM_LIMIT: usize = 50;
+
+/// The problems of a scan, the first [`PROBLEM_LIMIT`] of them in full.
+#[derive(Default)]
+struct Problems {
+    kept: Vec<String>,
+    dropped: usize,
+}
+
+impl Problems {
+    fn push(&mut self, problem: String) {
+        if self.kept.len() < PROBLEM_LIMIT {
+            self.kept.push(problem);
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        if self.dropped > 0 {
+            self.kept
+                .push(format!("… and {} more problems", self.dropped));
+        }
+        self.kept
+    }
+}
+
 /// Files and folders one transfer may hold at most. A server that reports
 /// an endless tree (every entry a folder, ever deeper) would otherwise fill
 /// the memory while the plan is made.
@@ -95,7 +124,10 @@ impl Plan {
         same_remote: bool,
     ) -> Result<(Self, Vec<String>)> {
         let mut plan = Self::default();
-        let mut problems = Vec::new();
+        let mut problems = Problems::default();
+        // Every entry looked at counts, also those skipped, so that a
+        // listing of endless skipped names is stopped as well.
+        let mut seen = 0_usize;
         for (item, name) in items {
             // One unreadable item (e.g. a dangling link) must not stop the rest.
             let metadata = match source.stat(item).await {
@@ -138,11 +170,12 @@ impl Plan {
                 // A stable order makes progress and conflicts predictable.
                 entries.sort_by(|a, b| a.name.cmp(&b.name));
                 for entry in entries {
-                    if plan.dirs.len() + plan.files.len() >= PLAN_LIMIT {
+                    seen += 1;
+                    if seen > PLAN_LIMIT {
                         return Err(Error::Remote {
                             path: item.clone(),
                             message: "more than 1,000,000 files and folders, more than one \
-                                      transfer holds"
+                                      transfer goes through"
                                 .into(),
                         });
                     }
@@ -183,7 +216,7 @@ impl Plan {
                 }
             }
         }
-        Ok((plan, problems))
+        Ok((plan, problems.finish()))
     }
 
     pub(super) fn total_bytes(&self) -> u64 {
@@ -272,7 +305,6 @@ pub(super) fn part_path(path: &RemotePath) -> Option<RemotePath> {
     Some(parent.join(&name))
 }
 
-/// Whether `path` is `dir` or lies below it.
 /// The name each item gets in the target folder. A folder that exists
 /// there already is a conflict, asked about once for the folder: merge
 /// into it, skip it, or keep both under a new name. Items skipped are left
@@ -337,6 +369,7 @@ pub(super) async fn top_level_targets(
     Ok(Some(targets))
 }
 
+/// Whether `path` is `dir` or lies below it.
 pub(super) fn is_within(path: &RemotePath, dir: &RemotePath) -> bool {
     path == dir
         || dir.is_root()

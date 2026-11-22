@@ -143,7 +143,7 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
     }
 
     let mut reader = source.read_from(&file.source, offset).await?;
-    let mut writer = target.open_writer(&part, offset).await?;
+    let mut writer = open_partial_file(target, &part, offset).await?;
     lock(&file.state).resume_at = Some(offset);
     // A file may grow while it is read (a log, say), but not without end.
     let most = current
@@ -200,7 +200,7 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
 
 /// Where to start writing the partial file `part`: where an earlier
 /// attempt stopped, if the source is `unchanged` and what was written is
-/// still there, otherwise at 0 with whatever has that name removed.
+/// still there, otherwise at 0.
 async fn start_partial_file(
     target: &dyn Remote,
     file: &PlannedFile,
@@ -222,16 +222,29 @@ async fn start_partial_file(
         },
         _ => 0,
     };
-    if offset == 0 {
-        // A partial file of an earlier attempt, or whatever else has this
-        // name, is removed (a symlink itself, not its target); the new one
-        // is created exclusively.
-        match target.delete_file(part).await {
-            Ok(()) | Err(Error::NotFound { .. }) => {}
-            Err(error) => return Err(error),
-        }
-    }
     Ok(offset)
+}
+
+/// Opens the partial file `part` at `offset`. A new one is created
+/// exclusively; if something has its name already (a partial file of an
+/// earlier attempt, or a symlink someone planted), that is removed, the
+/// link itself and not its target, and the file is created again. Asking
+/// first would cost every file a round trip.
+async fn open_partial_file(
+    target: &dyn Remote,
+    part: &RemotePath,
+    offset: u64,
+) -> Result<Box<dyn crate::remote::FileWriter>> {
+    match target.open_writer(part, offset).await {
+        Err(Error::AlreadyExists { .. }) if offset == 0 => {
+            match target.delete_file(part).await {
+                Ok(()) | Err(Error::NotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            target.open_writer(part, 0).await
+        }
+        result => result,
+    }
 }
 
 /// Where the file goes and whether that replaces an existing file; `None` to

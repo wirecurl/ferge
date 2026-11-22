@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds ferge for distribution and prints the binary's path:
-# target/dist/ferge, or target/TRIPLE/dist/ferge with `--target TRIPLE`.
+# target/dist/ferge, or target/TRIPLE/dist/ferge with `--target TRIPLE`
+# (below CARGO_TARGET_DIR instead of target/ if that is set).
 #
 # Binaries carry the source paths of panic locations, which name the build
 # machine's home directory (and with it the user name) for every dependency.
@@ -31,7 +32,19 @@ home=$(cd "$HOME" && pwd -P)
 sep=$(printf '\037')
 flags="--remap-path-prefix=$home=/home"
 # The directories whose paths must not reach the binary, checked below.
-leaks="$home/.${sep}$root/crates/${sep}$root/target/"
+leaks="$home/.${sep}$root/crates/"
+
+# On macOS, the Metal compiler records the absolute path of the build folder
+# in GPUI's shader library, out of reach of --remap-path-prefix. Release
+# builds there use a CARGO_TARGET_DIR outside every home folder; one inside
+# the home folder or the checkout is checked like the rest.
+target_dir=${CARGO_TARGET_DIR:-$root/target}
+mkdir -p "$target_dir"
+target_dir=$(cd "$target_dir" && pwd -P)
+export CARGO_TARGET_DIR="$target_dir"
+case $target_dir/ in
+"$home"/* | "$root"/*) leaks="$leaks$sep$target_dir/" ;;
+esac
 remap() {
     if [ -d "$1" ]; then
         dir=$(cd "$1" && pwd -P)
@@ -42,16 +55,17 @@ remap() {
 remap "${RUSTUP_HOME:-$home/.rustup}" /rustup
 remap "${CARGO_HOME:-$home/.cargo}" /cargo
 flags="$flags$sep--remap-path-prefix=$root=/ferge"
+flags="$flags$sep--remap-path-prefix=$target_dir=/target"
 export CARGO_ENCODED_RUSTFLAGS="$flags"
 unset RUSTFLAGS
 
 cd "$root"
 if [ -n "$target" ]; then
     cargo build --locked --profile dist -p ferge-app --target "$target" >&2
-    binary="$root/target/$target/dist/ferge"
+    binary="$target_dir/$target/dist/ferge"
 else
     cargo build --locked --profile dist -p ferge-app >&2
-    binary="$root/target/dist/ferge"
+    binary="$target_dir/dist/ferge"
 fi
 
 # Only these exact prefixes: the home directory or the checkout as such can
@@ -62,6 +76,9 @@ set -f
 for leak in $leaks; do
     if LC_ALL=C grep -a -q -F -e "$leak" "$binary"; then
         echo "error: $binary still contains $leak" >&2
+        if [ "$leak" = "$target_dir/" ] && [ "$(uname -s)" = Darwin ]; then
+            echo "On macOS, set CARGO_TARGET_DIR to a folder outside your home folder." >&2
+        fi
         exit 1
     fi
 done

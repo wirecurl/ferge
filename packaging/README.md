@@ -2,7 +2,7 @@
 
 | Path | What |
 |---|---|
-| `build.sh` | Builds the binary that is handed out (`dist` profile), with the build machine's paths rewritten and checked. `--target TRIPLE` for another target. |
+| `build.sh` | Builds the binary that is handed out (`dist` profile), with the build machine's paths rewritten and checked. `--target TRIPLE` for another target. On macOS, `CARGO_TARGET_DIR` must lie outside the home folder: the Metal compiler records it. |
 | `release.sh` | Reads the version, checks that tag, `Cargo.toml`, `CHANGELOG.md` and metainfo agree, prints the release notes. |
 | `publish.sh` | After a release is published: updates the AUR recipes and the Homebrew cask. |
 | `linux/` | Desktop file, AppStream metainfo, icons, and `package.sh` for the tarball, `.deb` and `.rpm` (with [nfpm](https://nfpm.goreleaser.com/)). |

@@ -113,6 +113,10 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # The Metal compiler records the build folder in GPUI's shader library;
+      # outside the runner's home folder it names nobody (see build.sh). The
+      # runner is a fresh machine with a single user.
+      CARGO_TARGET_DIR: /tmp/ferge-target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

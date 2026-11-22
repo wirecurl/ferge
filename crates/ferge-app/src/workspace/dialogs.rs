@@ -331,13 +331,15 @@ impl Workspace {
             return;
         };
         if submit {
-            let password = input.read(cx).value().to_string();
+            // Held as a secret, so the copy is wiped when it goes.
+            let password = SecretString::from(input.read(cx).value().to_string());
             if let Some(confirm) = confirm {
-                let problem = if password.chars().count() < MIN_MASTER_PASSWORD_LEN {
+                let problem = if password.expose_secret().chars().count() < MIN_MASTER_PASSWORD_LEN
+                {
                     Some(format!(
                         "Use at least {MIN_MASTER_PASSWORD_LEN} characters."
                     ))
-                } else if confirm.read(cx).value().as_ref() != password {
+                } else if confirm.read(cx).value().as_ref() != password.expose_secret() {
                     Some("The passwords do not match.".to_owned())
                 } else {
                     None

@@ -138,6 +138,10 @@ impl EncryptedFileStore {
                 "the master password must not be empty".into(),
             ));
         }
+        // The file lock is released before the state is taken, the order
+        // `with_fresh_state` takes them in reverse; holding both here could
+        // deadlock against it.
+        let guard = self.lock_file()?;
         let unlocked = if let Some(data) = self.read_file()? {
             let header = Header::parse(&data)?;
             let key = header.kdf.derive(master, &header.salt)?;
@@ -160,6 +164,7 @@ impl EncryptedFileStore {
             self.write_file(&unlocked)?;
             unlocked
         };
+        drop(guard);
         *self.state() = Some(unlocked);
         Ok(())
     }
@@ -177,6 +182,10 @@ impl EncryptedFileStore {
     /// processes wrote to the file.
     fn with_fresh_state<T>(&self, f: impl FnOnce(&mut Unlocked) -> Result<T>) -> Result<T> {
         let mut state = self.state();
+        // Another ferge may read, change and write the file at the same
+        // time; holding the lock from reading to writing keeps either's
+        // change from being lost.
+        let _guard = self.lock_file()?;
         let unlocked = state.as_mut().ok_or(SecretError::Locked)?;
         if let Some(data) = self.read_file()? {
             let header = Header::parse(&data)?;
@@ -188,6 +197,24 @@ impl EncryptedFileStore {
             unlocked.entries = decrypt(&data, &header, &unlocked.key)?;
         }
         f(unlocked)
+    }
+
+    /// Takes the advisory lock on `<file>.lock` that every ferge holds
+    /// while it reads and writes the store; released when dropped.
+    fn lock_file(&self) -> Result<std::fs::File> {
+        let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        create_private_dir(dir).map_err(|source| self.io_error(source))?;
+        let mut name = self.path.file_name().unwrap_or_default().to_os_string();
+        name.push(".lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options
+            .open(dir.join(name))
+            .map_err(|source| self.io_error(source))?;
+        file.lock().map_err(|source| self.io_error(source))?;
+        Ok(file)
     }
 
     fn read_file(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -335,7 +362,13 @@ fn decrypt(
 }
 
 fn encode_entries(entries: &BTreeMap<String, SecretString>) -> Result<Zeroizing<Vec<u8>>> {
-    let mut plaintext = Zeroizing::new(Vec::new());
+    // Sized exactly up front: growing the buffer would leave copies of the
+    // secrets behind in freed memory that `Zeroizing` never sees.
+    let size = entries
+        .iter()
+        .map(|(account, secret)| 8 + account.len() + secret.expose_secret().len())
+        .sum();
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(size));
     for (account, secret) in entries {
         for field in [account.as_bytes(), secret.expose_secret().as_bytes()] {
             let len = u32::try_from(field.len())
@@ -344,6 +377,7 @@ fn encode_entries(entries: &BTreeMap<String, SecretString>) -> Result<Zeroizing<
             plaintext.extend_from_slice(field);
         }
     }
+    debug_assert_eq!(plaintext.len(), plaintext.capacity());
     Ok(plaintext)
 }
 
@@ -383,6 +417,16 @@ fn fill_random(buffer: &mut [u8]) -> Result<()> {
 
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     if dir.is_dir() {
+        // A folder made earlier, by hand or by an older version, may be
+        // open to others; it holds only ferge's data, so it is closed.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & 0o700))?;
+            }
+        }
         return Ok(());
     }
     let mut builder = std::fs::DirBuilder::new();
@@ -426,6 +470,58 @@ mod tests {
             host: host.into(),
             port: 22,
         }
+    }
+
+    #[test]
+    fn concurrent_stores_keep_each_others_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.bin");
+        drop(fast_store(&path));
+        // Two ferge processes, as far as the file is concerned.
+        let writers: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|prefix| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let store = EncryptedFileStore::new(&path);
+                    store.unlock(&secret("master")).unwrap();
+                    for index in 0..20 {
+                        store
+                            .set(&id(&format!("{prefix}{index}")), &secret("pw"))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let store = EncryptedFileStore::new(&path);
+        store.unlock(&secret("master")).unwrap();
+        for prefix in ["a", "b"] {
+            for index in 0..20 {
+                assert!(
+                    store
+                        .get(&id(&format!("{prefix}{index}")))
+                        .unwrap()
+                        .is_some(),
+                    "{prefix}{index} was lost"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_open_folder_is_closed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("ferge");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+        drop(fast_store(&data.join("secrets.bin")));
+        let mode = std::fs::metadata(&data).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]

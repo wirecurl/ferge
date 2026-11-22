@@ -1,8 +1,8 @@
 #!/bin/sh
 # Starts the SFTP test server on 127.0.0.1:2222 and waits until it is ready.
 #
-#   user ferge, password ferge (sudo with password; ferge-nopasswd and
-#   ferge-nosudo for the other cases)
+#   user ferge, password ferge (sudo with password; ferge-nopasswd,
+#   ferge-sftponly and ferge-nosudo for the other cases)
 #   keys .testserver/id_ed25519 (no passphrase) and
 #        .testserver/id_ed25519_encrypted (passphrase "ferge")
 #   client config .testserver/ssh_config (host alias "ferge-test")

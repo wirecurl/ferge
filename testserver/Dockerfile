@@ -3,15 +3,19 @@
 FROM alpine:3.24
 
 # Working as root: ferge may use sudo with its password, ferge-nopasswd without
-# one, and ferge-nosudo not at all. sftp-server is the program sudo runs.
+# one, ferge-sftponly without one for sftp-server only (with it for anything
+# else), and ferge-nosudo not at all. sftp-server is the program sudo runs.
 RUN apk add --no-cache openssh-server openssh-sftp-server python3 sudo \
     && ssh-keygen -A \
-    && for user in ferge ferge-nopasswd ferge-nosudo; do \
+    && for user in ferge ferge-nopasswd ferge-sftponly ferge-nosudo; do \
            adduser -D -s /bin/sh "$user" && echo "$user:ferge" | chpasswd; \
        done \
     && echo 'ferge ALL=(ALL) ALL' > /etc/sudoers.d/ferge \
     && echo 'ferge-nopasswd ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/ferge-nopasswd \
-    && chmod 0440 /etc/sudoers.d/ferge /etc/sudoers.d/ferge-nopasswd \
+    && printf '%s\n' 'ferge-sftponly ALL=(ALL) ALL' \
+           'ferge-sftponly ALL=(root) NOPASSWD: /usr/lib/ssh/sftp-server' \
+           > /etc/sudoers.d/ferge-sftponly \
+    && chmod 0440 /etc/sudoers.d/ferge /etc/sudoers.d/ferge-nopasswd /etc/sudoers.d/ferge-sftponly \
     && install -d -m 0700 /root/private \
     && echo 'only root can read this' > /root/private/secret.txt
 

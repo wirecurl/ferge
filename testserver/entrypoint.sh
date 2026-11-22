@@ -2,7 +2,7 @@
 # Installs the client keys, creates the fixture tree once and runs sshd.
 set -eu
 
-for user in ferge ferge-nopasswd ferge-nosudo; do
+for user in ferge ferge-nopasswd ferge-sftponly ferge-nosudo; do
     install -d -o "$user" -g "$user" -m 0700 "/home/$user/.ssh"
     if [ -f /etc/ferge/authorized_keys ]; then
         install -o "$user" -g "$user" -m 0600 /etc/ferge/authorized_keys "/home/$user/.ssh/authorized_keys"

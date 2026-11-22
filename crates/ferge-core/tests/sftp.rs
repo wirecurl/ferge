@@ -735,6 +735,32 @@ async fn works_as_root_without_asking_when_sudo_needs_no_password() {
 
 #[tokio::test]
 #[ignore = "requires the test server (./testserver/up.sh)"]
+async fn asks_sudo_about_sftp_server_itself() {
+    // sudo needs a password for everything but sftp-server. A password sent
+    // anyway would reach sftp-server's input; none may be asked for.
+    let dir = tempfile::tempdir().unwrap();
+    let remote = connect(
+        user_options(&dir.path().join("known_hosts"), "ferge-sftponly"),
+        Arc::new(Scripted::accepting()),
+    )
+    .await
+    .expect("connect");
+    let interaction = Arc::new(Scripted::accepting());
+    let root = remote
+        .elevate(Arc::clone(&interaction) as Arc<dyn Interaction>)
+        .await
+        .expect("elevate without a password");
+    assert!(interaction.sudo_retries.lock().unwrap().is_empty());
+    let entries: Vec<_> = root
+        .list(&path("/root/private"))
+        .try_concat()
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
 async fn working_as_root_fails_clearly() {
     let dir = tempfile::tempdir().unwrap();
     let known_hosts = dir.path().join("known_hosts");

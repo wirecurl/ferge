@@ -1,14 +1,17 @@
 //! Working as root: a second set of SFTP channels on the same SSH connection,
 //! served by `sudo sftp-server` instead of the login's SFTP subsystem.
 //!
-//! Nothing has to be set up on the server or typed in by the user. One probe
-//! finds the `sftp-server` program and whether sudo needs a password. A
-//! password is checked with a throwaway `sudo true` first: sudo reads it from
-//! standard input, and on the SFTP channels a wrong one would make sudo read
-//! the SFTP handshake as further attempts. Every channel then starts its own
-//! `sudo -S sftp-server` with the password as the first line of its input;
-//! sudo reads up to the newline and leaves the rest to sftp-server. All
-//! channels open at once, so the password is not kept afterwards.
+//! Nothing has to be set up on the server or typed in by the user. A probe
+//! finds the `sftp-server` program; a second one asks sudo, without a
+//! password, whether running exactly that program would need one (sudoers
+//! may allow it without a password while other commands need one). A
+//! password is checked by running the same program once with no input
+//! first: sudo reads the password from standard input, and on the SFTP
+//! channels a wrong one would make sudo read the SFTP handshake as further
+//! attempts. Every channel then starts its own `sudo -S sftp-server` with
+//! the password as the first line of its input; sudo reads up to the
+//! newline and leaves the rest to sftp-server. All channels open at once,
+//! so the password is not kept afterwards.
 
 use std::time::Duration;
 
@@ -36,6 +39,14 @@ const SFTP_SERVERS: &[&str] = &[
 
 /// Runs sudo with messages in English, so its replies can be told apart.
 const SUDO: &str = "env LC_ALL=C sudo";
+/// Bytes kept of what a command on the server prints on each stream; a
+/// server that prints without end cannot fill ferge's memory.
+const OUTPUT_LIMIT: usize = 64 * 1024;
+/// Characters of a server's explanation shown in an error message.
+const MESSAGE_LIMIT: usize = 200;
+/// Passwords tried before giving up, as sudo itself does; saved passwords
+/// that are tried first count too.
+const PASSWORD_ATTEMPTS: usize = 3;
 
 /// How sudo gets to run a program as root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,8 +62,8 @@ pub(super) enum SudoMode {
 pub(super) struct Probe {
     /// The first executable `sftp-server`.
     pub server: Option<String>,
-    /// `None` when sudo is not installed.
-    pub sudo: Option<SudoMode>,
+    /// Whether sudo is installed.
+    pub sudo: bool,
 }
 
 /// The command a channel runs for an SFTP session as root.
@@ -71,9 +82,7 @@ fn probe_command() -> String {
          for p in $(grep -i \"^[[:space:]]*subsystem[[:space:]][[:space:]]*sftp\" /etc/ssh/sshd_config 2>/dev/null) {candidates}; do \
          case $p in /*) if [ -x \"$p\" ]; then echo \"server $p\"; fi;; esac; \
          done; \
-         if command -v sudo >/dev/null 2>&1; then \
-         if sudo -n -k true >/dev/null 2>&1; then echo \"sudo nopasswd\"; else echo \"sudo password\"; fi; \
-         else echo \"sudo missing\"; fi'"
+         if command -v sudo >/dev/null 2>&1; then echo \"sudo present\"; else echo \"sudo missing\"; fi'"
     )
 }
 
@@ -81,31 +90,56 @@ fn probe_command() -> String {
 pub(super) fn parse_probe(output: &str) -> Probe {
     let mut probe = Probe {
         server: None,
-        sudo: None,
+        sudo: false,
     };
     for line in output.lines() {
         if let Some(path) = line.strip_prefix("server ") {
             if probe.server.is_none() && is_plain_path(path) {
                 probe.server = Some(path.to_owned());
             }
-        } else if let Some(mode) = line.strip_prefix("sudo ") {
-            probe.sudo = match mode {
-                "nopasswd" => Some(SudoMode::NoPassword),
-                "password" => Some(SudoMode::Password),
-                _ => None,
-            };
+        } else if line == "sudo present" {
+            probe.sudo = true;
         }
     }
     probe
 }
 
-/// Whether `path` can go into a command line unquoted: absolute, and only
-/// characters that no shell treats specially.
+/// Whether `path` names an `sftp-server` program and can go into a command
+/// line unquoted: absolute, and only characters that no shell treats
+/// specially. Anything else a server's configuration names (a wrapper, a
+/// shell) is not started as root.
 fn is_plain_path(path: &str) -> bool {
     path.starts_with('/')
+        && path.ends_with("/sftp-server")
         && path
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"/._+-".contains(&byte))
+}
+
+/// The command that asks sudo, without a password and without running
+/// anything that reads input, whether `server` may run as root without one.
+fn password_probe(server: &str) -> String {
+    format!("{SUDO} -n -k -- {server} </dev/null")
+}
+
+/// Whether sudo's answer to [`password_probe`] means a password is needed.
+fn needs_password(stderr: &str) -> bool {
+    stderr.contains("password is required") || stderr.contains("a terminal is required")
+}
+
+/// A server's explanation as it may appear in ferge's messages: one line,
+/// no control or invisible characters, at most [`MESSAGE_LIMIT`] characters.
+fn quoted(message: &str) -> String {
+    let mut out: String = message
+        .chars()
+        .filter(|c| !(c.is_control() || super::config::is_invisible_format_char(*c)))
+        .take(MESSAGE_LIMIT + 1)
+        .collect();
+    if out.chars().count() > MESSAGE_LIMIT {
+        out = out.chars().take(MESSAGE_LIMIT).collect();
+        out.push('…');
+    }
+    format!("\u{201c}{out}\u{201d}")
 }
 
 /// What sudo's reply to a password means.
@@ -139,8 +173,11 @@ pub(super) fn sudo_reply(status: Option<u32>, stderr: &str) -> SudoReply {
         .filter(|line| !line.is_empty() && !lecture(line))
         .map(|line| line.strip_prefix("sudo: ").unwrap_or(line))
         .next()
-        .unwrap_or("it did not say why");
-    SudoReply::Refused(message.trim_end_matches('.').to_owned())
+        .map_or_else(
+            || "it did not say why".to_owned(),
+            |line| quoted(line.trim_end_matches('.')),
+        );
+    SudoReply::Refused(message)
 }
 
 /// The outcome of a command run on the server.
@@ -189,10 +226,8 @@ async fn run(
                     }
                     .into());
                 }
-                ChannelMsg::Data { data } => output.stdout.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { data, ext: 1 } => {
-                    output.stderr.extend_from_slice(&data);
-                }
+                ChannelMsg::Data { data } => keep(&mut output.stdout, &data),
+                ChannelMsg::ExtendedData { data, ext: 1 } => keep(&mut output.stderr, &data),
                 ChannelMsg::ExitStatus { exit_status } => output.status = Some(exit_status),
                 _ => {}
             }
@@ -202,6 +237,12 @@ async fn run(
     tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), work)
         .await
         .map_err(|_| Error::Timeout("running a command on the server"))?
+}
+
+/// Appends `data` to `buffer` up to [`OUTPUT_LIMIT`] bytes.
+fn keep(buffer: &mut Vec<u8>, data: &[u8]) {
+    let room = OUTPUT_LIMIT.saturating_sub(buffer.len());
+    buffer.extend_from_slice(&data[..data.len().min(room)]);
 }
 
 /// Finds out how to run `sftp-server` as root and asks for the password if
@@ -218,12 +259,37 @@ where
     let output = run(ssh, host, &probe_command(), None).await?;
     let probe = parse_probe(&String::from_utf8_lossy(&output.stdout));
     tracing::debug!(?probe, "probed the server for working as root");
-    let mode = probe.sudo.ok_or_else(|| ElevationError::NoSudo {
-        host: host.to_owned(),
-    })?;
+    if !probe.sudo {
+        return Err(ElevationError::NoSudo {
+            host: host.to_owned(),
+        }
+        .into());
+    }
     let server = probe.server.ok_or_else(|| ElevationError::NoSftpServer {
         host: host.to_owned(),
     })?;
+    // Ask about this very program: a sudoers rule may let it run without a
+    // password while everything else needs one, and then a password sent
+    // on the SFTP channels would reach sftp-server instead of sudo.
+    let answer = run(ssh, host, &password_probe(&server), None).await?;
+    let stderr = String::from_utf8_lossy(&answer.stderr);
+    let mode = if answer.status == Some(0) {
+        SudoMode::NoPassword
+    } else if needs_password(&stderr) {
+        SudoMode::Password
+    } else {
+        // Refused outright, e.g. not in the sudoers file.
+        let message = match sudo_reply(answer.status, &stderr) {
+            SudoReply::Refused(message) => message,
+            SudoReply::Accepted | SudoReply::WrongPassword => "it did not say why".to_owned(),
+        };
+        return Err(ElevationError::Refused {
+            host: host.to_owned(),
+            message,
+        }
+        .into());
+    };
+    tracing::debug!(?mode, "asked sudo whether it needs a password");
     if mode == SudoMode::NoPassword {
         return Ok(ElevatedCommand {
             command: format!("{SUDO} -n -- {server}"),
@@ -231,9 +297,19 @@ where
         });
     }
     let mut retry = false;
-    loop {
+    for _ in 0..PASSWORD_ATTEMPTS {
         let password = ask(retry).await.ok_or(ElevationError::Cancelled)?;
-        let check = format!("{SUDO} -S -k -p \"\" -- true");
+        if password.expose_secret().contains(['\n', '\r', '\0']) {
+            // sudo reads one line; the rest would go to sftp-server.
+            return Err(ElevationError::Refused {
+                host: host.to_owned(),
+                message: "a password with a line break cannot be passed to sudo".into(),
+            }
+            .into());
+        }
+        // The program that will run, with no input: it ends at once, and
+        // sudo's answer is the one the SFTP channels will get.
+        let check = format!("{SUDO} -S -k -p \"\" -- {server}");
         let output = run(ssh, host, &check, Some(&password_line(&password))).await?;
         match sudo_reply(output.status, &String::from_utf8_lossy(&output.stderr)) {
             SudoReply::Accepted => {
@@ -254,6 +330,11 @@ where
             }
         }
     }
+    Err(ElevationError::Refused {
+        host: host.to_owned(),
+        message: "the password was wrong three times".into(),
+    }
+    .into())
 }
 
 fn password_line(password: &SecretString) -> Zeroizing<Vec<u8>> {
@@ -315,25 +396,26 @@ mod tests {
     #[test]
     fn probe_prefers_the_first_server_and_reads_sudo() {
         let probe = parse_probe(
-            "server /usr/lib/openssh/sftp-server\nserver /usr/lib/ssh/sftp-server\nsudo password\n",
+            "server /usr/lib/openssh/sftp-server\nserver /usr/lib/ssh/sftp-server\nsudo present\n",
         );
         assert_eq!(
             probe,
             Probe {
                 server: Some("/usr/lib/openssh/sftp-server".into()),
-                sudo: Some(SudoMode::Password),
+                sudo: true,
             }
         );
-        let probe = parse_probe("sudo nopasswd\n");
+        let probe = parse_probe("sudo present\n");
         assert_eq!(probe.server, None);
-        assert_eq!(probe.sudo, Some(SudoMode::NoPassword));
-        assert_eq!(parse_probe("sudo missing\n").sudo, None);
+        assert!(probe.sudo);
+        assert!(!parse_probe("sudo missing\n").sudo);
     }
 
     #[test]
     fn probe_skips_paths_that_would_need_quoting() {
         let probe = parse_probe(
-            "server /opt/my server/sftp-server\nserver /bin/x;rm\nserver /usr/lib/ssh/sftp-server\n",
+            "server /opt/my server/sftp-server\nserver /bin/x;rm\nserver /bin/sh\n\
+             server /usr/lib/ssh/sftp-server\n",
         );
         assert_eq!(probe.server.as_deref(), Some("/usr/lib/ssh/sftp-server"));
     }
@@ -366,11 +448,41 @@ mod tests {
                        This incident has been reported to the administrator.\n";
         assert_eq!(
             sudo_reply(Some(1), lecture),
-            SudoReply::Refused("ferge-nosudo is not in the sudoers file".into())
+            SudoReply::Refused("\u{201c}ferge-nosudo is not in the sudoers file\u{201d}".into())
         );
         assert_eq!(
             sudo_reply(Some(1), "sudo: sorry, you must have a tty to run sudo\n"),
-            SudoReply::Refused("sorry, you must have a tty to run sudo".into())
+            SudoReply::Refused("\u{201c}sorry, you must have a tty to run sudo\u{201d}".into())
         );
+    }
+
+    #[test]
+    fn server_text_is_quoted_short_and_plain() {
+        let long = format!("evil\u{202e}txt\x1b[31m{}", "x".repeat(500));
+        let SudoReply::Refused(message) = sudo_reply(Some(1), &long) else {
+            panic!("refused expected");
+        };
+        assert!(!message.contains('\u{202e}') && !message.contains('\x1b'));
+        assert_eq!(message.chars().count(), MESSAGE_LIMIT + 3);
+        assert!(message.starts_with('\u{201c}') && message.ends_with("…\u{201d}"));
+    }
+
+    #[test]
+    fn output_is_kept_up_to_the_limit() {
+        let mut buffer = Vec::new();
+        keep(&mut buffer, &vec![b'a'; OUTPUT_LIMIT - 10]);
+        keep(&mut buffer, &[b'b'; 100]);
+        keep(&mut buffer, b"more");
+        assert_eq!(buffer.len(), OUTPUT_LIMIT);
+    }
+
+    #[test]
+    fn asks_sudo_about_the_program_itself() {
+        assert_eq!(
+            password_probe("/usr/lib/ssh/sftp-server"),
+            "env LC_ALL=C sudo -n -k -- /usr/lib/ssh/sftp-server </dev/null"
+        );
+        assert!(needs_password("sudo: a password is required\n"));
+        assert!(!needs_password("sudo: user is not in the sudoers file\n"));
     }
 }

@@ -63,5 +63,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.1.0" date="2026-11-22">
+      <url type="details">https://github.com/wirecurl/ferge/releases/tag/v0.1.0</url>
+      <description>
+        <p>The first release.</p>
+      </description>
+    </release>
   </releases>
 </component>

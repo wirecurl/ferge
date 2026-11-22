@@ -7,10 +7,10 @@ A fast file transfer client for Linux and macOS, written in Rust with
 network and disk operation off the UI thread, so folders with 100,000 entries scroll, sort and
 filter without dropping a frame.
 
-Status: **pre-release**, working towards 0.1.0 (see [PLAN.md](PLAN.md) and
-[CHANGELOG.md](CHANGELOG.md)). Browsing, previews, file operations and transfers between this
-computer and SFTP servers work, with favorites, history, saved passwords and working as root;
-FTP/FTPS, S3, WebDAV and sync follow in later phases.
+Status: **0.1.0**, the first release (see [CHANGELOG.md](CHANGELOG.md)). Browsing, previews,
+file operations and transfers between this computer and SFTP servers work, with favorites,
+history, saved passwords and working as root; FTP/FTPS, S3, WebDAV and sync follow in later
+phases (see [PLAN.md](PLAN.md)).
 
 The window follows the dual-pane concept of classic file transfer clients: this computer on
 the left, a server on the right. Each side switches between its files and a server panel with
@@ -65,6 +65,23 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
   or in a settings file.
 
 ## Install
+
+Every release has packages on the [releases page](https://github.com/wirecurl/ferge/releases):
+
+- **macOS** 11 or newer, Apple silicon and Intel: `brew install --cask wirecurl/tap/ferge`, or
+  the `.dmg`. ferge is not signed with an Apple Developer ID yet, so macOS asks before the
+  first start: allow it under System Settings → Privacy & Security → Open Anyway.
+- **Debian, Ubuntu** (22.04 or newer): `sudo apt install ./ferge_0.1.0_amd64.deb`
+- **Fedora, openSUSE**: `sudo dnf install ./ferge-0.1.0-1.x86_64.rpm`, or `sudo zypper install`
+  with the same file.
+- **Arch, CachyOS**: `makepkg -si` in `packaging/aur/ferge` builds the package from source.
+- **Any other Linux** with glibc 2.35 or newer: unpack the tarball into `~/.local`, with
+  `tar -xzf ferge-0.1.0-x86_64-linux.tar.gz -C ~/.local --strip-components=1`.
+
+Packages for aarch64 Linux are there as well. On Linux, ferge draws with Vulkan; Mesa provides a
+driver for most graphics cards.
+
+### From source
 
 Building needs [rustup](https://rustup.rs/), which installs the compiler version pinned in
 `rust-toolchain.toml` by itself. On Linux, ferge also needs a Vulkan driver and these libraries:

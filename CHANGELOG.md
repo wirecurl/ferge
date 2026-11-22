@@ -6,7 +6,9 @@ All notable changes to ferge are listed here. The format follows
 
 ## [Unreleased]
 
-The first release, 0.1.0, is in preparation.
+## [0.1.0] - 2026-11-22
+
+The first release.
 
 ### Added
 
@@ -71,4 +73,5 @@ Hardening from a review of the code before the first release:
   followed through a symlink only in a private folder, and names with hidden characters are
   shown so that they cannot disguise themselves.
 
-[Unreleased]: https://github.com/wirecurl/ferge/commits/main
+[Unreleased]: https://github.com/wirecurl/ferge/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/wirecurl/ferge/releases/tag/v0.1.0

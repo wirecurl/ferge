@@ -10,8 +10,6 @@ use jiff::tz::TimeZone;
 /// Until then dates are shown in UTC.
 static TIME_ZONE: OnceLock<TimeZone> = OnceLock::new();
 
-/// Loads the system time zone. Reads `/etc/localtime`, so call it from a
-/// background thread; formatting afterwards is pure computation.
 /// A file name (or other text from a server) as it is shown: control
 /// characters and invisible formatting characters, such as a right-to-left
 /// override that makes `gnp.exe` read `exe.png`, appear as `�` instead of
@@ -28,6 +26,8 @@ pub(crate) fn shown(name: &str) -> String {
     }
 }
 
+/// Loads the system time zone. Reads `/etc/localtime`, so call it from a
+/// background thread; formatting afterwards is pure computation.
 pub(crate) fn load_time_zone() {
     let _ = TIME_ZONE.set(TimeZone::system());
 }

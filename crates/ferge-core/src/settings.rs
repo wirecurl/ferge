@@ -29,11 +29,11 @@ pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 6.0..=32.0;
 /// write a file in several steps.
 const SETTLE_TIME: Duration = Duration::from_millis(75);
 
-/// Written when the application stores the first setting, so that people who
-/// open the file find out what they can change.
 /// Bytes read of the settings file at most.
 const READ_LIMIT: u64 = 1024 * 1024;
 
+/// Written when the application stores the first setting, so that people who
+/// open the file find out what they can change.
 const TEMPLATE: &str = r#"# ferge settings. Changes take effect as soon as the file is saved.
 # A setting that is left out uses its default.
 #

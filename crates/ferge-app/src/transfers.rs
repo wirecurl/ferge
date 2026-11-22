@@ -529,11 +529,12 @@ fn percent(snapshot: &TransferSnapshot) -> f32 {
 
 /// The first error and how many more there are.
 fn first_error(snapshot: &TransferSnapshot) -> Option<SharedString> {
-    let first = snapshot.errors.first()?;
+    // Errors name paths and quote the server, so they are shown as names are.
+    let first = crate::format::shown(snapshot.errors.first()?);
     let more = snapshot.errors.len() - 1;
     Some(if more > 0 {
         format!("{first} (+{more} more)").into()
     } else {
-        first.clone().into()
+        first.into()
     })
 }

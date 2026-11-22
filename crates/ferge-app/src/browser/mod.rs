@@ -255,7 +255,9 @@ impl FileBrowser {
 
     /// Tells the pane that an operation failed.
     fn report(&self, error: &ferge_core::Error, cx: &mut Context<Self>) {
-        let message = error.to_string();
+        // Errors name paths and quote the server, so they are shown as
+        // names are.
+        let message = crate::format::shown(&error.to_string());
         cx.emit(if self.can_elevate && error.is_permission_denied() {
             BrowserEvent::Denied(message)
         } else {

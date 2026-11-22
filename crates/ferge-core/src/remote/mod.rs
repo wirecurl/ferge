@@ -5,7 +5,10 @@
 //! the tokio runtime; nothing here may block the caller's thread.
 
 pub mod local;
+pub mod offline;
+pub mod server;
 pub mod sftp;
+pub(crate) mod shell;
 
 use std::fmt;
 use std::time::SystemTime;
@@ -63,6 +66,12 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
     /// Whether this is the computer ferge runs on.
     fn is_local(&self) -> bool {
         false
+    }
+
+    /// The server behind this remote, if it can copy and run commands on its
+    /// own (see [`server`]).
+    fn server_side(&self) -> Option<&dyn server::ServerSide> {
+        None
     }
 
     /// The directory a session starts in (the login directory for SFTP).

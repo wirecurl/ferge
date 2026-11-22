@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 use super::handler::ClientHandler;
 use super::{REQUEST_TIMEOUT_SECS, SftpChannel};
 use crate::error::{ElevationError, Error, Result};
+use crate::remote::server::CommandOutput;
 
 /// Where `sftp-server` lives on common systems, tried after the path in
 /// `sshd_config`: Debian and Ubuntu, Fedora and RHEL, Arch and Alpine, macOS
@@ -39,9 +40,6 @@ const SFTP_SERVERS: &[&str] = &[
 
 /// Runs sudo with messages in English, so its replies can be told apart.
 const SUDO: &str = "env LC_ALL=C sudo";
-/// Bytes kept of what a command on the server prints on each stream; a
-/// server that prints without end cannot fill ferge's memory.
-const OUTPUT_LIMIT: usize = 64 * 1024;
 /// Characters of a server's explanation shown in an error message.
 const MESSAGE_LIMIT: usize = 200;
 /// Passwords tried before giving up, as sudo itself does; saved passwords
@@ -187,69 +185,27 @@ pub(super) fn sudo_reply(status: Option<u32>, stderr: &str) -> SudoReply {
     SudoReply::Refused(message)
 }
 
-/// The outcome of a command run on the server.
-struct Output {
-    status: Option<u32>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-/// Runs `command`, feeds it `input` and collects what it prints.
+/// Runs `command` and feeds it `input`; a refusal means the account may not
+/// run commands at all.
 async fn run(
     ssh: &client::Handle<ClientHandler>,
     host: &str,
     command: &str,
     input: Option<&[u8]>,
-) -> Result<Output> {
-    let work = async {
-        let mut channel = ssh
-            .channel_open_session()
-            .await
-            .map_err(|error| Error::protocol("opening an SSH channel failed", error))?;
-        channel
-            .exec(true, command)
-            .await
-            .map_err(|error| Error::protocol("running a command failed", error))?;
-        if let Some(input) = input {
-            channel
-                .data(input)
-                .await
-                .map_err(|error| Error::protocol("running a command failed", error))?;
+) -> Result<CommandOutput> {
+    super::exec::run(
+        ssh,
+        command,
+        input,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+    )
+    .await?
+    .ok_or_else(|| {
+        ElevationError::CommandsRefused {
+            host: host.to_owned(),
         }
-        channel
-            .eof()
-            .await
-            .map_err(|error| Error::protocol("running a command failed", error))?;
-        let mut output = Output {
-            status: None,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        while let Some(message) = channel.wait().await {
-            match message {
-                ChannelMsg::Failure => {
-                    return Err(ElevationError::CommandsRefused {
-                        host: host.to_owned(),
-                    }
-                    .into());
-                }
-                ChannelMsg::Data { data } => keep(&mut output.stdout, &data),
-                ChannelMsg::ExtendedData { data, ext: 1 } => keep(&mut output.stderr, &data),
-                ChannelMsg::ExitStatus { exit_status } => output.status = Some(exit_status),
-                _ => {}
-            }
-        }
-        Ok(output)
-    };
-    tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), work)
-        .await
-        .map_err(|_| Error::Timeout("running a command on the server"))?
-}
-
-/// Appends `data` to `buffer` up to [`OUTPUT_LIMIT`] bytes.
-fn keep(buffer: &mut Vec<u8>, data: &[u8]) {
-    let room = OUTPUT_LIMIT.saturating_sub(buffer.len());
-    buffer.extend_from_slice(&data[..data.len().min(room)]);
+        .into()
+    })
 }
 
 /// Finds out how to run `sftp-server` as root and asks for the password if
@@ -472,15 +428,6 @@ mod tests {
         assert!(!message.contains('\u{202e}') && !message.contains('\x1b'));
         assert_eq!(message.chars().count(), MESSAGE_LIMIT + 3);
         assert!(message.starts_with('\u{201c}') && message.ends_with("…\u{201d}"));
-    }
-
-    #[test]
-    fn output_is_kept_up_to_the_limit() {
-        let mut buffer = Vec::new();
-        keep(&mut buffer, &vec![b'a'; OUTPUT_LIMIT - 10]);
-        keep(&mut buffer, &[b'b'; 100]);
-        keep(&mut buffer, b"more");
-        assert_eq!(buffer.len(), OUTPUT_LIMIT);
     }
 
     #[test]

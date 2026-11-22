@@ -111,7 +111,84 @@ pub(super) struct Plan {
     pub(super) files: Vec<PlannedFile>,
 }
 
+/// A file of a direct job ferge attaches to again, as it recorded it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RecordedFile {
+    pub(super) index: usize,
+    pub(super) source: RemotePath,
+    pub(super) destination: RemotePath,
+    pub(super) size: u64,
+    pub(super) replace: bool,
+    pub(super) offset: u64,
+}
+
+/// A file of a saved transfer as it stood (see [`saved`](super::saved)).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct SavedFile {
+    pub(super) source: RemotePath,
+    pub(super) target: RemotePath,
+    pub(super) size: u64,
+    pub(super) modified: Option<SystemTime>,
+    pub(super) status: FileStatus,
+    pub(super) destination: Option<(RemotePath, bool)>,
+    pub(super) resume_at: Option<u64>,
+}
+
 impl Plan {
+    /// The plan of a saved transfer, as it stood.
+    pub(super) fn restored(dirs: Vec<RemotePath>, files: &[SavedFile]) -> Self {
+        let files = files
+            .iter()
+            .map(|file| {
+                let planned = PlannedFile::new(
+                    file.source.clone(),
+                    file.target.clone(),
+                    file.size,
+                    file.modified,
+                );
+                {
+                    let mut state = lock(&planned.state);
+                    state.status = file.status;
+                    state.destination.clone_from(&file.destination);
+                    state.resume_at = file.resume_at;
+                }
+                planned
+            })
+            .collect();
+        Self { dirs, files }
+    }
+
+    /// The plan of a direct job ferge attaches to again: its files under
+    /// their old numbers, the numbers in between settled already.
+    pub(super) fn recorded(files: &[RecordedFile]) -> Self {
+        let count = files.iter().map(|file| file.index + 1).max().unwrap_or(0);
+        let mut planned: Vec<PlannedFile> = (0..count)
+            .map(|_| {
+                let file = PlannedFile::new(RemotePath::root(), RemotePath::root(), 0, None);
+                lock(&file.state).status = FileStatus::Done;
+                file
+            })
+            .collect();
+        for file in files {
+            let entry = PlannedFile::new(
+                file.source.clone(),
+                file.destination.clone(),
+                file.size,
+                None,
+            );
+            {
+                let mut state = lock(&entry.state);
+                state.destination = Some((file.destination.clone(), file.replace));
+                state.resume_at = Some(file.offset);
+            }
+            planned[file.index] = entry;
+        }
+        Self {
+            dirs: Vec::new(),
+            files: planned,
+        }
+    }
+
     /// Lists `items` on `source` recursively. Returns the plan and problems
     /// that do not stop the transfer (unreadable or skipped folders).
     ///
@@ -321,9 +398,9 @@ pub(super) async fn top_level_targets(
             .ok_or_else(|| Error::InvalidPath(item.as_str().into()))?;
         let target = transfer.target_dir.join(&name);
         let is_folder =
-            matches!(transfer.source.stat(item).await, Ok(metadata) if metadata.is_dir());
+            matches!(transfer.source().stat(item).await, Ok(metadata) if metadata.is_dir());
         let existing = if is_folder {
-            transfer.target.lstat(&target).await.ok()
+            transfer.target().lstat(&target).await.ok()
         } else {
             None
         };
@@ -357,7 +434,7 @@ pub(super) async fn top_level_targets(
             super::ConflictAction::Overwrite => targets.push((item.clone(), name)),
             super::ConflictAction::Skip => {}
             super::ConflictAction::KeepBoth => {
-                let free = super::names::free_name(transfer.target.as_ref(), &target).await?;
+                let free = super::names::free_name(transfer.target().as_ref(), &target).await?;
                 let name = free
                     .file_name()
                     .and_then(|name| EntryName::new(name).ok())

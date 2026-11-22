@@ -7,14 +7,19 @@
 //!
 //! [`SftpRemote::elevate`] opens another set of channels on the same
 //! connection whose SFTP server runs as root (see [`elevate`]).
+//!
+//! As a [`ServerSide`](crate::remote::server::ServerSide), a session copies
+//! files on the server and runs commands (see [`server`]).
 
 mod auth;
 mod clock;
 pub(crate) mod config;
 mod elevate;
+mod exec;
 mod handler;
 mod io;
 mod known_hosts;
+mod server;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -35,7 +40,7 @@ use tokio::sync::{OnceCell, mpsc};
 pub(crate) use self::config::DEFAULT_PORT;
 use self::config::ResolvedTarget;
 pub use self::config::{KnownHostsSource, SftpOptions, SshConfigSource, configured_hosts};
-use self::handler::{ClientHandler, HostKeyFailure};
+use self::handler::{AcceptedHostKey, ClientHandler, HostKeyFailure};
 use self::io::ChunkSizes;
 use self::known_hosts::{KnownHosts, host_key_name};
 use super::{ByteStream, FileWriter, ListStream, Remote};
@@ -43,6 +48,7 @@ use crate::entry::{Entry, Metadata};
 use crate::error::{ElevationError, Error, Result};
 use crate::interaction::{Account, Interaction};
 use crate::path::{EntryName, RemotePath};
+use crate::remote::server::{Endpoint, ServerSide};
 
 /// SFTP protocol version spoken by OpenSSH and supported by russh-sftp.
 const SFTP_VERSION: u32 = 3;
@@ -82,6 +88,9 @@ struct Inner {
     meta: RawSftpSession,
     /// Whether the server supports [`POSIX_RENAME`].
     posix_rename: bool,
+    /// Whether the server supports [`server::COPY_DATA`].
+    copy_data: bool,
+    endpoint: Endpoint,
     /// Channels for file contents, opened on first use.
     data: [OnceCell<DataChannel>; DATA_CHANNELS],
     next_data: AtomicUsize,
@@ -164,12 +173,14 @@ impl SftpRemote {
         let known_types = known_hosts.recorded_algorithms(&key_name).await;
         let stream = open_transport(&target, options.connect_timeout).await?;
         let failure = HostKeyFailure::default();
+        let accepted = AcceptedHostKey::default();
         let handler = ClientHandler::new(
             key_name,
             known_hosts.clone(),
             target.strict_host_keys,
             Arc::clone(&interaction),
             Arc::clone(&failure),
+            Arc::clone(&accepted),
         );
         let mut ssh = client::connect_stream(Arc::new(ssh_config(&known_types)), stream, handler)
             .await
@@ -187,7 +198,27 @@ impl SftpRemote {
 
         let (meta, extensions) = start_session(open_sftp_channel(&ssh).await?).await?;
         let home = canonical(&meta, ".").await?;
-        tracing::info!(remote = %target.label(), %home, "SFTP session ready");
+        let host_key = accepted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|key| key.to_openssh().ok())
+            .unwrap_or_default();
+        let endpoint = Endpoint {
+            alias: target.alias.clone(),
+            hostname: target.hostname.clone(),
+            port: target.port,
+            user: target.user.clone(),
+            host_key: host_key.trim().to_owned(),
+            proxied: target.proxy_command.is_some(),
+            elevated: false,
+        };
+        tracing::info!(
+            remote = %target.label(),
+            %home,
+            extensions = ?extensions.keys().collect::<Vec<_>>(),
+            "SFTP session ready"
+        );
         Ok(Self {
             inner: Arc::new(Inner {
                 label: target.label(),
@@ -197,6 +228,8 @@ impl SftpRemote {
                 elevated: false,
                 meta,
                 posix_rename: extensions.contains_key(POSIX_RENAME),
+                copy_data: extensions.contains_key(server::COPY_DATA),
+                endpoint,
                 data: std::array::from_fn(|_| OnceCell::new()),
                 next_data: AtomicUsize::new(0),
             }),
@@ -258,6 +291,11 @@ impl SftpRemote {
                 elevated: true,
                 meta,
                 posix_rename: extensions.contains_key(POSIX_RENAME),
+                copy_data: extensions.contains_key(server::COPY_DATA),
+                endpoint: Endpoint {
+                    elevated: true,
+                    ..self.inner.endpoint.clone()
+                },
                 data: std::array::from_fn(|_| OnceCell::new_with(data.next())),
                 next_data: AtomicUsize::new(0),
             }),
@@ -421,10 +459,13 @@ fn handshake_error(error: russh::Error, failure: &HostKeyFailure) -> Error {
 }
 
 async fn open_sftp_channel(ssh: &client::Handle<ClientHandler>) -> Result<SftpChannel> {
-    let channel = ssh
-        .channel_open_session()
-        .await
-        .map_err(|error| Error::protocol("opening an SSH channel failed", error))?;
+    let channel = ssh.channel_open_session().await.map_err(|error| {
+        if connection_lost(&error) {
+            Error::Disconnected
+        } else {
+            Error::protocol("opening an SSH channel failed", error)
+        }
+    })?;
     channel
         .request_subsystem(true, "sftp")
         .await
@@ -465,10 +506,32 @@ async fn canonical(meta: &RawSftpSession, path: &str) -> Result<RemotePath> {
     RemotePath::parse(&resolved.filename)
 }
 
+/// Whether an SSH error means the connection is gone.
+fn connection_lost(error: &russh::Error) -> bool {
+    matches!(
+        error,
+        russh::Error::Disconnect
+            | russh::Error::SendError
+            | russh::Error::KeepaliveTimeout
+            | russh::Error::InactivityTimeout
+            | russh::Error::IO(_)
+    )
+}
+
 /// Maps an SFTP failure for `path` to the shared error type.
 fn sftp_error(path: &RemotePath, error: SftpError) -> Error {
     let path = path.clone();
     match error {
+        // The channel or the connection under it closed.
+        SftpError::IO(_) => Error::Disconnected,
+        SftpError::UnexpectedBehavior(message)
+            if message == "session closed"
+                || message == "sender dropped"
+                || message.starts_with("SendError")
+                || message.starts_with("RecvError") =>
+        {
+            Error::Disconnected
+        }
         SftpError::Status(status) => match status.status_code {
             StatusCode::NoSuchFile => Error::NotFound { path },
             StatusCode::PermissionDenied => Error::PermissionDenied { path },
@@ -570,6 +633,10 @@ async fn list_task(inner: Arc<Inner>, path: RemotePath, sender: mpsc::Sender<Res
 impl Remote for SftpRemote {
     fn label(&self) -> &str {
         &self.inner.label
+    }
+
+    fn server_side(&self) -> Option<&dyn ServerSide> {
+        Some(self)
     }
 
     async fn home_dir(&self) -> Result<RemotePath> {

@@ -6,7 +6,7 @@
 //! window gone) counts as "declined".
 
 use ferge_core::interaction::{HostKeyDecision, HostKeyPrompt};
-use ferge_core::transfer::{Conflict, ConflictDecision};
+use ferge_core::transfer::{Conflict, ConflictDecision, DirectRequest};
 use futures::channel::{mpsc, oneshot};
 use secrecy::SecretString;
 
@@ -29,8 +29,22 @@ pub(crate) enum PromptRequest {
         conflict: Conflict,
         reply: oneshot::Sender<ConflictDecision>,
     },
+    /// Two servers could copy directly; may ferge set that up? Dropping the
+    /// reply copies through this computer.
+    Direct {
+        request: DirectRequest,
+        reply: oneshot::Sender<DirectAnswer>,
+    },
     /// A problem that does not stop the current work, shown as a notification.
     Notice(String),
+}
+
+/// The answer to [`PromptRequest::Direct`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirectAnswer {
+    pub allow: bool,
+    /// Give the same answer for these two servers until ferge quits.
+    pub remember: bool,
 }
 
 /// A request for a password, passphrase or one-time code.
@@ -162,6 +176,15 @@ impl Prompter {
     pub(crate) async fn conflict(&self, conflict: Conflict) -> Option<ConflictDecision> {
         let (reply, answer) = oneshot::channel();
         if !self.send(PromptRequest::Conflict { conflict, reply }) {
+            return None;
+        }
+        answer.await.ok()
+    }
+
+    /// `None` if the question could not be asked or was dismissed.
+    pub(crate) async fn direct(&self, request: DirectRequest) -> Option<DirectAnswer> {
+        let (reply, answer) = oneshot::channel();
+        if !self.send(PromptRequest::Direct { request, reply }) {
             return None;
         }
         answer.await.ok()

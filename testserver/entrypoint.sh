@@ -1,6 +1,9 @@
 #!/bin/sh
-# Installs the client keys, creates the fixture tree once and runs sshd.
+# Creates host keys, installs the client keys, creates the fixture tree once
+# (unless FERGE_FIXTURES=none) and runs sshd.
 set -eu
+
+ssh-keygen -A >/dev/null
 
 for user in ferge ferge-nopasswd ferge-sftponly ferge-nosudo; do
     install -d -o "$user" -g "$user" -m 0700 "/home/$user/.ssh"
@@ -9,7 +12,7 @@ for user in ferge ferge-nopasswd ferge-sftponly ferge-nosudo; do
     fi
 done
 
-if [ ! -f /home/ferge/.fixtures-complete ]; then
+if [ "${FERGE_FIXTURES:-all}" != none ] && [ ! -f /home/ferge/.fixtures-complete ]; then
     su ferge -s /bin/sh -c "python3 /usr/local/bin/generate_fixtures.py /home/ferge"
     touch /home/ferge/.fixtures-complete
 fi

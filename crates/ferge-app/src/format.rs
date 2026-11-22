@@ -10,20 +10,25 @@ use jiff::tz::TimeZone;
 /// Until then dates are shown in UTC.
 static TIME_ZONE: OnceLock<TimeZone> = OnceLock::new();
 
-/// A file name (or other text from a server) as it is shown: control
-/// characters and invisible formatting characters, such as a right-to-left
-/// override that makes `gnp.exe` read `exe.png`, appear as `�` instead of
-/// acting on the text around them. The name itself is not changed; this is
-/// only what the eye sees.
+/// A file name, path or other text from a server as it is shown. Control
+/// characters become their visible symbols (a line break `␊`, a tab `␉`), so
+/// a name stays on one line and shows what it holds; other control and
+/// invisible formatting characters, such as a right-to-left override that
+/// makes `gnp.exe` read `exe.png`, appear as `�` instead of acting on the
+/// text around them. Only for display; the real name is used otherwise.
 pub(crate) fn shown(name: &str) -> String {
     let odd = |c: char| c.is_control() || ferge_core::interaction::is_invisible_format_char(c);
-    if name.chars().any(odd) {
-        name.chars()
-            .map(|c| if odd(c) { '\u{FFFD}' } else { c })
-            .collect()
-    } else {
-        name.to_owned()
+    if !name.chars().any(odd) {
+        return name.to_owned();
     }
+    name.chars()
+        .map(|c| match u32::from(c) {
+            code @ 0..=0x1f => char::from_u32(0x2400 + code).unwrap_or('\u{FFFD}'),
+            0x7f => '\u{2421}',
+            _ if odd(c) => '\u{FFFD}',
+            _ => c,
+        })
+        .collect()
 }
 
 /// Loads the system time zone. Reads `/etc/localtime`, so call it from a
@@ -112,6 +117,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn names_stay_on_one_line() {
+        assert_eq!(shown("line\nbreak.txt"), "line\u{240a}break.txt");
+        assert_eq!(shown("tab\tand\u{7f}"), "tab\u{2409}and\u{2421}");
+        assert_eq!(shown("ümlaut 日本 🦀"), "ümlaut 日本 🦀");
+    }
+
+    #[test]
     fn sizes() {
         assert_eq!(size(0), "0 B");
         assert_eq!(size(999), "999 B");
@@ -159,7 +171,8 @@ mod shown_tests {
     fn hides_what_would_disguise_a_name() {
         assert_eq!(shown("report.pdf"), "report.pdf");
         assert_eq!(shown("evil\u{202e}gnp.exe"), "evil\u{FFFD}gnp.exe");
-        assert_eq!(shown("two\nlines\x1b"), "two\u{FFFD}lines\u{FFFD}");
+        assert_eq!(shown("two\nlines\x1b"), "two\u{240a}lines\u{241b}");
+        assert_eq!(shown("c1\u{85}"), "c1\u{FFFD}");
         assert_eq!(shown("zero\u{200b}width"), "zero\u{FFFD}width");
     }
 }

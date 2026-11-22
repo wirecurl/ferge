@@ -20,6 +20,7 @@ getrandom.workspace = true
 hayro.workspace = true
 hmac.workspace = true
 image = { workspace = true, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "tiff", "webp"] }
+jiff.workspace = true
 notify.workspace = true
 quick-xml.workspace = true
 resvg.workspace = true
@@ -29,6 +30,7 @@ russh-config.workspace = true
 russh-sftp.workspace = true
 rusqlite.workspace = true
 secrecy.workspace = true
+serde_json.workspace = true
 sha1.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

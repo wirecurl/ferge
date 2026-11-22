@@ -236,6 +236,8 @@ pub(crate) struct Session {
     options: ViewOptions,
     servers: servers::ServerPanel,
     go_to: Option<GoTo>,
+    /// Where the current connection attempt goes.
+    connecting_to: Option<Destination>,
     focus: FocusHandle,
 }
 
@@ -262,6 +264,7 @@ impl Session {
             options: ViewOptions::default(),
             servers: servers::ServerPanel::new(window, cx),
             go_to: None,
+            connecting_to: None,
             focus: cx.focus_handle(),
         }
     }
@@ -285,6 +288,11 @@ impl Session {
 
     pub(crate) fn is_connecting(&self) -> bool {
         matches!(self.state, ConnectState::Connecting(_))
+    }
+
+    /// Where this pane is connecting to right now.
+    pub(crate) fn connecting_to(&self) -> Option<&Destination> {
+        self.connecting_to.as_ref().filter(|_| self.is_connecting())
     }
 
     fn shows_servers(&self) -> bool {
@@ -368,6 +376,7 @@ impl Session {
         let connecting = self.start_connection(&request, &interaction, cx);
         self.connect_abort = Some(connecting.abort_handle());
         self.state = ConnectState::Connecting(label);
+        self.connecting_to = Some(request.destination.clone());
         self.connect_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = match connecting.await {
                 Ok(result) => result.map_err(|error| error.to_string()),

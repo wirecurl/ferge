@@ -9,6 +9,7 @@
 )]
 
 mod app;
+mod between;
 mod core;
 mod report;
 mod stats;
@@ -54,6 +55,9 @@ struct Cli {
     /// Repetitions of the in-process measurements.
     #[arg(long, default_value_t = 5)]
     runs: usize,
+    /// Only compare the routes between the two test servers.
+    #[arg(long)]
+    between_only: bool,
 }
 
 fn workspace_root() -> PathBuf {
@@ -74,6 +78,13 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> anyhow::Result<bool> {
     let root = workspace_root();
+    if cli.between_only {
+        let ssh_config = cli
+            .ssh_config
+            .unwrap_or_else(|| root.join(".testserver/ssh_config"));
+        measure_between(&ssh_config).await?;
+        return Ok(true);
+    }
     let binary = cli.app.unwrap_or_else(|| app::default_binary(&root));
     ensure!(
         binary.exists(),
@@ -98,6 +109,7 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
     let startup = measure_startup(&app, cli.startup_runs).await?;
     let core = measure_core(&ssh_config, &large_dir, cli.runs).await?;
     measure_transfers(&ssh_config).await?;
+    measure_between(&ssh_config).await?;
     let ui = measure_ui(&app).await?;
     let verdicts = verdicts(&startup, &core, &ui);
     println!();
@@ -152,6 +164,15 @@ async fn measure_core(
 }
 
 /// Reports transfer throughput; there is no budget for it.
+async fn measure_between(ssh_config: &Path) -> anyhow::Result<()> {
+    println!("Between the two test servers, every route…");
+    match between::measure(ssh_config).await? {
+        Some(runs) => between::print(&runs),
+        None => println!("  skipped: the second test server (ferge-test2) is not running"),
+    }
+    Ok(())
+}
+
 async fn measure_transfers(ssh_config: &Path) -> anyhow::Result<()> {
     println!(
         "Transfers, one {} MiB file…",

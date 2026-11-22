@@ -191,6 +191,15 @@ impl Workspace {
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         this.activate(index, window, cx);
                     }))
+                    // A middle click closes the tab, as in browsers.
+                    .when(closable, |this| {
+                        this.on_mouse_up(
+                            gpui::MouseButton::Middle,
+                            cx.listener(move |this, _: &gpui::MouseUpEvent, window, cx| {
+                                this.close_tab(index, window, cx);
+                            }),
+                        )
+                    })
                     .child(Icon::new(icon).size(em(1.)).flex_shrink_0())
                     .child(div().max_w(em(12.)).truncate().child(title))
                     .children(close)

@@ -14,6 +14,10 @@ use crate::interaction::{HostKeyDecision, HostKeyPrompt, Interaction};
 /// itself only surfaces a generic "unknown key" error.
 pub(crate) type HostKeyFailure = Arc<Mutex<Option<HostKeyError>>>;
 
+/// Slot that receives the host key once it was accepted, so the session can
+/// hand it on (direct transfers tell the other server which key to expect).
+pub(crate) type AcceptedHostKey = Arc<Mutex<Option<PublicKey>>>;
+
 pub(crate) struct ClientHandler {
     /// Name under which the host is recorded, e.g. `[host]:2222`.
     host_key_name: String,
@@ -21,6 +25,7 @@ pub(crate) struct ClientHandler {
     strict: StrictHostKeys,
     interaction: Arc<dyn Interaction>,
     failure: HostKeyFailure,
+    reported: AcceptedHostKey,
 }
 
 impl ClientHandler {
@@ -30,6 +35,7 @@ impl ClientHandler {
         strict: StrictHostKeys,
         interaction: Arc<dyn Interaction>,
         failure: HostKeyFailure,
+        reported: AcceptedHostKey,
     ) -> Self {
         Self {
             host_key_name,
@@ -37,6 +43,7 @@ impl ClientHandler {
             strict,
             interaction,
             failure,
+            reported,
         }
     }
 
@@ -99,7 +106,10 @@ impl client::Handler for ClientHandler {
         // russh asks only during the first key exchange; later ones run
         // inside the session already encrypted to the key accepted here.
         match self.verify(key).await {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                *self.reported.lock().unwrap_or_else(PoisonError::into_inner) = Some(key.clone());
+                Ok(true)
+            }
             Err(error) => {
                 self.fail(error);
                 Ok(false)

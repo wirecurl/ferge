@@ -10,9 +10,11 @@ mod file_type;
 mod format;
 mod inspector;
 mod interaction;
+mod logging;
 mod palette;
 mod preview;
 mod prompts;
+mod reconnect;
 mod runtime;
 mod session;
 mod settings_window;
@@ -35,7 +37,6 @@ use gpui::{
     WindowHandle, WindowOptions, px, size,
 };
 use gpui_component::Root;
-use tracing_subscriber::EnvFilter;
 
 use crate::workspace::Workspace;
 
@@ -80,10 +81,8 @@ fn main() -> ExitCode {
     }
     let started = Instant::now();
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with_writer(std::io::stderr)
-        .init();
+    // Benchmarks must neither read nor change the user's files.
+    logging::init(cli.bench.is_none());
     match worker::current_program() {
         Ok(program) => worker::set_program(program),
         Err(error) => tracing::warn!(%error, "previews of documents and pictures are unavailable"),

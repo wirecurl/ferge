@@ -4,14 +4,18 @@
 //! drop, a paste) can start a transfer. Conflicts are asked through the
 //! window's dialogs.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use ferge_core::transfer::direct;
+use ferge_core::transfer::route::{QueueOptions, Route};
 use ferge_core::transfer::{
-    Conflict, ConflictDecision, ConflictResolver, DEFAULT_PARALLEL_FILES, Direction, TransferEvent,
-    TransferId, TransferQueue, TransferRequest, TransferSnapshot, TransferState,
+    Conflict, ConflictDecision, ConflictResolver, DEFAULT_PARALLEL_FILES, DirectDecision,
+    DirectRequest, Direction, TransferEvent, TransferId, TransferQueue, TransferRequest,
+    TransferSnapshot, TransferState,
 };
 use futures::channel::mpsc;
 use gpui::prelude::FluentBuilder as _;
@@ -25,6 +29,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 
 use crate::format;
 use crate::prompts::{Prompter, TaggedPrompt};
+use crate::reconnect::{Connector, worth_retrying};
 use crate::runtime;
 use crate::style::{self, ControlSize, IconButton, TypeScale as _};
 
@@ -34,10 +39,32 @@ const TICK: Duration = Duration::from_millis(100);
 /// Weight of the newest sample in the smoothed transfer rate.
 const RATE_SMOOTHING: f64 = 0.3;
 
+/// Transfer traces kept; older ones are deleted at startup.
+const TRACES_KEPT: usize = 200;
+
 /// The transfer queue shared by the window.
 pub(crate) struct Transfers {
     queue: TransferQueue,
     resolver: Arc<DialogResolver>,
+    /// Where running direct jobs and saved transfers are kept, to go on
+    /// with them after a restart.
+    records: Option<PathBuf>,
+    /// Connects for transfers once the window is there.
+    connector: Option<Connector>,
+    /// Transfers ferge is reconnecting after a lost connection.
+    reconnecting: Arc<Mutex<HashSet<TransferId>>>,
+}
+
+/// How often and how long ferge tries to connect again after a lost
+/// connection.
+const RECONNECT_EVERY: Duration = Duration::from_secs(5);
+const RECONNECT_ATTEMPTS: usize = 360;
+
+/// What to do once a transfer is connected again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Then {
+    Resume,
+    Cancel,
 }
 
 impl Global for Transfers {}
@@ -45,18 +72,207 @@ impl Global for Transfers {}
 impl Transfers {
     /// Creates the queue; conflicts are asked through `prompts`. Returns the
     /// queue's events.
+    /// `ephemeral` (benchmarks) records no traces unless `FERGE_TRACE_DIR`
+    /// asks for them.
     pub(crate) fn install(
         prompts: mpsc::UnboundedSender<TaggedPrompt>,
+        ephemeral: bool,
         cx: &mut App,
     ) -> mpsc::UnboundedReceiver<TransferEvent> {
-        let (queue, events) = TransferQueue::new(DEFAULT_PARALLEL_FILES);
+        let mut options = QueueOptions::new(DEFAULT_PARALLEL_FILES);
+        if !ephemeral {
+            let state = crate::logging::state_dir();
+            options.trace_dir = state.as_ref().map(|dir| dir.join("transfers"));
+            options.direct.records = state.map(|dir| dir.join("jobs"));
+        }
+        let options = options.with_env();
+        let records = options.direct.records.clone();
+        if let Some(dir) = &options.trace_dir {
+            tracing::info!(dir = %dir.display(), "recording transfer traces");
+            // Old traces go on the I/O runtime, never on the UI thread.
+            let dir = dir.clone();
+            runtime::handle(cx).spawn(ferge_core::transfer::trace::prune(dir, TRACES_KEPT));
+        }
+        let (queue, events) = TransferQueue::with_options(options);
         cx.set_global(Self {
             queue,
             resolver: Arc::new(DialogResolver {
                 prompter: Prompter::new(prompts, None),
+                direct_answers: Mutex::new(HashMap::new()),
             }),
+            records,
+            connector: None,
+            reconnecting: Arc::default(),
         });
         events
+    }
+
+    /// Lets transfers connect on their own: to follow direct jobs again, to
+    /// resume saved transfers and after lost connections. Then brings back
+    /// what ran when ferge quit.
+    pub(crate) fn start_connecting(connector: Connector, cx: &mut App) {
+        cx.global_mut::<Self>().connector = Some(connector);
+        Self::follow_recorded(cx);
+        Self::restore_saved(cx);
+    }
+
+    /// Shows the transfers saved when ferge quit, paused; they connect when
+    /// resumed.
+    fn restore_saved(cx: &App) {
+        let transfers = cx.global::<Self>();
+        let Some(dir) = transfers.records.clone() else {
+            return;
+        };
+        let queue = transfers.queue.clone();
+        let resolver = Arc::clone(&transfers.resolver) as Arc<dyn ConflictResolver>;
+        runtime::spawn(cx, async move {
+            for saved in ferge_core::transfer::saved_transfers(&dir).await {
+                tracing::info!(title = %saved.title, "restoring a transfer saved when ferge quit");
+                queue.restore(&saved, Arc::clone(&resolver));
+            }
+        });
+    }
+
+    /// Connects a transfer's two sides again, then resumes or cancels it.
+    /// After a lost connection (`keep_trying`), tries for a while as long as
+    /// the network or the server is missing.
+    fn reconnect(id: TransferId, then: Then, keep_trying: bool, cx: &App) {
+        let transfers = cx.global::<Self>();
+        let Some(connector) = transfers.connector.clone() else {
+            return;
+        };
+        let queue = transfers.queue.clone();
+        let reconnecting = Arc::clone(&transfers.reconnecting);
+        if !reconnecting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id)
+        {
+            return;
+        }
+        runtime::spawn(cx, async move {
+            let attempts = if keep_trying { RECONNECT_ATTEMPTS } else { 1 };
+            let mut outcome = None;
+            for attempt in 0..attempts {
+                let Some(snapshot) = queue.snapshot().into_iter().find(|s| s.id == id) else {
+                    break;
+                };
+                // Resumed, cancelled or removed meanwhile.
+                if keep_trying && !snapshot.lost_connection {
+                    break;
+                }
+                if attempt > 0 {
+                    tokio::time::sleep(RECONNECT_EVERY).await;
+                }
+                match connector
+                    .connect_both(
+                        snapshot.source_server.as_ref(),
+                        snapshot.target_server.as_ref(),
+                    )
+                    .await
+                {
+                    Ok((source, target)) => {
+                        outcome = Some(Ok(queue.reconnect(id, source, target)));
+                        break;
+                    }
+                    Err(error) if keep_trying && worth_retrying(&error) => {
+                        tracing::debug!(transfer = ?id, %error, "not connected yet");
+                    }
+                    Err(error) => {
+                        outcome = Some(Err(error));
+                        break;
+                    }
+                }
+            }
+            reconnecting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+            match (outcome, then) {
+                (Some(Ok(_)), Then::Resume) => queue.resume(id),
+                (Some(Ok(_)), Then::Cancel) => queue.cancel(id),
+                (Some(Err(error)), Then::Cancel) => {
+                    // Cancel all the same; partial files stay on the server.
+                    queue.cancel(id);
+                    connector.notice(format!(
+                        "The transfer was cancelled, but ferge could not connect to remove \
+                         its partial files: {error}"
+                    ));
+                }
+                (Some(Err(error)), Then::Resume) => connector.notice(format!(
+                    "ferge could not connect to resume the transfer: {error}"
+                )),
+                (None, _) => {}
+            }
+        });
+    }
+
+    /// Whether ferge is connecting a transfer again right now.
+    fn is_reconnecting(id: TransferId, cx: &App) -> bool {
+        cx.global::<Self>()
+            .reconnecting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&id)
+    }
+
+    /// A transfer lost its connection: go on once it is back.
+    pub(crate) fn connection_lost(id: TransferId, cx: &App) {
+        Self::reconnect(id, Then::Resume, true, cx);
+    }
+
+    /// The transfers that stop when ferge quits: running, not directly
+    /// between servers.
+    pub(crate) fn needing_ferge(cx: &App) -> Vec<TransferId> {
+        Self::queue(cx)
+            .snapshot()
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot.state.is_active() && !snapshot.route.is_some_and(Route::is_direct)
+            })
+            .map(|snapshot| snapshot.id)
+            .collect()
+    }
+
+    /// Follows the direct jobs again that ran when ferge quit: connects to
+    /// both servers of each in the background (asking for passwords like any
+    /// connection) and shows the job in the list until it ends. A job whose
+    /// servers cannot be reached stays recorded for the next start.
+    fn follow_recorded(cx: &App) {
+        let transfers = cx.global::<Self>();
+        let (Some(dir), Some(connector)) = (transfers.records.clone(), transfers.connector.clone())
+        else {
+            return;
+        };
+        let queue = transfers.queue.clone();
+        runtime::spawn(cx, async move {
+            for record in direct::recorded_jobs(&dir).await {
+                tracing::info!(job = %record.job, title = %record.title, "following a direct transfer again");
+                let side = |server: &direct::RecordedServer| {
+                    ferge_core::transfer::SavedSide::Server(server.clone()).destination()
+                };
+                let (source, target) = (side(&record.source), side(&record.target));
+                match connector
+                    .connect_both(source.as_ref(), target.as_ref())
+                    .await
+                {
+                    Ok((source, target)) => {
+                        queue.attach(record, source, target);
+                    }
+                    Err(error) => {
+                        tracing::warn!(job = %record.job, %error, "cannot follow a direct transfer again");
+                        connector.notice(format!(
+                            "ferge could not reconnect to follow “{}” ({} → {}): {}. \
+                             It goes on on the servers; ferge tries again at the next start.",
+                            format::shown(&record.title),
+                            record.source.label,
+                            record.target.label,
+                            error,
+                        ));
+                    }
+                }
+            }
+        });
     }
 
     pub(crate) fn queue(cx: &App) -> TransferQueue {
@@ -78,21 +294,56 @@ impl Transfers {
         Self::queue(cx).pause(id);
     }
 
+    /// Resumes a transfer, connecting it first if it has no connections (it
+    /// was restored, or lost them).
     pub(crate) fn resume(id: TransferId, cx: &App) {
-        let _runtime = runtime::handle(cx).enter();
-        Self::queue(cx).resume(id);
+        let snapshot = Self::queue(cx).snapshot().into_iter().find(|s| s.id == id);
+        match snapshot {
+            Some(snapshot) if !snapshot.connected || snapshot.lost_connection => {
+                Self::reconnect(id, Then::Resume, false, cx);
+            }
+            _ => {
+                let _runtime = runtime::handle(cx).enter();
+                Self::queue(cx).resume(id);
+            }
+        }
     }
 
+    /// Cancels a transfer; one without connections connects first, to
+    /// remove its partial files.
     pub(crate) fn cancel(id: TransferId, cx: &App) {
-        let _runtime = runtime::handle(cx).enter();
-        Self::queue(cx).cancel(id);
+        let snapshot = Self::queue(cx).snapshot().into_iter().find(|s| s.id == id);
+        match snapshot {
+            Some(snapshot)
+                if snapshot.state == TransferState::Paused
+                    && (!snapshot.connected || snapshot.lost_connection) =>
+            {
+                Self::reconnect(id, Then::Cancel, false, cx);
+            }
+            _ => {
+                let _runtime = runtime::handle(cx).enter();
+                Self::queue(cx).cancel(id);
+            }
+        }
     }
 }
 
-/// Asks the user about conflicts in a dialog.
+/// Asks the user about conflicts and direct copies in a dialog.
 #[derive(Debug)]
 struct DialogResolver {
     prompter: Prompter,
+    /// Answers about direct copies to keep until ferge quits, by the pair of
+    /// servers (in either direction).
+    direct_answers: Mutex<HashMap<(String, String), bool>>,
+}
+
+impl DialogResolver {
+    fn pair(request: &DirectRequest) -> (String, String) {
+        let mut pair = [request.source_id.clone(), request.target_id.clone()];
+        pair.sort();
+        let [first, second] = pair;
+        (first, second)
+    }
 }
 
 #[async_trait]
@@ -100,7 +351,43 @@ impl ConflictResolver for DialogResolver {
     async fn resolve(&self, conflict: Conflict) -> Option<ConflictDecision> {
         self.prompter.conflict(conflict).await
     }
+
+    async fn approve_direct(&self, request: DirectRequest) -> DirectDecision {
+        let pair = Self::pair(&request);
+        let known = self
+            .direct_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&pair)
+            .copied();
+        let allow = if let Some(allow) = known {
+            allow
+        } else {
+            let Some(answer) = self.prompter.direct(request).await else {
+                return DirectDecision::Relay;
+            };
+            if answer.remember {
+                self.direct_answers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(pair, answer.allow);
+            }
+            answer.allow
+        };
+        if allow {
+            DirectDecision::Allow
+        } else {
+            DirectDecision::Relay
+        }
+    }
 }
+
+/// Asks the window to open a transfer's source or target folder in a new
+/// tab.
+#[derive(Clone, Debug)]
+pub(crate) struct OpenPlace(pub(crate) ferge_core::destination::Destination);
+
+impl gpui::EventEmitter<OpenPlace> for TransferPanel {}
 
 /// A smoothed transfer rate.
 #[derive(Clone, Copy, Debug)]
@@ -236,7 +523,7 @@ impl TransferPanel {
             Direction::Copy => IconName::ArrowRight,
         };
         let percent = percent(snapshot);
-        let status = self.status_text(snapshot);
+        let status = self.status_text(snapshot, cx);
         let state_icon = match snapshot.state {
             TransferState::Completed => Some(Icon::new(IconName::CircleCheck).text_color(success)),
             TransferState::Failed => Some(Icon::new(IconName::CircleAlert).text_color(danger)),
@@ -244,6 +531,18 @@ impl TransferPanel {
         };
         let error = first_error(snapshot)
             .map(|text| div().text_small().text_color(danger).truncate().child(text));
+        // Why the data takes the long way, while that is worth knowing.
+        let route_note = snapshot
+            .route_note
+            .clone()
+            .filter(|_| snapshot.route == Some(Route::Relay) && !snapshot.state.is_settled())
+            .map(|note| {
+                div()
+                    .text_small()
+                    .text_color(muted)
+                    .truncate()
+                    .child(SharedString::from(format!("Not direct: {note}")))
+            });
         let bar_color = match snapshot.state {
             TransferState::Completed => success,
             TransferState::Failed => danger,
@@ -264,20 +563,9 @@ impl TransferPanel {
                             .min_w_0()
                             .truncate()
                             .text_body()
-                            .child(SharedString::from(crate::format::shown(&snapshot.title))),
+                            .child(SharedString::from(format::shown(&snapshot.title))),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_small()
-                            .text_color(muted)
-                            .child(SharedString::from(format!(
-                                "{} → {}:{}",
-                                snapshot.source_label, snapshot.target_label, snapshot.target_dir
-                            ))),
-                    )
+                    .child(Self::render_places(snapshot, cx))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -295,6 +583,59 @@ impl TransferPanel {
                 bar_color,
             ))
             .children(error)
+            .children(route_note)
+    }
+
+    /// "source → target:folder", each side a link that opens its folder in a
+    /// new tab, and the route.
+    fn render_places(snapshot: &TransferSnapshot, cx: &mut Context<Self>) -> gpui::Div {
+        let theme = cx.theme();
+        let (muted, foreground) = (theme.muted_foreground, theme.foreground);
+        let id = id_number(snapshot.id);
+        let link = |name: &'static str,
+                    text: String,
+                    place: Option<ferge_core::destination::Destination>,
+                    cx: &mut Context<Self>| {
+            let element = div()
+                .id(ElementId::NamedInteger(name.into(), id))
+                .min_w_0()
+                .truncate()
+                .child(SharedString::from(format::shown(&text)));
+            match place {
+                Some(place) => element
+                    .cursor_pointer()
+                    .hover(move |style| style.text_color(foreground))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Open this folder in a new tab")
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                        cx.emit(OpenPlace(place.clone()));
+                    })),
+                None => element,
+            }
+        };
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_small()
+            .text_color(muted)
+            .child(link(
+                "transfer-source",
+                snapshot.source_label.clone(),
+                snapshot.source_place.clone(),
+                cx,
+            ))
+            .child(div().flex_shrink_0().px(style::em(0.3)).child("→"))
+            .child(link(
+                "transfer-target",
+                format!("{}:{}", snapshot.target_label, snapshot.target_dir),
+                snapshot.target_place.clone(),
+                cx,
+            ))
+            .child(div().min_w_0().truncate().child(route_label(snapshot)))
     }
 
     /// Pause, resume, retry, cancel and remove, as fits the state.
@@ -308,7 +649,7 @@ impl TransferPanel {
         h_flex()
             .gap_1()
             .flex_shrink_0()
-            .when(snapshot.state.is_active(), |this| {
+            .when(snapshot.state.is_active() && !snapshot.attached, |this| {
                 this.child(control("pause", IconName::Pause, "Pause").on_click(
                     cx.listener(move |_, _: &ClickEvent, _, cx| Transfers::pause(id, cx)),
                 ))
@@ -354,7 +695,7 @@ impl TransferPanel {
             })
     }
 
-    fn status_text(&self, snapshot: &TransferSnapshot) -> SharedString {
+    fn status_text(&self, snapshot: &TransferSnapshot, cx: &App) -> SharedString {
         let sizes = format!(
             "{} of {}",
             format::size(snapshot.bytes_done),
@@ -396,6 +737,15 @@ impl TransferPanel {
                 } else {
                     format!("{sizes}{files}")
                 }
+            }
+            TransferState::Paused if Transfers::is_reconnecting(snapshot.id, cx) => {
+                format!("Connecting again… · {sizes}{files}")
+            }
+            TransferState::Paused if snapshot.lost_connection => {
+                format!("Connection lost · {sizes}{files}")
+            }
+            TransferState::Paused if !snapshot.connected => {
+                format!("Paused when ferge quit · {sizes}{files}")
             }
             TransferState::Paused => format!("Paused · {sizes}{files}"),
             TransferState::Completed => {
@@ -537,4 +887,18 @@ fn first_error(snapshot: &TransferSnapshot) -> Option<SharedString> {
     } else {
         first.into()
     })
+}
+
+/// How the data travels, where more than one way was possible.
+fn route_label(snapshot: &TransferSnapshot) -> &'static str {
+    match snapshot.route {
+        Some(Route::DirectPush | Route::DirectPull) if snapshot.attached => {
+            " · directly between the servers, followed again after a restart"
+        }
+        Some(Route::DirectPush | Route::DirectPull) => " · directly between the servers",
+        Some(Route::Server) => " · on the server",
+        // A direct transfer was tried and did not work out.
+        Some(Route::Relay) if snapshot.route_note.is_some() => " · through this computer",
+        _ => "",
+    }
 }

@@ -7,7 +7,9 @@
 
 use ferge_core::interaction::{HostKeyDecision, HostKeyPrompt};
 use ferge_core::library::{BookmarkDraft, BookmarkId, FolderId, Library};
-use ferge_core::transfer::{Conflict, ConflictAction, ConflictDecision, ConflictKind, TransferId};
+use ferge_core::transfer::{
+    Conflict, ConflictAction, ConflictDecision, ConflictKind, DirectRequest, TransferId,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
@@ -23,7 +25,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use super::Workspace;
 use crate::editor::{BookmarkEditor, EditorEvent};
 use crate::prompts::{
-    MasterPasswordRequest, PromptRequest, SecretRequest, SessionId, TaggedPrompt,
+    DirectAnswer, MasterPasswordRequest, PromptRequest, SecretRequest, SessionId, TaggedPrompt,
 };
 use crate::style::{self, TypeScale as _};
 
@@ -73,6 +75,11 @@ pub(super) enum ActivePrompt {
         reply: futures::channel::oneshot::Sender<ConflictDecision>,
         apply_to_all: bool,
     },
+    Direct {
+        request: DirectRequest,
+        reply: futures::channel::oneshot::Sender<DirectAnswer>,
+        remember: bool,
+    },
 }
 
 impl ActivePrompt {
@@ -81,7 +88,7 @@ impl ActivePrompt {
             Self::HostKey { session, .. }
             | Self::Secret { session, .. }
             | Self::Master { session, .. } => *session,
-            Self::Conflict { .. } => None,
+            Self::Conflict { .. } | Self::Direct { .. } => None,
         }
     }
 }
@@ -122,6 +129,8 @@ pub(super) enum ConfirmAction {
         browser: gpui::WeakEntity<crate::browser::FileBrowser>,
         items: Vec<(ferge_core::RemotePath, ferge_core::EntryKind)>,
     },
+    /// Close the window although these transfers need ferge.
+    CloseWhileCopying(Vec<TransferId>),
 }
 
 impl Workspace {
@@ -170,13 +179,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let of_transfer = |request: &PromptRequest| matches!(request, PromptRequest::Conflict { conflict, .. } if conflict.transfer == transfer);
+        let of_transfer = |request: &PromptRequest| match request {
+            PromptRequest::Conflict { conflict, .. } => conflict.transfer == transfer,
+            PromptRequest::Direct { request, .. } => request.transfer == transfer,
+            _ => false,
+        };
         self.queued_prompts
             .retain(|prompt| !of_transfer(&prompt.request));
-        if matches!(
-            &self.prompt,
-            Some(ActivePrompt::Conflict { conflict, .. }) if conflict.transfer == transfer
-        ) {
+        let shown = match &self.prompt {
+            Some(ActivePrompt::Conflict { conflict, .. }) => conflict.transfer == transfer,
+            Some(ActivePrompt::Direct { request, .. }) => request.transfer == transfer,
+            _ => false,
+        };
+        if shown {
             self.prompt = None;
             self.show_next_prompt(window, cx);
         }
@@ -256,6 +271,14 @@ impl Workspace {
                     apply_to_all: false,
                 })
             }
+            PromptRequest::Direct { request, reply } => {
+                window.focus(&self.prompt_focus, cx);
+                Some(ActivePrompt::Direct {
+                    request,
+                    reply,
+                    remember: false,
+                })
+            }
             PromptRequest::Notice(message) => {
                 window.push_notification(Notification::error(message), cx);
                 None
@@ -297,6 +320,18 @@ impl Workspace {
                 action,
                 apply_to_all,
             });
+        }
+        self.show_next_prompt(window, cx);
+    }
+
+    /// Copy directly, or (`false`, also when dismissed) through this
+    /// computer.
+    fn answer_direct(&mut self, allow: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ActivePrompt::Direct {
+            reply, remember, ..
+        }) = self.prompt.take()
+        {
+            let _ = reply.send(DirectAnswer { allow, remember });
         }
         self.show_next_prompt(window, cx);
     }
@@ -378,6 +413,7 @@ impl Workspace {
             Some(ActivePrompt::Secret { .. }) => self.answer_secret(false, window, cx),
             Some(ActivePrompt::Master { .. }) => self.answer_master(false, window, cx),
             Some(ActivePrompt::Conflict { .. }) => self.answer_conflict(None, window, cx),
+            Some(ActivePrompt::Direct { .. }) => self.answer_direct(false, window, cx),
             None => {}
         }
     }
@@ -561,6 +597,17 @@ impl Workspace {
                 "The list of recent connections will be emptied. Favorites are kept.".into(),
                 "Clear".into(),
             ),
+            ConfirmAction::CloseWhileCopying(transfers) => (
+                if transfers.len() == 1 {
+                    "A transfer is still running".into()
+                } else {
+                    format!("{} transfers are still running", transfers.len()).into()
+                },
+                "They go through this computer and stop when ferge closes. They pause and \
+                 are back in the list at the next start, ready to resume where they stopped."
+                    .into(),
+                "Pause and close".into(),
+            ),
         };
         self.dialog = Some(Dialog::Confirm {
             title,
@@ -589,6 +636,11 @@ impl Workspace {
                 self.change_library(move |library| library.delete_folder(id), cx);
             }
             ConfirmAction::ClearHistory => self.change_library(Library::clear_history, cx),
+            ConfirmAction::CloseWhileCopying(transfers) => {
+                self.close_dialog(window, cx);
+                self.close_after_pausing(transfers, window, cx);
+                return;
+            }
         }
         self.close_dialog(window, cx);
     }
@@ -749,6 +801,9 @@ impl Workspace {
                 apply_to_all,
                 ..
             } => self.render_conflict_prompt(conflict, *apply_to_all, cx),
+            ActivePrompt::Direct {
+                request, remember, ..
+            } => self.render_direct_prompt(request, *remember, cx),
         };
         Some(
             Self::overlay(PROMPT_CONTEXT)
@@ -1018,6 +1073,79 @@ impl Workspace {
                 })),
         )
         .child(Self::conflict_buttons(conflict.kind, cx))
+    }
+
+    fn render_direct_prompt(
+        &self,
+        request: &DirectRequest,
+        remember: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let theme = cx.theme();
+        let (muted, code_bg) = (theme.muted_foreground, theme.muted);
+        let answer = |allow: bool| {
+            cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
+                this.answer_direct(allow, window, cx);
+            })
+        };
+        Self::card(cx)
+            .w(px(520.))
+            .track_focus(&self.prompt_focus)
+            .child(
+                div()
+                    .text_title()
+                    .child("Copy directly between the servers?"),
+            )
+            .child(div().text_body().child(format!(
+                "{} and {} can exchange the files themselves, without going through this \
+                 computer. That is usually much faster, and the copy goes on if this \
+                 computer sleeps or ferge quits.",
+                request.source, request.target
+            )))
+            .child(
+                v_flex()
+                    .p_3()
+                    .gap_1()
+                    .rounded(style::RADIUS)
+                    .bg(code_bg)
+                    .text_body()
+                    .child(
+                        "For this, ferge adds a key for this transfer alone to \
+                         ~/.ssh/authorized_keys on one of them, and a job folder in \
+                         ~/.cache/ferge on both.",
+                    )
+                    .child(div().text_color(muted).child(
+                        "When the copy is done, ferge removes all of it again and checks \
+                         that both servers are left as it found them.",
+                    )),
+            )
+            .child(
+                Checkbox::new("direct-remember")
+                    .label("Give the same answer for these servers until ferge quits")
+                    .checked(remember)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        if let Some(ActivePrompt::Direct { remember, .. }) = &mut this.prompt {
+                            *remember = *checked;
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("direct-relay")
+                            .label("Through this computer")
+                            .on_click(answer(false)),
+                    )
+                    .child(
+                        Button::new("direct-allow")
+                            .primary()
+                            .label("Copy directly")
+                            .on_click(answer(true)),
+                    ),
+            )
     }
 
     fn conflict_buttons(kind: ConflictKind, cx: &mut Context<Self>) -> gpui::Div {

@@ -9,6 +9,7 @@ use std::fmt::{self, Write as _};
 
 use crate::error::{Error, Result};
 use crate::path::RemotePath;
+use crate::remote::Remote;
 use crate::remote::sftp::SftpOptions;
 
 /// The local file system or an SFTP server.
@@ -92,6 +93,24 @@ impl SftpTarget {
 }
 
 impl Destination {
+    /// Whether `remote` is connected to this file system or server as given
+    /// here (host as asked for, and user and port where set); the start
+    /// directory is not compared.
+    pub fn is_served_by(&self, remote: &dyn Remote) -> bool {
+        match self {
+            Self::Local { .. } => remote.is_local(),
+            Self::Sftp(target) => remote.server_side().is_some_and(|server| {
+                let endpoint = server.endpoint();
+                endpoint.alias.eq_ignore_ascii_case(&target.host)
+                    && target
+                        .user
+                        .as_ref()
+                        .is_none_or(|user| *user == endpoint.user)
+                    && target.port.is_none_or(|port| port == endpoint.port)
+            }),
+        }
+    }
+
     /// Parses what a user typed. Accepted forms:
     /// - `local`, or an absolute local path such as `/tmp`
     /// - `sftp://[user@]host[:port][/path]`, the path may be percent-encoded
@@ -219,6 +238,17 @@ fn percent_decode(text: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn this_computer_serves_local_places_only() {
+        let local = crate::remote::local::LocalRemote::new();
+        assert!(Destination::Local { path: None }.is_served_by(&local));
+        assert!(
+            !Destination::parse("sftp://user@host")
+                .unwrap()
+                .is_served_by(&local)
+        );
+    }
 
     fn sftp(input: &str) -> SftpTarget {
         match Destination::parse(input) {

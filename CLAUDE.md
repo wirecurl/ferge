@@ -32,10 +32,15 @@ the above plus the SFTP integration tests. Actions in workflows are pinned to co
 ## Test server
 
 ```sh
-./testserver/up.sh               # OpenSSH on 127.0.0.1:2222, waits until ready
+./testserver/up.sh               # OpenSSH on 127.0.0.1:2222 and :2223, waits until ready
 ./testserver/down.sh             # stop and remove (fixtures are regenerated on next start)
-cargo test --workspace -- --include-ignored   # includes SFTP integration tests
+cargo test --workspace -- --include-ignored   # includes SFTP and direct-transfer tests
 ```
+
+The second server (`ferge-test2`, port 2223, no fixtures) exists for direct transfers between
+servers; inside the compose network the two reach each other as `sshd:22` and `sshd2:22`.
+`FERGE_TEST_PORT`, `FERGE_TEST_PORT2` and `FERGE_TESTSERVER_NAME` start a second pair next to
+the first (e.g. from a worktree); the tests read the same variables.
 
 Credentials: user `ferge`, password `ferge`; keys in `.testserver/` (`id_ed25519` without
 passphrase, `id_ed25519_encrypted` with passphrase `ferge`). For working as root: `ferge` may use sudo
@@ -59,7 +64,33 @@ The harness starts the release binary in hidden `--bench startup|interaction` mo
 prints `ferge-bench:` markers to stderr; `ZED_MEASUREMENTS=1` makes GPUI print the CPU time of
 every frame, which the harness attributes to the preceding input. Frame budget: 8.33 ms (120 Hz).
 
+`cargo run --release -p ferge-bench -- --between-only` only compares the routes between the two
+test servers (through this computer, direct push and pull, within one server).
+
 Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many`.
+
+## Debugging transfers
+
+Every transfer records a trace (JSON lines) in `~/.local/state/ferge/transfers`; the app logs to
+`~/.local/state/ferge/ferge.log` (level `FERGE_LOG`, default `info,ferge_core=debug`).
+`cargo run -p ferge-bench --bin ferge-trace [-- FILE… | --last N] [--files] [--server] [--commands]`
+summarizes traces (route and why, probes, phases, throughput, per-file times, errors, server
+commands and logs). Overrides for experiments:
+
+- `FERGE_ROUTE=auto|relay|direct` (direct: no fallback, fail loudly)
+- `FERGE_DIRECT_ADDRESS=host:port=host:port,…` how one server reaches the other, e.g.
+  `127.0.0.1:2222=sshd:22,127.0.0.1:2223=sshd2:22` for the test servers
+- `FERGE_DIRECT_PREFER=pull`, `FERGE_DIRECT_WORKERS=n`, `FERGE_DIRECT_KEEP=1` (keep job folders
+  `~/.cache/ferge/jobs/<id>` on the servers), `FERGE_DIRECT_VERBOSE=1` (ssh debug output there),
+  `FERGE_DIRECT_BATCH=0` (every file alone, no `tar` batches)
+- `FERGE_TRACE_DIR=dir`, `FERGE_TRACE=0`
+
+Direct-transfer scripts live in `crates/ferge-core/src/transfer/direct/script.rs`; their unit
+tests run them with the local `sh`. A direct transfer leaves every server as it found it and
+says so in its trace (`direct.footprint`); `cargo run -p ferge-bench --bin ferge-direct --
+inspect|purge [-F ssh_config] [user@]host` shows or removes whatever ferge left on a server
+(logs in with ssh's keys and agent, no passwords). Running direct jobs are recorded in
+`~/.local/state/ferge/jobs/<id>.json`; the app follows them again at startup.
 
 To try favorites and saved passwords without touching your own data, point the data directory
 elsewhere and force the encrypted-file store:

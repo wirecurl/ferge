@@ -24,7 +24,8 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
   can be paused and resumed in the middle of a file. Files are written as `name.ferge-part` and
   renamed when complete, keeping their modification time; cancelling removes partial files.
 - Existing files are not overwritten silently: replace, skip or keep both, optionally for the
-  rest of a transfer.
+  rest of a transfer. A folder that exists already is asked about once: merge into it, skip it
+  or keep both. A symbolic link where a folder goes is never followed.
 - SFTP reads and writes are pipelined (16 requests in flight, up to 255 KiB each) over separate
   data channels, so transfers never block browsing.
 - Two file browsers per tab, side by side (one in narrow windows). A server panel in each:

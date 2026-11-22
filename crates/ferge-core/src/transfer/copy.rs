@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use futures::StreamExt as _;
 
 use super::plan::{FileStatus, Plan, PlannedFile, part_path};
-use super::{Conflict, ConflictAction, Shared, Stop, Transfer, lock, names};
+use super::{Conflict, ConflictAction, ConflictKind, Shared, Stop, Transfer, lock, names};
 use crate::entry::{EntryKind, Metadata};
 use crate::error::{Error, Result};
 use crate::path::RemotePath;
@@ -51,6 +51,22 @@ pub(super) async fn copy_files(transfer: &Arc<Transfer>, shared: &Arc<Shared>, p
             }
         })
         .await;
+}
+
+/// Marks a file that is still pending as failed with `message`, without
+/// trying to copy it.
+pub(super) fn fail_pending(transfer: &Transfer, file: &PlannedFile, message: String) {
+    if lock(&file.state).status != FileStatus::Pending {
+        return;
+    }
+    finish_file(
+        transfer,
+        file,
+        Err(Error::Remote {
+            path: file.target.clone(),
+            message,
+        }),
+    );
 }
 
 fn finish_file(transfer: &Transfer, file: &PlannedFile, outcome: Result<Outcome>) {
@@ -245,6 +261,7 @@ async fn choose_destination(
     } else {
         let conflict = Conflict {
             transfer: transfer.id,
+            kind: ConflictKind::File,
             path: file.target.clone(),
             source_size: source.size,
             source_modified: source.modified,
@@ -267,11 +284,13 @@ async fn choose_destination(
     }
 }
 
-/// Asks the transfer's resolver, unless an earlier answer applies to all.
-/// Questions of one transfer are asked one at a time.
-async fn resolve(transfer: &Transfer, conflict: Conflict) -> Option<ConflictAction> {
+/// Asks the transfer's resolver, unless an earlier answer applies to all
+/// conflicts of this kind. Questions of one transfer are asked one at a
+/// time.
+pub(super) async fn resolve(transfer: &Transfer, conflict: Conflict) -> Option<ConflictAction> {
+    let kind = conflict.kind;
     let mut remembered = transfer.conflicts.lock().await;
-    if let Some(action) = *remembered {
+    if let Some(action) = remembered.get(kind) {
         return Some(action);
     }
     // Another file's question may have stopped the transfer while this one
@@ -281,7 +300,7 @@ async fn resolve(transfer: &Transfer, conflict: Conflict) -> Option<ConflictActi
     }
     let decision = transfer.resolver.resolve(conflict).await?;
     if decision.apply_to_all {
-        *remembered = Some(decision.action);
+        remembered.set(kind, decision.action);
     }
     Some(decision.action)
 }

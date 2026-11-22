@@ -213,6 +213,132 @@ async fn never_writes_through_a_planted_partial_file() {
     assert_eq!(files_below(to.path()), ["notes.txt", "report.pdf"]);
 }
 
+/// Answers every conflict with `action` and records what was asked.
+#[derive(Debug)]
+struct Recording {
+    action: ConflictAction,
+    asked: Mutex<Vec<(ConflictKind, String)>>,
+}
+
+#[async_trait]
+impl ConflictResolver for Recording {
+    async fn resolve(&self, conflict: Conflict) -> Option<ConflictDecision> {
+        let name = conflict.path.file_name().unwrap_or_default().to_owned();
+        self.asked.lock().unwrap().push((conflict.kind, name));
+        Some(ConflictDecision {
+            action: self.action,
+            apply_to_all: false,
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asks_once_about_an_existing_folder() {
+    for (action, expected) in [
+        (
+            ConflictAction::Overwrite,
+            vec![
+                "project/",
+                "project/new.txt",
+                "project/old.txt",
+                "project/sub/",
+                "project/sub/deep.txt",
+            ],
+        ),
+        (ConflictAction::Skip, vec!["project/", "project/old.txt"]),
+        (
+            ConflictAction::KeepBoth,
+            vec![
+                "project (2)/",
+                "project (2)/new.txt",
+                "project (2)/sub/",
+                "project (2)/sub/deep.txt",
+                "project/",
+                "project/old.txt",
+            ],
+        ),
+    ] {
+        let from = tempfile::tempdir().unwrap();
+        let to = tempfile::tempdir().unwrap();
+        write(&from.path().join("project/new.txt"), b"new");
+        write(&from.path().join("project/sub/deep.txt"), b"deep");
+        write(&to.path().join("project/old.txt"), b"old");
+        let recording = Arc::new(Recording {
+            action,
+            asked: Mutex::new(Vec::new()),
+        });
+        let (queue, _events) = TransferQueue::new(DEFAULT_PARALLEL_FILES);
+        let id = queue.enqueue(
+            TransferRequest {
+                source: local(),
+                items: vec![path(&from.path().join("project"))],
+                target: local(),
+                target_dir: path(to.path()),
+            },
+            Arc::clone(&recording) as Arc<dyn ConflictResolver>,
+        );
+        let done = settled(&queue, id).await;
+        assert_eq!(
+            done.state,
+            TransferState::Completed,
+            "{action:?}: {:?}",
+            done.errors
+        );
+        assert_eq!(
+            *recording.asked.lock().unwrap(),
+            [(ConflictKind::Folder, "project".to_owned())],
+            "{action:?}"
+        );
+        assert_eq!(files_below(to.path()), expected, "{action:?}");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn never_copies_into_a_symlink_in_place_of_a_folder() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    write(&from.path().join("project/sub/a.txt"), b"a");
+    write(&from.path().join("project/b.txt"), b"b");
+    std::fs::create_dir(to.path().join("project")).unwrap();
+    // A link where the subfolder goes, pointing out of the target.
+    std::os::unix::fs::symlink(elsewhere.path(), to.path().join("project/sub")).unwrap();
+
+    let (queue, _events) = TransferQueue::new(DEFAULT_PARALLEL_FILES);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: local(),
+            items: vec![path(&from.path().join("project"))],
+            target: local(),
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Overwrite)),
+    );
+    let done = settled(&queue, id).await;
+    assert_eq!(done.state, TransferState::Failed);
+    assert!(
+        done.errors
+            .iter()
+            .any(|error| error.contains("symbolic link")),
+        "{:?}",
+        done.errors
+    );
+    assert_eq!(
+        std::fs::read_dir(elsewhere.path()).unwrap().count(),
+        0,
+        "nothing went through the link"
+    );
+    assert_eq!(
+        std::fs::read(to.path().join("project/b.txt")).unwrap(),
+        b"b"
+    );
+    assert_eq!(
+        (done.files_done, done.files_failed, done.files_total),
+        (1, 1, 2)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn resolves_conflicts() {
     for (action, expected_a, extra) in [

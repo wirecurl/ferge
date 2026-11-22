@@ -90,17 +90,13 @@ impl Plan {
     /// skipped, which also rules out endless loops.
     pub(super) async fn scan(
         source: &dyn Remote,
-        items: &[RemotePath],
+        items: &[(RemotePath, EntryName)],
         target_dir: &RemotePath,
         same_remote: bool,
     ) -> Result<(Self, Vec<String>)> {
         let mut plan = Self::default();
         let mut problems = Vec::new();
-        for item in items {
-            let name = item
-                .file_name()
-                .and_then(|name| EntryName::new(name).ok())
-                .ok_or_else(|| Error::InvalidPath(item.as_str().into()))?;
+        for (item, name) in items {
             // One unreadable item (e.g. a dangling link) must not stop the rest.
             let metadata = match source.stat(item).await {
                 Ok(metadata) => metadata,
@@ -109,7 +105,7 @@ impl Plan {
                     continue;
                 }
             };
-            let target = target_dir.join(&name);
+            let target = target_dir.join(name);
             if !metadata.is_dir() {
                 plan.files.push(PlannedFile::new(
                     item.clone(),
@@ -197,22 +193,40 @@ impl Plan {
         })
     }
 
-    /// Creates the folders that do not exist yet. Returns problems; files in
-    /// a folder that could not be created fail on their own.
-    pub(super) async fn create_dirs(&self, target: &dyn Remote) -> Vec<String> {
+    /// Creates the folders that do not exist yet. Returns problems, and the
+    /// folders that are not usable: not made, or something else than a
+    /// folder (a file, or a symlink, which is never followed). Nothing is
+    /// to be copied below those.
+    pub(super) async fn create_dirs(&self, target: &dyn Remote) -> (Vec<String>, Vec<RemotePath>) {
         let mut problems = Vec::new();
+        let mut unusable: Vec<RemotePath> = Vec::new();
         for dir in &self.dirs {
-            match target.stat(dir).await {
-                Ok(metadata) if metadata.is_dir() => {}
-                Ok(_) => problems.push(format!("{dir}: a file with this name exists")),
+            if unusable.iter().any(|bad| is_within(dir, bad)) {
+                continue;
+            }
+            let problem = match target.lstat(dir).await {
+                Ok(metadata) if metadata.kind == EntryKind::Directory => None,
+                Ok(metadata) if metadata.kind == EntryKind::Symlink => Some(format!(
+                    "{dir}: a symbolic link is in place of the folder; it is not followed"
+                )),
+                Ok(_) => Some(format!("{dir}: a file with this name exists")),
                 Err(Error::NotFound { .. }) => match target.mkdir(dir).await {
-                    Ok(()) | Err(Error::AlreadyExists { .. }) => {}
-                    Err(error) => problems.push(super::describe(dir, &error)),
+                    Ok(()) => None,
+                    // Made by someone else meanwhile: look at it again.
+                    Err(Error::AlreadyExists { .. }) => match target.lstat(dir).await {
+                        Ok(metadata) if metadata.kind == EntryKind::Directory => None,
+                        _ => Some(format!("{dir}: something else appeared in its place")),
+                    },
+                    Err(error) => Some(super::describe(dir, &error)),
                 },
-                Err(error) => problems.push(super::describe(dir, &error)),
+                Err(error) => Some(super::describe(dir, &error)),
+            };
+            if let Some(problem) = problem {
+                problems.push(problem);
+                unusable.push(dir.clone());
             }
         }
-        problems
+        (problems, unusable)
     }
 
     /// Marks failed files as pending again. Returns how many there were.
@@ -259,7 +273,71 @@ pub(super) fn part_path(path: &RemotePath) -> Option<RemotePath> {
 }
 
 /// Whether `path` is `dir` or lies below it.
-fn is_within(path: &RemotePath, dir: &RemotePath) -> bool {
+/// The name each item gets in the target folder. A folder that exists
+/// there already is a conflict, asked about once for the folder: merge
+/// into it, skip it, or keep both under a new name. Items skipped are left
+/// out. `None` if the question was dismissed, which cancels the transfer.
+pub(super) async fn top_level_targets(
+    transfer: &super::Transfer,
+    same_remote: bool,
+) -> Result<Option<Vec<(RemotePath, EntryName)>>> {
+    let mut targets = Vec::with_capacity(transfer.items.len());
+    for item in &transfer.items {
+        let name = item
+            .file_name()
+            .and_then(|name| EntryName::new(name).ok())
+            .ok_or_else(|| Error::InvalidPath(item.as_str().into()))?;
+        let target = transfer.target_dir.join(&name);
+        let is_folder =
+            matches!(transfer.source.stat(item).await, Ok(metadata) if metadata.is_dir());
+        let existing = if is_folder {
+            transfer.target.lstat(&target).await.ok()
+        } else {
+            None
+        };
+        let Some(existing) = existing.filter(|existing| existing.kind == EntryKind::Directory)
+        else {
+            // Files are asked about one by one while copying; anything else
+            // in a folder's place is reported when folders are made.
+            targets.push((item.clone(), name));
+            continue;
+        };
+        let action = if same_remote && target == *item {
+            // A folder copied onto itself can only mean "duplicate".
+            super::ConflictAction::KeepBoth
+        } else {
+            let conflict = super::Conflict {
+                transfer: transfer.id,
+                kind: super::ConflictKind::Folder,
+                path: target.clone(),
+                source_size: 0,
+                source_modified: None,
+                existing_size: 0,
+                existing_modified: existing.modified,
+            };
+            let Some(action) = super::copy::resolve(transfer, conflict).await else {
+                transfer.stop(super::Stop::Cancel);
+                return Ok(None);
+            };
+            action
+        };
+        match action {
+            super::ConflictAction::Overwrite => targets.push((item.clone(), name)),
+            super::ConflictAction::Skip => {}
+            super::ConflictAction::KeepBoth => {
+                let free = super::names::free_name(transfer.target.as_ref(), &target).await?;
+                let name = free
+                    .file_name()
+                    .and_then(|name| EntryName::new(name).ok())
+                    .ok_or_else(|| Error::InvalidPath(free.as_str().into()))?;
+                targets.push((item.clone(), name));
+            }
+        }
+    }
+    Ok(Some(targets))
+}
+
+pub(super) fn is_within(path: &RemotePath, dir: &RemotePath) -> bool {
     path == dir
         || dir.is_root()
         || path

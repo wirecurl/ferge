@@ -142,7 +142,9 @@ pub struct TransferSnapshot {
 #[derive(Clone, Debug)]
 pub struct Conflict {
     pub transfer: TransferId,
-    /// The existing file on the target.
+    /// Whether a file or a folder is in the way.
+    pub kind: ConflictKind,
+    /// The existing file or folder on the target.
     pub path: RemotePath,
     pub source_size: u64,
     pub source_modified: Option<SystemTime>,
@@ -150,9 +152,21 @@ pub struct Conflict {
     pub existing_modified: Option<SystemTime>,
 }
 
+/// What is in the way of a copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictKind {
+    /// A file exists where a file is copied to; sizes and times are those
+    /// of the two files.
+    File,
+    /// A folder exists where a folder is copied to; sizes are 0.
+    Folder,
+}
+
 /// How to resolve a [`Conflict`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConflictAction {
+    /// For a file, replace it; for a folder, merge into it (files that
+    /// exist in both are asked about one by one).
     Overwrite,
     Skip,
     /// Copy under a new name such as `report (2).pdf`.
@@ -275,7 +289,7 @@ impl TransferQueue {
             resolver,
             progress: Progress::default(),
             control: Mutex::new(Control::new()),
-            conflicts: tokio::sync::Mutex::new(None),
+            conflicts: tokio::sync::Mutex::new(Remembered::default()),
         });
         lock(&self.shared.transfers).push(Arc::clone(&transfer));
         self.shared.emit(TransferEvent::Changed(id));
@@ -487,9 +501,32 @@ struct Transfer {
     resolver: Arc<dyn ConflictResolver>,
     progress: Progress,
     control: Mutex<Control>,
-    /// The action chosen "for all", and a lock that keeps conflict questions
-    /// of one transfer from piling up.
-    conflicts: tokio::sync::Mutex<Option<ConflictAction>>,
+    /// The actions chosen "for all", and a lock that keeps conflict
+    /// questions of one transfer from piling up.
+    conflicts: tokio::sync::Mutex<Remembered>,
+}
+
+/// Answers that apply to all further conflicts of their kind.
+#[derive(Debug, Default)]
+struct Remembered {
+    file: Option<ConflictAction>,
+    folder: Option<ConflictAction>,
+}
+
+impl Remembered {
+    fn get(&self, kind: ConflictKind) -> Option<ConflictAction> {
+        match kind {
+            ConflictKind::File => self.file,
+            ConflictKind::Folder => self.folder,
+        }
+    }
+
+    fn set(&mut self, kind: ConflictKind, action: ConflictAction) {
+        match kind {
+            ConflictKind::File => self.file = Some(action),
+            ConflictKind::Folder => self.folder = Some(action),
+        }
+    }
 }
 
 impl Transfer {
@@ -653,9 +690,13 @@ impl Transfer {
         self.set_state(TransferState::Scanning, shared);
         let same_remote = Arc::ptr_eq(&self.source, &self.target)
             || (self.source.is_local() && self.target.is_local());
+        let Some(targets) = plan::top_level_targets(self, same_remote).await? else {
+            // A folder question was dismissed: the transfer is cancelled.
+            return Ok(Arc::new(plan::Plan::default()));
+        };
         let (plan, errors) = plan::Plan::scan(
             self.source.as_ref(),
-            &self.items,
+            &targets,
             &self.target_dir,
             same_remote,
         )
@@ -684,8 +725,20 @@ impl Transfer {
             self.make_plan(shared).await?
         };
         self.set_state(TransferState::Running, shared);
-        for error in plan.create_dirs(self.target.as_ref()).await {
+        let (problems, unusable) = plan.create_dirs(self.target.as_ref()).await;
+        for error in problems {
             self.control().record_error(error);
+        }
+        // Nothing goes into a folder that could not be made, or that is a
+        // file or a symlink: a path through a link would write wherever it
+        // points.
+        for file in &plan.files {
+            if let Some(dir) = unusable
+                .iter()
+                .find(|dir| plan::is_within(&file.target, dir))
+            {
+                copy::fail_pending(self, file, format!("{dir} is not a folder"));
+            }
         }
         shared.emit(TransferEvent::Writing {
             id: self.id,

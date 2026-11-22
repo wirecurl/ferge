@@ -7,7 +7,7 @@
 
 use ferge_core::interaction::{HostKeyDecision, HostKeyPrompt};
 use ferge_core::library::{BookmarkDraft, BookmarkId, FolderId, Library};
-use ferge_core::transfer::{Conflict, ConflictAction, ConflictDecision, TransferId};
+use ferge_core::transfer::{Conflict, ConflictAction, ConflictDecision, ConflictKind, TransferId};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
@@ -964,51 +964,60 @@ impl Workspace {
                     this.child(div().text_small().text_color(muted).child("newer"))
                 })
         };
-        Self::card(cx)
-            .w(px(500.))
-            .track_focus(&self.prompt_focus)
-            .child(div().text_title().child(format!("Replace “{name}”?")))
-            .child(
-                div()
-                    .text_body()
-                    .child(format!("A file with this name already exists in {folder}.")),
-            )
-            .child(
-                v_flex()
-                    .p_3()
-                    .gap_1()
-                    .rounded(style::RADIUS)
-                    .bg(code_bg)
-                    .text_body()
-                    .child(describe(
-                        "Existing",
-                        conflict.existing_size,
-                        conflict.existing_modified,
-                        newer == Some(false),
-                    ))
-                    .child(describe(
-                        "New",
-                        conflict.source_size,
-                        conflict.source_modified,
-                        newer == Some(true),
-                    )),
-            )
-            .child(
-                Checkbox::new("conflict-apply-all")
-                    .label("Do the same for all conflicts in this transfer")
-                    .checked(apply_to_all)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        if let Some(ActivePrompt::Conflict { apply_to_all, .. }) = &mut this.prompt
-                        {
-                            *apply_to_all = *checked;
-                            cx.notify();
-                        }
-                    })),
-            )
-            .child(Self::conflict_buttons(cx))
+        let card = Self::card(cx).w(px(500.)).track_focus(&self.prompt_focus);
+        let card = if conflict.kind == ConflictKind::Folder {
+            card.child(div().text_title().child(format!("Merge into “{name}”?")))
+                .child(div().text_body().child(format!(
+                    "A folder with this name already exists in {folder}. Merging puts the \
+                     copied items into it; files that exist in both are asked about one by one."
+                )))
+        } else {
+            card.child(div().text_title().child(format!("Replace “{name}”?")))
+                .child(
+                    div()
+                        .text_body()
+                        .child(format!("A file with this name already exists in {folder}.")),
+                )
+                .child(
+                    v_flex()
+                        .p_3()
+                        .gap_1()
+                        .rounded(style::RADIUS)
+                        .bg(code_bg)
+                        .text_body()
+                        .child(describe(
+                            "Existing",
+                            conflict.existing_size,
+                            conflict.existing_modified,
+                            newer == Some(false),
+                        ))
+                        .child(describe(
+                            "New",
+                            conflict.source_size,
+                            conflict.source_modified,
+                            newer == Some(true),
+                        )),
+                )
+        };
+        card.child(
+            Checkbox::new("conflict-apply-all")
+                .label(if conflict.kind == ConflictKind::Folder {
+                    "Do the same for all folders in this transfer"
+                } else {
+                    "Do the same for all files in this transfer"
+                })
+                .checked(apply_to_all)
+                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                    if let Some(ActivePrompt::Conflict { apply_to_all, .. }) = &mut this.prompt {
+                        *apply_to_all = *checked;
+                        cx.notify();
+                    }
+                })),
+        )
+        .child(Self::conflict_buttons(conflict.kind, cx))
     }
 
-    fn conflict_buttons(cx: &mut Context<Self>) -> gpui::Div {
+    fn conflict_buttons(kind: ConflictKind, cx: &mut Context<Self>) -> gpui::Div {
         let decide = |action: ConflictAction| {
             cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
                 this.answer_conflict(Some(action), window, cx);
@@ -1038,7 +1047,11 @@ impl Workspace {
             .child(
                 Button::new("conflict-replace")
                     .primary()
-                    .label("Replace")
+                    .label(if kind == ConflictKind::Folder {
+                        "Merge"
+                    } else {
+                        "Replace"
+                    })
                     .on_click(decide(ConflictAction::Overwrite)),
             )
     }

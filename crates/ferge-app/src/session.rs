@@ -295,7 +295,7 @@ impl Session {
         match &self.connection {
             Some(connection) => {
                 let browser = connection.browser.read(cx);
-                let folder = browser.path().file_name().unwrap_or("/");
+                let folder = crate::format::shown(browser.path().file_name().unwrap_or("/"));
                 format!("{folder} — {}", connection.destination.title()).into()
             }
             None => "Servers".into(),
@@ -307,7 +307,11 @@ impl Session {
         match &self.connection {
             Some(connection) => {
                 let browser = connection.browser.read(cx);
-                format!("{} – {} – ferge", browser.path(), browser.remote_label())
+                format!(
+                    "{} – {} – ferge",
+                    crate::format::shown(browser.path().as_str()),
+                    browser.remote_label()
+                )
             }
             None => "ferge".to_owned(),
         }

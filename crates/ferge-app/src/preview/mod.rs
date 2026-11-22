@@ -471,7 +471,9 @@ impl Render for Preview {
                         .min_w_0()
                         .truncate()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(SharedString::from(entry.name.as_str().to_owned())),
+                        .child(SharedString::from(crate::format::shown(
+                            entry.name.as_str(),
+                        ))),
                 )
                 .child(
                     div()

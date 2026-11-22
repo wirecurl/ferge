@@ -12,6 +12,22 @@ static TIME_ZONE: OnceLock<TimeZone> = OnceLock::new();
 
 /// Loads the system time zone. Reads `/etc/localtime`, so call it from a
 /// background thread; formatting afterwards is pure computation.
+/// A file name (or other text from a server) as it is shown: control
+/// characters and invisible formatting characters, such as a right-to-left
+/// override that makes `gnp.exe` read `exe.png`, appear as `�` instead of
+/// acting on the text around them. The name itself is not changed; this is
+/// only what the eye sees.
+pub(crate) fn shown(name: &str) -> String {
+    let odd = |c: char| c.is_control() || ferge_core::interaction::is_invisible_format_char(c);
+    if name.chars().any(odd) {
+        name.chars()
+            .map(|c| if odd(c) { '\u{FFFD}' } else { c })
+            .collect()
+    } else {
+        name.to_owned()
+    }
+}
+
 pub(crate) fn load_time_zone() {
     let _ = TIME_ZONE.set(TimeZone::system());
 }
@@ -132,5 +148,18 @@ mod tests {
         assert_eq!(permissions(0o4755), "rwsr-xr-x");
         assert_eq!(permissions(0o1777), "rwxrwxrwt");
         assert_eq!(permissions(0o2644), "rw-r-Sr--");
+    }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::shown;
+
+    #[test]
+    fn hides_what_would_disguise_a_name() {
+        assert_eq!(shown("report.pdf"), "report.pdf");
+        assert_eq!(shown("evil\u{202e}gnp.exe"), "evil\u{FFFD}gnp.exe");
+        assert_eq!(shown("two\nlines\x1b"), "two\u{FFFD}lines\u{FFFD}");
+        assert_eq!(shown("zero\u{200b}width"), "zero\u{FFFD}width");
     }
 }

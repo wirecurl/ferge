@@ -319,7 +319,7 @@ impl Workspace {
                         group: Group::File,
                         icon: file_type.icon(),
                         icon_color: Some(file_type.color(cx.theme())),
-                        title: entry.name.as_str().to_owned().into(),
+                        title: crate::format::shown(entry.name.as_str()).into(),
                         detail: location.clone(),
                         shortcut: None,
                         target: Target::Entry {

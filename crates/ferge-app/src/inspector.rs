@@ -143,12 +143,9 @@ impl Inspector {
                     .gap_2()
                     .py_2()
                     .child(Icon::new(icon).size_10().text_color(color))
-                    .child(
-                        div()
-                            .text_center()
-                            .text_title()
-                            .child(SharedString::from(entry.name.as_str().to_owned())),
-                    ),
+                    .child(div().text_center().text_title().child(SharedString::from(
+                        crate::format::shown(entry.name.as_str()),
+                    ))),
             )
             .child(
                 style::group(cx)

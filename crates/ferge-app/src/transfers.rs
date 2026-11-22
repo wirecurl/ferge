@@ -264,7 +264,7 @@ impl TransferPanel {
                             .min_w_0()
                             .truncate()
                             .text_body()
-                            .child(SharedString::from(snapshot.title.clone())),
+                            .child(SharedString::from(crate::format::shown(&snapshot.title))),
                     )
                     .child(
                         div()

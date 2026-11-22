@@ -503,7 +503,10 @@ impl Workspace {
                     .filter(|(_, kind)| *kind == ferge_core::EntryKind::Directory)
                     .count();
                 let what = match items.as_slice() {
-                    [(path, _)] => format!("“{}”", path.file_name().unwrap_or("/")),
+                    [(path, _)] => format!(
+                        "“{}”",
+                        crate::format::shown(path.file_name().unwrap_or("/"))
+                    ),
                     _ => format!("{} items", items.len()),
                 };
                 let contents = if folders > 0 {
@@ -936,11 +939,11 @@ impl Workspace {
     ) -> gpui::Div {
         let theme = cx.theme();
         let (muted, code_bg) = (theme.muted_foreground, theme.muted);
-        let name = conflict.path.file_name().unwrap_or("/").to_owned();
+        let name = crate::format::shown(conflict.path.file_name().unwrap_or("/"));
         let folder = conflict
             .path
             .parent()
-            .map(|parent| parent.to_string())
+            .map(|parent| crate::format::shown(parent.as_str()))
             .unwrap_or_default();
         let newer = match (conflict.source_modified, conflict.existing_modified) {
             (Some(new), Some(old)) if new > old => Some(true),

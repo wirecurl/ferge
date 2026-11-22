@@ -335,11 +335,19 @@ impl Library {
         if let Some(parent) = parent {
             ensure_folder_exists(&transaction, parent)?;
             // Walk up from the new parent; meeting `folder` means a cycle.
+            // A damaged database may hold a cycle of its own, which must not
+            // keep this walk going forever.
             let mut current = Some(parent);
+            let mut seen = std::collections::HashSet::new();
             while let Some(id) = current {
                 if id == folder {
                     return Err(LibraryError::Invalid(
                         "a folder cannot be moved into itself".into(),
+                    ));
+                }
+                if !seen.insert(id) {
+                    return Err(LibraryError::Invalid(
+                        "the folders in the library form a loop".into(),
                     ));
                 }
                 current = transaction
@@ -556,6 +564,16 @@ fn create_private_dir(dir: &Path) -> Result<()> {
         source,
     };
     if dir.is_dir() {
+        // Made earlier, perhaps open to others: close it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir).map_err(error)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & 0o700))
+                    .map_err(error)?;
+            }
+        }
         return Ok(());
     }
     let mut builder = std::fs::DirBuilder::new();

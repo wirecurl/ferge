@@ -69,7 +69,10 @@ pub fn decode(bytes: &[u8], svg: bool) -> Result<Picture, DocumentError> {
     // An animation keeps its frames if one frame at full size fits the
     // budget several times over; a huge canvas is shown still.
     let frame_bytes = usize::try_from(pixels.saturating_mul(4)).unwrap_or(usize::MAX);
-    if frame_bytes.saturating_mul(4) <= FRAME_BUDGET
+    // Frames are not scaled, so a canvas wider or taller than MAX_SIDE is
+    // shown still (and scaled) too.
+    if width.max(height) <= MAX_SIDE
+        && frame_bytes.saturating_mul(4) <= FRAME_BUDGET
         && let Some(frames) = animation(bytes, format, frame_bytes)?
     {
         return Ok(Picture { frames });

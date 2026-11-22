@@ -82,7 +82,7 @@ jobs:
         run: ./testserver/up.sh
       - name: SFTP integration tests
         timeout-minutes: 5
-        run: cargo test -p ferge-core --test sftp --locked --profile ci -- --ignored
+        run: cargo test --workspace --test sftp --locked --profile ci -- --ignored
       - name: Stop the SFTP test server
         if: always()
         run: ./testserver/down.sh

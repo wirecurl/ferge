@@ -36,4 +36,24 @@ The first release, 0.1.0, is in preparation.
   hand-editable, watched `settings.toml`.
 - Follows the desktop's fonts and light or dark preference.
 
+### Security
+
+Hardening from a review of the code before the first release:
+
+- Host names that known_hosts would read as patterns (`*`, `?`, `,` and the like) are refused,
+  so a confirmed host key can never be trusted for other hosts.
+- Spreadsheets, office documents, PDF pages and pictures are decoded in a separate worker
+  process with a memory and time limit; the readers themselves are bounded too, and SVG
+  drawings cannot read files.
+- Partial files of transfers are created exclusively and never written through a symlink;
+  a symlink in place of a folder is never followed, and existing folders are merged only
+  after asking.
+- Listings, transfer plans and copies are bounded against servers that send without end;
+  connecting times out on a silent server.
+- Working as root asks sudo about the very sftp-server it runs, so no password can reach
+  sftp-server; sessions as root close once they are left.
+- The encrypted password file is locked against concurrent writers, the settings file is
+  followed through a symlink only in a private folder, and names with hidden characters are
+  shown so that they cannot disguise themselves.
+
 [Unreleased]: https://github.com/wirecurl/ferge/commits/main

@@ -10,10 +10,15 @@ use super::{Conflict, ConflictAction, Shared, Stop, Transfer, lock, names};
 use crate::entry::{EntryKind, Metadata};
 use crate::error::{Error, Result};
 use crate::path::RemotePath;
+use crate::remote::Remote;
 
 /// Files of one transfer copied at the same time (the queue-wide limit
 /// applies on top).
 const FILES_PER_TRANSFER: usize = 4;
+/// How far a file may grow beyond its size while it is copied before the
+/// copy is given up: a source that sends without end must not fill the
+/// target's disk.
+const GROWTH_ALLOWANCE: u64 = 64 * 1024 * 1024;
 
 enum Outcome {
     Copied,
@@ -112,31 +117,7 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
     let part =
         part_path(&destination).ok_or_else(|| Error::InvalidPath(destination.as_str().into()))?;
 
-    // Continue a partial file only if it still matches what was confirmed,
-    // and only a regular file: never write through a symlink planted there.
-    let resume_at = lock(&file.state).resume_at;
-    let offset = match resume_at {
-        Some(at) if unchanged && at > 0 => match target.lstat(&part).await {
-            Ok(metadata)
-                if metadata.kind == EntryKind::File
-                    && metadata.size >= at
-                    && at <= current.size =>
-            {
-                at
-            }
-            _ => 0,
-        },
-        _ => 0,
-    };
-    if offset == 0 {
-        // A partial file of an earlier attempt, or whatever else has this
-        // name, is removed (a symlink itself, not its target); the new one
-        // is created exclusively.
-        match target.delete_file(&part).await {
-            Ok(()) | Err(Error::NotFound { .. }) => {}
-            Err(error) => return Err(error),
-        }
-    }
+    let offset = start_partial_file(target, file, &part, unchanged, current.size).await?;
     {
         let mut state = lock(&file.state);
         transfer
@@ -148,9 +129,28 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
     let mut reader = source.read_from(&file.source, offset).await?;
     let mut writer = target.open_writer(&part, offset).await?;
     lock(&file.state).resume_at = Some(offset);
+    // A file may grow while it is read (a log, say), but not without end.
+    let most = current
+        .size
+        .saturating_add(current.size / 2)
+        .saturating_add(GROWTH_ALLOWANCE);
+    let mut written = offset;
     while let Some(chunk) = reader.next().await {
         let chunk = chunk?;
         let len = chunk.len() as u64;
+        written = written.saturating_add(len);
+        if written > most {
+            // Nothing of it is worth resuming.
+            drop(writer);
+            if let Err(error) = target.delete_file(&part).await {
+                tracing::debug!(path = %part, %error, "could not remove the partial file");
+            }
+            lock(&file.state).resume_at = None;
+            return Err(Error::Remote {
+                path: file.source.clone(),
+                message: "kept growing far beyond its size while it was copied".into(),
+            });
+        }
         writer.write(chunk).await?;
         let confirmed = writer.confirmed();
         let mut state = lock(&file.state);
@@ -180,6 +180,42 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
         tracing::debug!(path = %destination, %error, "could not keep the modification time");
     }
     Ok(Outcome::Copied)
+}
+
+/// Where to start writing the partial file `part`: where an earlier
+/// attempt stopped, if the source is `unchanged` and what was written is
+/// still there, otherwise at 0 with whatever has that name removed.
+async fn start_partial_file(
+    target: &dyn Remote,
+    file: &PlannedFile,
+    part: &RemotePath,
+    unchanged: bool,
+    size: u64,
+) -> Result<u64> {
+    // Continue only a regular file: never write through a symlink planted
+    // there.
+    let resume_at = lock(&file.state).resume_at;
+    let offset = match resume_at {
+        Some(at) if unchanged && at > 0 => match target.lstat(part).await {
+            Ok(metadata)
+                if metadata.kind == EntryKind::File && metadata.size >= at && at <= size =>
+            {
+                at
+            }
+            _ => 0,
+        },
+        _ => 0,
+    };
+    if offset == 0 {
+        // A partial file of an earlier attempt, or whatever else has this
+        // name, is removed (a symlink itself, not its target); the new one
+        // is created exclusively.
+        match target.delete_file(part).await {
+            Ok(()) | Err(Error::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(offset)
 }
 
 /// Where the file goes and whether that replaces an existing file; `None` to

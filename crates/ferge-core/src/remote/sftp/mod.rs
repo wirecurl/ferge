@@ -468,6 +468,7 @@ async fn list_task(inner: Arc<Inner>, path: RemotePath, sender: mpsc::Sender<Res
     let read = || inner.meta.readdir(handle.as_str());
     let mut in_flight: FuturesOrdered<_> = (0..READDIR_PIPELINE).map(|_| read()).collect();
     let mut exhausted = false;
+    let mut listed = 0_usize;
     while let Some(result) = futures::select_biased! {
         // Stop as soon as the consumer goes away instead of reading on.
         () = sender.closed().fuse() => None,
@@ -479,6 +480,13 @@ async fn list_task(inner: Arc<Inner>, path: RemotePath, sender: mpsc::Sender<Res
                     in_flight.push_back(read());
                 }
                 let entries = convert_names(&path, name.files);
+                listed = listed.saturating_add(entries.len());
+                if listed > crate::remote::LISTING_LIMIT {
+                    let _ = sender
+                        .send(Err(crate::remote::too_many_entries(&path)))
+                        .await;
+                    break;
+                }
                 if !entries.is_empty() && sender.send(Ok(entries)).await.is_err() {
                     break;
                 }

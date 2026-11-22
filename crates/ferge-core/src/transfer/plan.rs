@@ -67,6 +67,14 @@ impl PlannedFile {
     }
 }
 
+/// Files and folders one transfer may hold at most. A server that reports
+/// an endless tree (every entry a folder, ever deeper) would otherwise fill
+/// the memory while the plan is made.
+pub(super) const PLAN_LIMIT: usize = 1_000_000;
+/// Paths longer than this are skipped; local file systems refuse them
+/// anyway, and an endless tree stops here.
+const PATH_LIMIT: usize = 4_096;
+
 #[derive(Debug, Default)]
 pub(super) struct Plan {
     /// Folders to create on the target, parents first.
@@ -134,8 +142,21 @@ impl Plan {
                 // A stable order makes progress and conflicts predictable.
                 entries.sort_by(|a, b| a.name.cmp(&b.name));
                 for entry in entries {
+                    if plan.dirs.len() + plan.files.len() >= PLAN_LIMIT {
+                        return Err(Error::Remote {
+                            path: item.clone(),
+                            message: "more than 1,000,000 files and folders, more than one \
+                                      transfer holds"
+                                .into(),
+                        });
+                    }
                     let child = dir.join(&entry.name);
                     let child_target = target.join(&entry.name);
+                    if child.as_str().len() > PATH_LIMIT || child_target.as_str().len() > PATH_LIMIT
+                    {
+                        problems.push(format!("{child}: the path is too long, skipped"));
+                        continue;
+                    }
                     match entry.kind() {
                         EntryKind::Directory => {
                             plan.dirs.push(child_target.clone());
@@ -170,7 +191,10 @@ impl Plan {
     }
 
     pub(super) fn total_bytes(&self) -> u64 {
-        self.files.iter().map(|file| lock(&file.state).size).sum()
+        // Sizes come from the source and may be anything.
+        self.files.iter().fold(0, |total, file| {
+            total.saturating_add(lock(&file.state).size)
+        })
     }
 
     /// Creates the folders that do not exist yet. Returns problems; files in

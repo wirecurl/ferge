@@ -19,7 +19,8 @@ const MAX_NUMBER: u32 = 10_000;
 
 /// Deletes `items`, each with its kind as listed. Folders are deleted with
 /// everything in them, deepest first; symbolic links are removed, never
-/// followed. `progress` receives the number of objects deleted so far.
+/// followed. `progress` receives the number of objects deleted so far; a
+/// local folder is removed in one go and counts as one.
 ///
 /// Stops at the first failure; what was deleted until then stays deleted.
 pub async fn delete(
@@ -29,7 +30,21 @@ pub async fn delete(
 ) -> Result<u64> {
     let mut deleted = 0_u64;
     for (path, kind) in items {
-        if *kind == EntryKind::Directory {
+        if *kind == EntryKind::Directory && remote.is_local() {
+            // The standard library removes a tree without following a
+            // symlink anywhere in it, even one swapped in while it works
+            // (it holds the folders open), which a walk by path cannot.
+            let local = std::path::PathBuf::from(path.as_str());
+            tokio::task::spawn_blocking(move || std::fs::remove_dir_all(local))
+                .await
+                .map_err(|error| Error::Remote {
+                    path: path.clone(),
+                    message: error.to_string(),
+                })?
+                .map_err(|error| Error::from_io(path, error))?;
+            deleted += 1;
+            progress(deleted);
+        } else if *kind == EntryKind::Directory {
             delete_tree(remote, path, &mut deleted, progress).await?;
         } else {
             remote.delete_file(path).await?;
@@ -55,6 +70,16 @@ async fn delete_tree(
             *deleted += 1;
             progress(*deleted);
             continue;
+        }
+        // The listing may be old: make sure this is still a folder, not a
+        // symlink put in its place, before going into it. (SFTP cannot open
+        // a folder without following links, so a short race remains for
+        // whoever can write the parent.)
+        if remote.lstat(&dir).await?.kind != EntryKind::Directory {
+            return Err(Error::Remote {
+                path: dir,
+                message: "is no longer a folder; nothing in it was deleted".into(),
+            });
         }
         pending.push((dir.clone(), true));
         let entries: Vec<_> = remote.list(&dir).try_collect::<Vec<_>>().await?;
@@ -211,14 +236,48 @@ mod tests {
         )
         .await
         .unwrap();
-        // 40 files, deep, link, 4 folders, single.
-        assert_eq!(deleted, 47);
-        assert_eq!(seen.load(Ordering::Relaxed), 47);
+        // The local tree in one go, then the single file.
+        assert_eq!(deleted, 2);
+        assert_eq!(seen.load(Ordering::Relaxed), 2);
         assert!(!tree.exists() && !dir.path().join("single").exists());
         assert!(
             outside.path().join("keep.txt").exists(),
             "links are not followed"
         );
+    }
+
+    #[tokio::test]
+    async fn walking_deletes_check_each_folder_and_count_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.txt"), b"keep").unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("a/b")).unwrap();
+        std::fs::write(tree.join("a/f"), b"x").unwrap();
+        std::fs::write(tree.join("a/b/g"), b"x").unwrap();
+        let remote = LocalRemote::new();
+        let mut deleted = 0;
+        // The walk SFTP uses: files and folders one by one.
+        delete_tree(&remote, &path(&tree), &mut deleted, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(deleted, 5);
+        assert!(!tree.exists());
+
+        // A folder that became a symlink is not gone into.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("was-a-folder");
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+            let mut deleted = 0;
+            assert!(
+                delete_tree(&remote, &path(&link), &mut deleted, &|_| {})
+                    .await
+                    .is_err()
+            );
+            assert_eq!(deleted, 0);
+            assert!(outside.path().join("keep.txt").exists());
+        }
     }
 
     #[tokio::test]

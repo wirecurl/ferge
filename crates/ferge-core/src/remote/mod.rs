@@ -136,6 +136,19 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
 /// Size of the chunks produced by [`ByteStream`]s of the built-in backends.
 pub(crate) const READ_CHUNK: usize = 256 * 1024;
 
+/// Entries a listing may have at most. A server that never ends a listing
+/// (or a folder far beyond what anyone browses) would otherwise fill the
+/// memory; past this, the listing fails.
+pub const LISTING_LIMIT: usize = 2_000_000;
+
+/// The error for a listing of `path` that went past [`LISTING_LIMIT`].
+pub(crate) fn too_many_entries(path: &RemotePath) -> Error {
+    Error::Remote {
+        path: path.clone(),
+        message: "the folder has more than 2,000,000 entries, more than ferge lists".into(),
+    }
+}
+
 /// Turns an [`AsyncRead`] into a [`ByteStream`], mapping errors to `path`.
 pub(crate) fn reader_stream<R>(path: RemotePath, reader: R) -> ByteStream
 where

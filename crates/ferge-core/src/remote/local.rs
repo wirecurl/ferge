@@ -118,7 +118,11 @@ fn list_blocking(path: &RemotePath, sender: &mpsc::Sender<Result<Vec<Entry>>>) {
         }
     };
     let mut chunk = Vec::with_capacity(LIST_CHUNK);
-    for dir_entry in entries {
+    for (index, dir_entry) in entries.enumerate() {
+        if index == super::LISTING_LIMIT {
+            let _ = sender.blocking_send(Err(super::too_many_entries(path)));
+            return;
+        }
         let dir_entry = match dir_entry {
             Ok(dir_entry) => dir_entry,
             Err(error) => {

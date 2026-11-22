@@ -2,7 +2,10 @@
 //! a separate process, and a file that exhausts the worker's memory ends the
 //! worker only, with a "too large" answer for the caller.
 
-#![expect(clippy::unwrap_used, reason = "test fixtures; a failure is a test failure")]
+#![expect(
+    clippy::unwrap_used,
+    reason = "test fixtures; a failure is a test failure"
+)]
 
 use std::io::{Cursor, Write as _};
 use std::path::PathBuf;

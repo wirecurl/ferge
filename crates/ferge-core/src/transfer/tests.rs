@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::StreamExt as _;
 
 use super::*;
@@ -349,6 +350,9 @@ struct Slow {
     inner: LocalRemote,
     /// Offsets reads started at, to see that a resume continued.
     reads_from: Mutex<Vec<u64>>,
+    /// Reads never end and are not slowed down: a source that keeps
+    /// sending past the size it reported.
+    endless: bool,
 }
 
 #[async_trait]
@@ -377,6 +381,12 @@ impl Remote for Slow {
     async fn read_from(&self, path: &RemotePath, offset: u64) -> crate::Result<ByteStream> {
         self.reads_from.lock().unwrap().push(offset);
         let stream = self.inner.read_from(path, offset).await?;
+        if self.endless {
+            let chunk = Bytes::from(vec![0_u8; 1024 * 1024]);
+            return Ok(stream
+                .chain(futures::stream::repeat_with(move || Ok(chunk.clone())))
+                .boxed());
+        }
         Ok(stream
             .then(|chunk| async move {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -412,6 +422,41 @@ impl Remote for Slow {
     async fn chmod(&self, path: &RemotePath, mode: u32) -> crate::Result<()> {
         self.inner.chmod(path, mode).await
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_source_that_sends_without_end_fails_instead_of_filling_the_disk() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    write(&from.path().join("small.txt"), b"tiny");
+    let endless = Arc::new(Slow {
+        endless: true,
+        ..Slow::default()
+    });
+    let (queue, _events) = TransferQueue::new(DEFAULT_PARALLEL_FILES);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: endless as Arc<dyn Remote>,
+            items: vec![path(&from.path().join("small.txt"))],
+            target: local(),
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    let done = settled(&queue, id).await;
+    assert_eq!(done.state, TransferState::Failed);
+    assert!(
+        done.errors
+            .iter()
+            .any(|error| error.contains("kept growing")),
+        "{:?}",
+        done.errors
+    );
+    assert_eq!(
+        files_below(to.path()),
+        Vec::<String>::new(),
+        "no partial file is left"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

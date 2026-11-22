@@ -271,6 +271,32 @@ async fn streams_large_listing() {
 
 #[tokio::test]
 #[ignore = "requires the test server (./testserver/up.sh)"]
+async fn writers_never_follow_server_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = connect(
+        key_options(&dir.path().join("known_hosts")),
+        Arc::new(Scripted::accepting()),
+    )
+    .await
+    .expect("connect");
+    let tree = remote.home_dir().await.unwrap().join(&name("tree"));
+    let hello = tree.join(&name("hello.txt"));
+    let before = remote.stat(&hello).await.unwrap().size;
+    for link in ["link-to-hello", "dangling-link"] {
+        let link = tree.join(&name(link));
+        assert!(remote.open_writer(&link, 0).await.is_err(), "{link}");
+        assert!(remote.open_writer(&link, 1).await.is_err(), "{link}");
+        assert_eq!(remote.lstat(&link).await.unwrap().kind, EntryKind::Symlink);
+    }
+    assert_eq!(remote.stat(&hello).await.unwrap().size, before);
+    assert!(matches!(
+        remote.stat(&tree.join(&name("does-not-exist"))).await,
+        Err(Error::NotFound { .. })
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
 async fn tree_metadata_and_errors() {
     let dir = tempfile::tempdir().unwrap();
     let remote = connect(

@@ -43,6 +43,37 @@ fn to_remote(path: &Path) -> Result<RemotePath> {
     RemotePath::parse(text)
 }
 
+/// Opens the regular file at `local` for writing, refusing a symlink or
+/// anything else: the file opened must be the one `lstat` saw, so a link
+/// swapped in between is noticed too.
+async fn open_existing_file(path: &RemotePath, local: &std::path::Path) -> Result<tokio::fs::File> {
+    let io = |error| Error::from_io(path, error);
+    let seen = tokio::fs::symlink_metadata(local).await.map_err(io)?;
+    if !seen.file_type().is_file() {
+        return Err(Error::Remote {
+            path: path.clone(),
+            message: "not a regular file".into(),
+        });
+    }
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(local)
+        .await
+        .map_err(io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let opened = file.metadata().await.map_err(io)?;
+        if (opened.dev(), opened.ino()) != (seen.dev(), seen.ino()) {
+            return Err(Error::Remote {
+                path: path.clone(),
+                message: "the file was replaced while it was opened".into(),
+            });
+        }
+    }
+    Ok(file)
+}
+
 fn metadata_from_std(metadata: &fs::Metadata) -> Metadata {
     #[cfg(unix)]
     {
@@ -196,6 +227,13 @@ impl Remote for LocalRemote {
         Ok(metadata_from_std(&metadata))
     }
 
+    async fn lstat(&self, path: &RemotePath) -> Result<Metadata> {
+        let metadata = tokio::fs::symlink_metadata(to_local(path))
+            .await
+            .map_err(|error| Error::from_io(path, error))?;
+        Ok(metadata_from_std(&metadata))
+    }
+
     async fn read_from(&self, path: &RemotePath, offset: u64) -> Result<ByteStream> {
         let mut file = tokio::fs::File::open(to_local(path))
             .await
@@ -210,13 +248,18 @@ impl Remote for LocalRemote {
 
     async fn open_writer(&self, path: &RemotePath, offset: u64) -> Result<Box<dyn FileWriter>> {
         let io = |error| Error::from_io(path, error);
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(offset == 0)
-            .open(to_local(path))
-            .await
-            .map_err(io)?;
+        let local = to_local(path);
+        let mut file = if offset == 0 {
+            // `create_new` (O_EXCL) also refuses a symlink, dangling or not.
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&local)
+                .await
+                .map_err(io)?
+        } else {
+            open_existing_file(path, &local).await?
+        };
         if offset > 0 {
             // Drop anything past the resume point, e.g. a partly written chunk.
             file.set_len(offset).await.map_err(io)?;
@@ -393,6 +436,33 @@ mod tests {
         remote.delete_file(&renamed).await.expect("delete file");
         remote.delete_dir(&subdir).await.expect("delete dir");
         assert_eq!(collect(&remote, &root).await, Vec::new());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn writers_never_follow_symlinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let remote = LocalRemote::new();
+        let root = remote_path(dir.path());
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"precious").expect("write");
+        let link = root.join(&EntryName::new("link").expect("name"));
+        std::os::unix::fs::symlink(&victim, link.as_str()).expect("symlink");
+        let dangling = root.join(&EntryName::new("dangling").expect("name"));
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), dangling.as_str()).expect("symlink");
+
+        assert!(matches!(
+            remote.open_writer(&link, 0).await.map(drop),
+            Err(Error::AlreadyExists { .. })
+        ));
+        assert!(remote.open_writer(&dangling, 0).await.is_err());
+        assert!(!dir.path().join("nowhere").exists());
+        assert!(remote.open_writer(&link, 3).await.is_err());
+        assert_eq!(std::fs::read(&victim).expect("read"), b"precious");
+        assert_eq!(
+            remote.lstat(&link).await.expect("lstat").kind,
+            EntryKind::Symlink
+        );
     }
 
     #[tokio::test]

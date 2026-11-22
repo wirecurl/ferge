@@ -165,6 +165,53 @@ async fn copies_a_tree_and_keeps_times() {
     assert_eq!(modified, old);
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn never_writes_through_a_planted_partial_file() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    write(&from.path().join("report.pdf"), b"from the server");
+    // Someone who can write the target folder links the partial file's
+    // name to a file of the user's, and to a file that does not exist yet.
+    let victim = elsewhere.path().join("victim");
+    write(&victim, b"precious");
+    std::os::unix::fs::symlink(&victim, to.path().join("report.pdf.ferge-part")).unwrap();
+    write(&from.path().join("notes.txt"), b"notes");
+    let planted = elsewhere.path().join("planted");
+    std::os::unix::fs::symlink(&planted, to.path().join("notes.txt.ferge-part")).unwrap();
+
+    let (queue, _events) = TransferQueue::new(DEFAULT_PARALLEL_FILES);
+    let remote = local();
+    let id = queue.enqueue(
+        TransferRequest {
+            source: Arc::clone(&remote),
+            items: vec![
+                path(&from.path().join("report.pdf")),
+                path(&from.path().join("notes.txt")),
+            ],
+            target: remote,
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    let done = settled(&queue, id).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+    assert!(!planted.exists());
+    assert_eq!(
+        std::fs::read(to.path().join("report.pdf")).unwrap(),
+        b"from the server"
+    );
+    assert!(
+        !std::fs::symlink_metadata(to.path().join("report.pdf"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(files_below(to.path()), ["notes.txt", "report.pdf"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn resolves_conflicts() {
     for (action, expected_a, extra) in [
@@ -323,6 +370,9 @@ impl Remote for Slow {
     }
     async fn stat(&self, path: &RemotePath) -> crate::Result<Metadata> {
         self.inner.stat(path).await
+    }
+    async fn lstat(&self, path: &RemotePath) -> crate::Result<Metadata> {
+        self.inner.lstat(path).await
     }
     async fn read_from(&self, path: &RemotePath, offset: u64) -> crate::Result<ByteStream> {
         self.reads_from.lock().unwrap().push(offset);

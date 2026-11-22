@@ -7,7 +7,7 @@ use futures::StreamExt as _;
 
 use super::plan::{FileStatus, Plan, PlannedFile, part_path};
 use super::{Conflict, ConflictAction, Shared, Stop, Transfer, lock, names};
-use crate::entry::Metadata;
+use crate::entry::{EntryKind, Metadata};
 use crate::error::{Error, Result};
 use crate::path::RemotePath;
 
@@ -112,15 +112,31 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
     let part =
         part_path(&destination).ok_or_else(|| Error::InvalidPath(destination.as_str().into()))?;
 
-    // Continue a partial file only if it still matches what was confirmed.
+    // Continue a partial file only if it still matches what was confirmed,
+    // and only a regular file: never write through a symlink planted there.
     let resume_at = lock(&file.state).resume_at;
     let offset = match resume_at {
-        Some(at) if unchanged && at > 0 => match target.stat(&part).await {
-            Ok(metadata) if metadata.size >= at && at <= current.size => at,
+        Some(at) if unchanged && at > 0 => match target.lstat(&part).await {
+            Ok(metadata)
+                if metadata.kind == EntryKind::File
+                    && metadata.size >= at
+                    && at <= current.size =>
+            {
+                at
+            }
             _ => 0,
         },
         _ => 0,
     };
+    if offset == 0 {
+        // A partial file of an earlier attempt, or whatever else has this
+        // name, is removed (a symlink itself, not its target); the new one
+        // is created exclusively.
+        match target.delete_file(&part).await {
+            Ok(()) | Err(Error::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
     {
         let mut state = lock(&file.state);
         transfer

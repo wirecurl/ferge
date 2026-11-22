@@ -547,6 +547,21 @@ impl Remote for SftpRemote {
         ))
     }
 
+    async fn lstat(&self, path: &RemotePath) -> Result<Metadata> {
+        let attrs = self
+            .inner
+            .meta
+            .lstat(path.as_str())
+            .await
+            .map_err(|error| sftp_error(path, error))?
+            .attrs;
+        Ok(Metadata::from_posix(
+            attrs.permissions,
+            attrs.size,
+            attrs.mtime,
+        ))
+    }
+
     async fn read_from(&self, path: &RemotePath, offset: u64) -> Result<ByteStream> {
         let channel = self.data().await?;
         Ok(io::read_stream(
@@ -558,6 +573,17 @@ impl Remote for SftpRemote {
     }
 
     async fn open_writer(&self, path: &RemotePath, offset: u64) -> Result<Box<dyn FileWriter>> {
+        if offset > 0 {
+            // SFTP cannot open without following symlinks; checking first
+            // leaves only a short race to whoever can write the folder.
+            let existing = self.lstat(path).await?;
+            if existing.kind != crate::EntryKind::File {
+                return Err(Error::Remote {
+                    path: path.clone(),
+                    message: "not a regular file".into(),
+                });
+            }
+        }
         let channel = self.data().await?;
         io::open_writer(
             Arc::clone(&channel.session),

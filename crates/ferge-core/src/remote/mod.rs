@@ -78,6 +78,9 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
     /// Metadata of `path`, following symlinks.
     async fn stat(&self, path: &RemotePath) -> Result<Metadata>;
 
+    /// Metadata of `path` itself: a symlink is reported as one.
+    async fn lstat(&self, path: &RemotePath) -> Result<Metadata>;
+
     /// Reads a file from `offset` to its end. Chunks arrive in order.
     async fn read_from(&self, path: &RemotePath, offset: u64) -> Result<ByteStream>;
 
@@ -86,13 +89,18 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
         self.read_from(path, 0).await
     }
 
-    /// Opens `path` for writing at `offset`. The file is created if missing;
-    /// at offset 0 it is truncated, otherwise its first `offset` bytes are kept
-    /// (resuming an interrupted transfer).
+    /// Opens `path` for writing at `offset`.
+    ///
+    /// At offset 0 a new file is created; anything already at `path`,
+    /// including a symlink, makes this fail with [`Error::AlreadyExists`],
+    /// so nothing planted there is written through. At a later offset
+    /// (resuming an interrupted transfer) `path` must be a regular file,
+    /// not a symlink; its first `offset` bytes are kept and the rest is
+    /// cut off.
     async fn open_writer(&self, path: &RemotePath, offset: u64) -> Result<Box<dyn FileWriter>>;
 
-    /// Creates or truncates `path` and writes `data` to it. Returns the number of
-    /// bytes written.
+    /// Creates `path`, which must not exist yet, and writes `data` to it.
+    /// Returns the number of bytes written.
     async fn write(&self, path: &RemotePath, mut data: ByteStream) -> Result<u64> {
         let mut writer = self.open_writer(path, 0).await?;
         while let Some(chunk) = data.next().await {

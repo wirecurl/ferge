@@ -220,10 +220,14 @@ pub(super) async fn open_writer(
     offset: u64,
     chunk: usize,
 ) -> Result<Box<dyn FileWriter>> {
-    let mut flags = OpenFlags::WRITE | OpenFlags::CREATE;
-    if offset == 0 {
-        flags |= OpenFlags::TRUNCATE;
-    }
+    // A new file is created exclusively: whatever is already at `path`,
+    // a symlink included, makes the open fail instead of being written
+    // through. Resuming opens the existing file (checked by the caller).
+    let flags = if offset == 0 {
+        OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE
+    } else {
+        OpenFlags::WRITE
+    };
     let handle = session
         .open(path.as_str(), flags, FileAttributes::empty())
         .await

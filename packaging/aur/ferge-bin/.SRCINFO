@@ -1,0 +1,27 @@
+pkgbase = ferge-bin
+	pkgdesc = Fast, keyboard-first file transfer client (SFTP), prebuilt
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/wirecurl/ferge
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-or-later
+	depends = glibc
+	depends = libgcc
+	depends = hicolor-icon-theme
+	depends = libxcb
+	depends = libxkbcommon
+	depends = libxkbcommon-x11
+	depends = vulkan-driver
+	depends = vulkan-icd-loader
+	depends = wayland
+	provides = ferge=0.1.0
+	conflicts = ferge
+	options = !strip
+	options = !debug
+	source_x86_64 = https://github.com/wirecurl/ferge/releases/download/v0.1.0/ferge-0.1.0-x86_64-linux.tar.gz
+	sha256sums_x86_64 = d873b29cb3c278a5cfdfdaa58d989ff273ac63a7ad5c4f97e72f3598b36f9a63
+	source_aarch64 = https://github.com/wirecurl/ferge/releases/download/v0.1.0/ferge-0.1.0-aarch64-linux.tar.gz
+	sha256sums_aarch64 = 3e5cc9c6da5e9ddefa8b1edd5ef9972b12a526e93a333cf2c9e687a46b848f08
+
+pkgname = ferge-bin

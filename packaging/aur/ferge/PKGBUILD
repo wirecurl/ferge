@@ -12,7 +12,7 @@ depends=('glibc' 'libgcc' 'hicolor-icon-theme' 'libxcb' 'libxkbcommon'
 makedepends=('cargo')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('0e2ef9ae26f02d8507a9f729438913b190e661eb402e40eb9aab7b204ad552dc')
 
 prepare() {
   cd "$pkgname-$pkgver"

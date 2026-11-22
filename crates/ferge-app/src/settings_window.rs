@@ -62,6 +62,7 @@ fn open(cx: &mut App) {
             ..TitlebarOptions::default()
         }),
         app_id: Some(crate::APP_ID.to_owned()),
+        icon: crate::window_icon(),
         window_decorations: Some(WindowDecorations::Server),
         window_min_size: Some(size(px(420.), px(320.))),
         ..WindowOptions::default()

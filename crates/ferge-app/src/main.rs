@@ -44,6 +44,32 @@ use crate::workspace::Workspace;
 pub(crate) const APP_ID: &str = "com.wirecurl.ferge";
 const APP_NAME: &str = "ferge";
 
+/// The icon of ferge's windows. Only X11 window managers take it from the
+/// window; Wayland compositors find the icon through the app ID and the
+/// desktop file, and macOS through the app bundle.
+pub(crate) fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        static ICON: std::sync::OnceLock<Option<std::sync::Arc<image::RgbaImage>>> =
+            std::sync::OnceLock::new();
+        const PNG: &[u8] = include_bytes!(
+            "../../../packaging/linux/icons/hicolor/128x128/apps/com.wirecurl.ferge.png"
+        );
+        ICON.get_or_init(|| {
+            match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
+                Ok(icon) => Some(std::sync::Arc::new(icon.into_rgba8())),
+                Err(error) => {
+                    tracing::warn!("could not decode the window icon: {error}");
+                    None
+                }
+            }
+        })
+        .clone()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    None
+}
+
 /// A fast file transfer client.
 #[derive(Debug, Parser)]
 #[command(name = "ferge", version, about)]
@@ -143,6 +169,7 @@ fn open_main_window(
             ..TitlebarOptions::default()
         }),
         app_id: Some(APP_ID.to_owned()),
+        icon: window_icon(),
         // Let the compositor decorate (xdg-decoration); niri with
         // `prefer-no-csd` draws no title bar at all, which is what users want.
         window_decorations: Some(WindowDecorations::Server),
@@ -161,4 +188,14 @@ fn open_main_window(
     let workspace =
         workspace.ok_or_else(|| anyhow::anyhow!("window was created without content"))?;
     Ok((window, workspace))
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn the_window_icon_decodes() {
+        let icon = super::window_icon().expect("the bundled icon decodes");
+        assert_eq!(icon.dimensions(), (128, 128));
+    }
 }

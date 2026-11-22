@@ -46,6 +46,8 @@ The first release, 0.1.0, is in preparation.
 - Command palette, keyboard navigation for everything, and a settings window backed by a
   hand-editable, watched `settings.toml`.
 - Follows the desktop's fonts and light or dark preference.
+- An app icon: the f of ferge crossing a wave, for the Linux icon theme (with a symbolic
+  variant) and X11 windows.
 
 ### Security
 

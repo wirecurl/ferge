@@ -1,3 +1,5 @@
+<img src="packaging/linux/icons/hicolor/scalable/apps/com.wirecurl.ferge.svg" width="96" height="96" alt="">
+
 # ferge
 
 A fast file transfer client for Linux and macOS, written in Rust with
@@ -81,6 +83,7 @@ Then:
 ```sh
 cargo install --locked --path crates/ferge-app
 install -Dm644 packaging/linux/com.wirecurl.ferge.desktop ~/.local/share/applications/com.wirecurl.ferge.desktop
+mkdir -p ~/.local/share/icons && cp -r packaging/linux/icons/hicolor ~/.local/share/icons/
 # If ~/.cargo/bin is not on the PATH of your desktop session, use an absolute Exec= path:
 sed -i "s|^Exec=ferge|Exec=$HOME/.cargo/bin/ferge|" ~/.local/share/applications/com.wirecurl.ferge.desktop
 ```

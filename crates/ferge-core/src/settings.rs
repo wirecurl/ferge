@@ -31,6 +31,9 @@ const SETTLE_TIME: Duration = Duration::from_millis(75);
 
 /// Written when the application stores the first setting, so that people who
 /// open the file find out what they can change.
+/// Bytes read of the settings file at most.
+const READ_LIMIT: u64 = 1024 * 1024;
+
 const TEMPLATE: &str = r#"# ferge settings. Changes take effect as soon as the file is saved.
 # A setting that is left out uses its default.
 #
@@ -224,14 +227,30 @@ impl SettingsFile {
     }
 
     fn read(&self) -> Result<Option<String>, SettingsError> {
-        match std::fs::read_to_string(&self.path) {
-            Ok(text) => Ok(Some(text)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(SettingsError::Read {
-                path: self.path.clone(),
-                source,
-            }),
+        use std::io::Read as _;
+        let error = |source| SettingsError::Read {
+            path: self.path.clone(),
+            source,
+        };
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(error(source)),
+        };
+        // A settings file is a few hundred bytes; whatever the path leads
+        // to (a link to /dev/zero, say) is not read without end.
+        let mut bytes = Vec::new();
+        file.take(READ_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(error)?;
+        if bytes.len() as u64 > READ_LIMIT {
+            return Err(error(std::io::Error::other(
+                "the file is too large for settings",
+            )));
         }
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| error(std::io::Error::other("the file is not UTF-8 text")))
     }
 
     fn parse(&self, text: &str) -> Result<DocumentMut, SettingsError> {
@@ -245,16 +264,23 @@ impl SettingsFile {
 
     /// Replaces the file atomically: a reader sees the old or the new file,
     /// never a half-written one. A symbolic link (as dotfile managers use)
-    /// stays in place; its target is replaced.
+    /// stays in place and its target is replaced, but only in a folder no
+    /// one else may write to: elsewhere, a link someone else placed could
+    /// make ferge overwrite any file of the user's, so the link itself is
+    /// replaced instead.
     fn write(&self, text: &str) -> Result<(), SettingsError> {
         let error = |source| SettingsError::Write {
             path: self.path.clone(),
             source,
         };
-        let target = match std::fs::canonicalize(&self.path) {
-            Ok(target) => target,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => self.path.clone(),
-            Err(source) => return Err(error(source)),
+        let target = if self.follows_link() {
+            match std::fs::canonicalize(&self.path) {
+                Ok(target) => target,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => self.path.clone(),
+                Err(source) => return Err(error(source)),
+            }
+        } else {
+            self.path.clone()
         };
         let dir = target
             .parent()
@@ -270,6 +296,23 @@ impl SettingsFile {
         file.persist(&target)
             .map_err(|failed| error(failed.error))?;
         Ok(())
+    }
+
+    /// Whether writing may go through a symbolic link at the path: only if
+    /// the folder holding the link cannot be written by others.
+    fn follows_link(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let Some(dir) = self.path.parent() else {
+                return false;
+            };
+            std::fs::metadata(dir).is_ok_and(|meta| meta.permissions().mode() & 0o022 == 0)
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
     }
 
     /// Starts watching the file for changes by anyone, including this
@@ -631,6 +674,40 @@ mod tests {
         file.apply(&Change::Theme(ThemePreference::Dark)).unwrap();
         assert!(file.path().symlink_metadata().unwrap().is_symlink());
         assert!(std::fs::read_to_string(&real).unwrap().contains("dark"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_in_shared_folders_are_not_written_through() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = file(&dir);
+        let shared = file.path().parent().unwrap();
+        std::fs::create_dir_all(shared).unwrap();
+        std::fs::set_permissions(shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        // Someone else links the settings to a file of the user's.
+        let victim = dir.path().join("victim.toml");
+        std::fs::write(&victim, "# mine\n").unwrap();
+        std::os::unix::fs::symlink(&victim, file.path()).unwrap();
+
+        file.apply(&Change::Theme(ThemePreference::Dark)).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "# mine\n");
+        assert!(!file.path().symlink_metadata().unwrap().is_symlink());
+        assert!(
+            std::fs::read_to_string(file.path())
+                .unwrap()
+                .contains("dark")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = file(&dir);
+        std::fs::create_dir_all(file.path().parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", file.path()).unwrap();
+        assert!(matches!(file.load(), Err(SettingsError::Read { .. })));
     }
 
     #[tokio::test]

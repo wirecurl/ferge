@@ -13,6 +13,7 @@ name = "ferge"
 path = "src/main.rs"
 
 [dependencies]
+cap.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
@@ -34,6 +35,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+zip.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

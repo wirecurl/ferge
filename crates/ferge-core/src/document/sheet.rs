@@ -22,6 +22,13 @@ pub const COLUMN_LIMIT: usize = 256;
 const CELL_LIMIT: usize = 1_000;
 /// Sheets read of a workbook at most.
 const SHEET_LIMIT: usize = 64;
+/// Bytes of cell text kept of a workbook, over all sheets. Repeated cells
+/// and shared strings make a small file stand for far more text than it
+/// holds; reading stops here and the sheet is marked as cut.
+const TEXT_BUDGET: usize = 64 * 1024 * 1024;
+/// Distinct shared strings a workbook may declare. calamine sets memory
+/// aside for the declared number before reading any of them.
+const SHARED_STRING_LIMIT: u64 = 4_000_000;
 
 /// One sheet: rows of cells, each row as long as its last filled cell.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -45,9 +52,10 @@ impl Sheet {
         }
     }
 
-    /// Puts `text` at `row`, `column`. Returns `false` once `row` is past the
-    /// limit, so readers going row by row can stop.
-    fn set(&mut self, row: usize, column: usize, text: String) -> bool {
+    /// Puts `text` at `row`, `column`, paying for it from `budget`. Returns
+    /// `false` once `row` is past the limit or the budget is spent, so
+    /// readers can stop.
+    fn set(&mut self, row: usize, column: usize, text: String, budget: &mut usize) -> bool {
         if row >= ROW_LIMIT {
             self.truncated = true;
             return false;
@@ -59,6 +67,12 @@ impl Sheet {
         if text.is_empty() {
             return true;
         }
+        let text = shorten(text, CELL_LIMIT);
+        let Some(left) = budget.checked_sub(text.len()) else {
+            self.truncated = true;
+            return false;
+        };
+        *budget = left;
         if self.rows.len() <= row {
             self.rows.resize_with(row + 1, Vec::new);
         }
@@ -66,7 +80,7 @@ impl Sheet {
         if cells.len() <= column {
             cells.resize_with(column + 1, String::new);
         }
-        cells[column] = shorten(text, CELL_LIMIT);
+        cells[column] = text;
         true
     }
 }
@@ -84,7 +98,10 @@ pub enum WorkbookFormat {
 
 /// The sheets of a workbook.
 pub fn workbook(bytes: &[u8], format: WorkbookFormat) -> Result<Vec<Sheet>, DocumentError> {
-    let archive = Archive::open(bytes)?;
+    let mut archive = Archive::open(bytes)?;
+    if format == WorkbookFormat::Xlsx {
+        check_shared_strings(&mut archive)?;
+    }
     let sheets = match format {
         WorkbookFormat::Xlsx => xlsx(bytes)?,
         WorkbookFormat::Xlsb => xlsb(bytes)?,
@@ -94,6 +111,38 @@ pub fn workbook(bytes: &[u8], format: WorkbookFormat) -> Result<Vec<Sheet>, Docu
         return Err(DocumentError::Damaged);
     }
     Ok(sheets)
+}
+
+/// Refuses workbooks that declare more shared strings than
+/// [`SHARED_STRING_LIMIT`], before calamine sets memory aside for them.
+fn check_shared_strings(archive: &mut Archive<'_>) -> Result<(), DocumentError> {
+    let Some(head) = archive.head("xl/sharedStrings.xml", 64 * 1024)? else {
+        return Ok(());
+    };
+    let mut reader = Reader::from_reader(head.as_slice());
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element) | Event::Empty(element))
+                if xml::name(element.name()) == "sst" =>
+            {
+                let declared = ["uniqueCount", "count"]
+                    .iter()
+                    .filter_map(|name| xml::number_attr(&element, name))
+                    .max()
+                    .unwrap_or(0);
+                return if declared as u64 > SHARED_STRING_LIMIT {
+                    Err(DocumentError::TooLarge)
+                } else {
+                    Ok(())
+                };
+            }
+            // A cut-off head or anything unexpected: calamine will judge.
+            Ok(Event::Eof) | Err(_) => return Ok(()),
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
 }
 
 /// Reads the worksheets of an Excel workbook of type `$workbook`. Cells
@@ -112,6 +161,7 @@ macro_rules! excel_reader {
                 .map(|sheet| sheet.name.clone())
                 .collect();
             let mut sheets = Vec::with_capacity(names.len());
+            let mut budget = TEXT_BUDGET;
             for name in names {
                 let mut sheet = Sheet::new(name);
                 let mut cells = workbook
@@ -119,11 +169,15 @@ macro_rules! excel_reader {
                     .map_err(|error| excel_error(&error))?;
                 while let Some(cell) = cells.next_cell().map_err(|error| excel_error(&error))? {
                     let (row, column) = cell.get_position();
-                    if !sheet.set(row as usize, column as usize, cell_text(cell.get_value())) {
+                    let text = cell_text(cell.get_value());
+                    if !sheet.set(row as usize, column as usize, text, &mut budget) {
                         break;
                     }
                 }
                 sheets.push(sheet);
+                if budget == 0 {
+                    break;
+                }
             }
             Ok(sheets)
         }
@@ -138,20 +192,36 @@ fn excel_error(error: &dyn std::fmt::Display) -> DocumentError {
     DocumentError::Damaged
 }
 
-/// The text of a cell, as a spreadsheet program shows it without formats.
+/// The text of a cell, as a spreadsheet program shows it without formats,
+/// at most [`CELL_LIMIT`] characters.
 fn cell_text(value: &DataRef<'_>) -> String {
     match value {
         DataRef::Empty => String::new(),
         DataRef::String(text) | DataRef::DateTimeIso(text) | DataRef::DurationIso(text) => {
-            text.clone()
+            bounded(text)
         }
-        DataRef::SharedString(text) => (*text).to_owned(),
+        // A shared string may be shown in many cells; only what is kept of
+        // it is copied.
+        DataRef::SharedString(text) => bounded(text),
         DataRef::Int(number) => number.to_string(),
         DataRef::Float(number) => format_number(*number),
         DataRef::Bool(true) => "TRUE".to_owned(),
         DataRef::Bool(false) => "FALSE".to_owned(),
         DataRef::DateTime(date) => format_date(date),
         DataRef::Error(error) => error.to_string(),
+    }
+}
+
+/// At most [`CELL_LIMIT`] characters of `text`, copying no more than that.
+fn bounded(text: &str) -> String {
+    match text.char_indices().nth(CELL_LIMIT) {
+        Some((end, _)) => {
+            let mut kept = String::with_capacity(end + '…'.len_utf8());
+            kept.push_str(&text[..end]);
+            kept.push('…');
+            kept
+        }
+        None => text.to_owned(),
     }
 }
 
@@ -238,6 +308,8 @@ struct Tables {
     row_cells: Vec<(usize, String)>,
     /// In a table past [`SHEET_LIMIT`].
     ignoring: bool,
+    /// What is left of [`TEXT_BUDGET`]; `None` until the first table.
+    budget: Option<usize>,
 }
 
 impl Tables {
@@ -299,10 +371,16 @@ impl Tables {
     }
 
     fn text(&mut self, text: &str) {
-        if let Some(cell) = &mut self.cell
-            && cell.len() < CELL_LIMIT * 4
-        {
-            cell.push_str(text);
+        // A cell keeps CELL_LIMIT characters; this many bytes always hold
+        // them, however long the text events are.
+        const ROOM: usize = CELL_LIMIT * 4 + 4;
+        if let Some(cell) = &mut self.cell {
+            let room = ROOM.saturating_sub(cell.len());
+            let mut end = text.len().min(room);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            cell.push_str(&text[..end]);
         }
     }
 
@@ -316,7 +394,7 @@ impl Tables {
     }
 
     fn end_cell(&mut self) {
-        let text = self.cell.take().unwrap_or_default();
+        let text = shorten(self.cell.take().unwrap_or_default(), CELL_LIMIT);
         if !text.is_empty() {
             let room = COLUMN_LIMIT.saturating_sub(self.column);
             if self.cell_repeat > room
@@ -324,7 +402,17 @@ impl Tables {
             {
                 sheet.truncated = true;
             }
-            for offset in 0..self.cell_repeat.min(room) {
+            // The copies of a row's cells are paid for when the row ends;
+            // a row longer than the whole budget is cut here already.
+            let budget = self.budget.unwrap_or(TEXT_BUDGET);
+            let affordable = budget / text.len().max(1);
+            let repeat = self.cell_repeat.min(room).min(affordable);
+            if repeat < self.cell_repeat.min(room)
+                && let Some(sheet) = self.sheets.last_mut()
+            {
+                sheet.truncated = true;
+            }
+            for offset in 0..repeat {
                 self.row_cells.push((self.column + offset, text.clone()));
             }
         }
@@ -345,9 +433,12 @@ impl Tables {
         let room = ROW_LIMIT.saturating_sub(self.row);
         sheet.truncated |= self.row_repeat > room;
         let repeat = self.row_repeat.min(room).max(1);
-        for offset in 0..repeat {
+        let budget = self.budget.get_or_insert(TEXT_BUDGET);
+        'rows: for offset in 0..repeat {
             for (column, text) in &self.row_cells {
-                sheet.set(self.row + offset, *column, text.clone());
+                if !sheet.set(self.row + offset, *column, text.clone(), budget) {
+                    break 'rows;
+                }
             }
         }
         self.row = self.row.saturating_add(repeat);
@@ -370,6 +461,7 @@ pub fn delimited(text: &str, delimiter: Option<char>, truncated: bool) -> Sheet 
     let mut field = String::new();
     let mut quoted = false;
     let mut at_start = true;
+    let mut budget = TEXT_BUDGET;
     while let Some(character) = chars.next() {
         if quoted {
             match character {
@@ -389,14 +481,14 @@ pub fn delimited(text: &str, delimiter: Option<char>, truncated: bool) -> Sheet 
             }
             '\r' if chars.peek() == Some(&'\n') => {}
             '\n' | '\r' => {
-                if !sheet.set(row, column, std::mem::take(&mut field)) {
+                if !sheet.set(row, column, std::mem::take(&mut field), &mut budget) {
                     return sheet;
                 }
                 (row, column) = (row + 1, 0);
                 at_start = true;
             }
             _ if character == delimiter => {
-                sheet.set(row, column, std::mem::take(&mut field));
+                sheet.set(row, column, std::mem::take(&mut field), &mut budget);
                 column += 1;
                 at_start = true;
             }
@@ -407,7 +499,7 @@ pub fn delimited(text: &str, delimiter: Option<char>, truncated: bool) -> Sheet 
         }
     }
     if !field.is_empty() {
-        sheet.set(row, column, field);
+        sheet.set(row, column, field, &mut budget);
     }
     sheet
 }
@@ -548,5 +640,52 @@ mod tests {
         assert_eq!(sheets[0].rows.len(), ROW_LIMIT);
         assert_eq!(sheets[0].columns(), COLUMN_LIMIT);
         assert!(sheets[0].truncated);
+    }
+
+    #[test]
+    fn repeated_long_cells_stay_within_the_text_budget() {
+        // 2.56 million copies of a 2,000-byte cell would be 5 GB of text.
+        let long = "ä".repeat(CELL_LIMIT);
+        let content = format!(
+            r#"<document-content><body><spreadsheet><table name="Big">
+            <table-row number-rows-repeated="{ROW_LIMIT}">
+              <table-cell number-columns-repeated="{COLUMN_LIMIT}"><p>{long}</p></table-cell>
+            </table-row>
+            </table></spreadsheet></body></document-content>"#
+        );
+        let sheets = workbook(&ods(&content), WorkbookFormat::Ods).unwrap();
+        let bytes: usize = sheets
+            .iter()
+            .flat_map(|sheet| &sheet.rows)
+            .flatten()
+            .map(String::len)
+            .sum();
+        assert!(bytes <= TEXT_BUDGET, "{bytes} bytes kept");
+        assert!(bytes > TEXT_BUDGET / 2, "as much as fits is kept");
+        assert!(sheets[0].truncated);
+    }
+
+    #[test]
+    fn a_huge_text_event_is_cut_to_the_cell_limit() {
+        let huge = "x".repeat(900 * 1024);
+        let content = format!(
+            r#"<document-content><body><spreadsheet><table name="T">
+            <table-row><table-cell><p>{huge}</p></table-cell></table-row>
+            </table></spreadsheet></body></document-content>"#
+        );
+        let sheets = workbook(&ods(&content), WorkbookFormat::Ods).unwrap();
+        assert_eq!(sheets[0].rows[0][0].chars().count(), CELL_LIMIT + 1);
+    }
+
+    #[test]
+    fn refuses_workbooks_declaring_too_many_shared_strings() {
+        let bytes = zip(&[(
+            "xl/sharedStrings.xml",
+            br#"<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="100000000000"><si><t>a</t></si></sst>"#,
+        )]);
+        assert_eq!(
+            workbook(&bytes, WorkbookFormat::Xlsx),
+            Err(DocumentError::TooLarge)
+        );
     }
 }

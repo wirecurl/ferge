@@ -56,6 +56,10 @@ quick-xml = { version = "=0.42.0" }
 hayro = { version = "=0.9.0" }
 # Decoded preview images are handed to GPUI as frames (the version GPUI uses).
 image = { version = "=0.25.10", default-features = false }
+# SVG previews, rendered in the preview worker (the version GPUI uses).
+resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+# The preview worker's memory limit: a global allocator with a cap.
+cap = { version = "=0.1.2" }
 
 # Support crates.
 anyhow = "=1.0.104"

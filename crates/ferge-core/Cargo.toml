@@ -19,8 +19,10 @@ futures.workspace = true
 getrandom.workspace = true
 hayro.workspace = true
 hmac.workspace = true
+image = { workspace = true, features = ["bmp", "gif", "ico", "jpeg", "png", "pnm", "tiff", "webp"] }
 notify.workspace = true
 quick-xml.workspace = true
+resvg.workspace = true
 keyring-core.workspace = true
 russh.workspace = true
 russh-config.workspace = true

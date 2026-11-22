@@ -138,7 +138,8 @@ grid with a tab per sheet, Word, PowerPoint and OpenDocument files (`docx`, `ppt
 as their text with headings, lists and tables, and PDF pages. All of it is built in and works
 the same for files on servers. On macOS, Quick Look renders office files, including older
 formats and Pages, Numbers and Keynote, as their programs would. Text is read only from its
-start; documents up to 64 MB are read whole. Text in the preview can be selected with the mouse
+start; documents up to 64 MB are read whole. Documents and pictures are read in a separate
+process with a memory and time limit, so a damaged or hostile file cannot take ferge down. Text in the preview can be selected with the mouse
 and copied with Ctrl+C (⌘C); without a selection, Ctrl+C copies the selected files as always.
 
 ## Settings

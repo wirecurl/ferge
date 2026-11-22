@@ -4,16 +4,31 @@
 //! Everything here works on bytes already read and is CPU work; callers run
 //! it off the UI thread. The files may come from anywhere, so every reader is
 //! bounded: archives are checked before they are unpacked, and rows, columns,
-//! blocks and text stop at fixed limits instead of growing with the input.
+//! blocks, text, pixels and frames stop at fixed limits instead of growing
+//! with the input. The parsers underneath are third-party code that a crafted
+//! file may still drive too far, so the app reads documents and pictures
+//! through [`worker`], in a separate process with a memory and time limit.
 
 mod archive;
 pub mod pdf;
+pub mod picture;
 pub mod sheet;
 pub mod text;
+mod wire;
+pub mod worker;
 mod xml;
 
+/// A picture: opaque or translucent RGBA, 8 bits per channel, row by row,
+/// with straight (not premultiplied) alpha.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bitmap {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// Why a document cannot be shown.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DocumentError {
     #[error("This file is damaged, or it is not what its name says.")]
     Damaged,
@@ -34,6 +49,8 @@ fn shorten(mut text: String, limit: usize) -> String {
     if let Some((end, _)) = text.char_indices().nth(limit) {
         text.truncate(end);
         text.push('…');
+        // What was cut off must not stay allocated with each copy.
+        text.shrink_to_fit();
     }
     text
 }

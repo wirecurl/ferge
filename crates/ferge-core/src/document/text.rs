@@ -25,6 +25,10 @@ const TABLE_ROW_LIMIT: usize = 1_000;
 const TABLE_COLUMN_LIMIT: usize = 64;
 /// Characters kept of a table cell.
 const CELL_LIMIT: usize = 2_000;
+/// Cells kept of a table, so one table stays quick to lay out.
+const TABLE_CELL_LIMIT: usize = 5_000;
+/// Slides read of a presentation at most.
+const SLIDE_LIMIT: usize = 2_000;
 
 /// A part of a document.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +102,9 @@ struct Table {
     rows: Vec<Vec<String>>,
     row: Option<Vec<String>>,
     cell: Option<String>,
+    /// Cells and bytes of text kept so far.
+    cells: usize,
+    chars: usize,
 }
 
 /// Gathers blocks from the events of a walk through a document, within the
@@ -116,6 +123,14 @@ struct Collector {
 impl Collector {
     fn full(&self) -> bool {
         self.blocks.len() >= BLOCK_LIMIT || self.chars >= CHAR_LIMIT
+    }
+
+    /// Whether the table being read has no room for more, counting its text
+    /// toward [`CHAR_LIMIT`] already while it is read.
+    fn table_full(&self) -> bool {
+        self.table.as_ref().is_some_and(|table| {
+            table.cells >= TABLE_CELL_LIMIT || self.chars.saturating_add(table.chars) >= CHAR_LIMIT
+        })
     }
 
     fn push(&mut self, block: Block) {
@@ -144,10 +159,8 @@ impl Collector {
     }
 
     fn text(&mut self, text: &str) {
-        if let Some(paragraph) = self.paragraphs.last_mut()
-            && paragraph.text.len() < PARAGRAPH_LIMIT * 4
-        {
-            paragraph.text.push_str(text);
+        if let Some(paragraph) = self.paragraphs.last_mut() {
+            push_bounded(&mut paragraph.text, text, PARAGRAPH_LIMIT * 4 + 4);
         }
     }
 
@@ -162,9 +175,9 @@ impl Collector {
         if self.table_depth > 0 {
             if let Some(cell) = self.table.as_mut().and_then(|table| table.cell.as_mut()) {
                 if !cell.is_empty() {
-                    cell.push('\n');
+                    push_bounded(cell, "\n", CELL_LIMIT * 4 + 4);
                 }
-                cell.push_str(&text);
+                push_bounded(cell, &text, CELL_LIMIT * 4 + 4);
             }
             return;
         }
@@ -208,9 +221,9 @@ impl Collector {
             return;
         };
         if let Some(row) = table.row.take() {
-            if table.rows.len() < TABLE_ROW_LIMIT {
+            if table.rows.len() < TABLE_ROW_LIMIT && !row.is_empty() {
                 table.rows.push(row);
-            } else {
+            } else if !row.is_empty() {
                 self.truncated = true;
             }
         }
@@ -228,13 +241,24 @@ impl Collector {
         if self.table_depth != 1 {
             return;
         }
+        let full = self.table_full();
         let Some(table) = &mut self.table else {
             return;
         };
-        if let (Some(cell), Some(row)) = (table.cell.take(), &mut table.row)
+        let Some(cell) = table.cell.take() else {
+            return;
+        };
+        if full {
+            self.truncated = true;
+            return;
+        }
+        if let Some(row) = &mut table.row
             && row.len() < TABLE_COLUMN_LIMIT
         {
-            row.push(shorten(cell, CELL_LIMIT));
+            let cell = shorten(cell, CELL_LIMIT);
+            table.cells += 1;
+            table.chars += cell.len();
+            row.push(cell);
         }
     }
 
@@ -248,6 +272,16 @@ impl Collector {
             truncated: self.truncated,
         }
     }
+}
+
+/// Appends as much of `text` to `buffer` as fits in `room` bytes in all,
+/// cut at a character boundary.
+fn push_bounded(buffer: &mut String, text: &str, room: usize) {
+    let mut end = text.len().min(room.saturating_sub(buffer.len()));
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    buffer.push_str(&text[..end]);
 }
 
 /// Text with runs of spaces and tabs collapsed and line ends trimmed, as
@@ -428,20 +462,30 @@ fn powerpoint(archive: &mut Archive<'_>, collector: &mut Collector) -> Result<()
         .text("ppt/_rels/presentation.xml.rels")?
         .ok_or(DocumentError::Damaged)?;
     let targets = relationship_targets(&relations)?;
-    // Slides in the order the presentation lists them.
+    // Slides in the order the presentation lists them, each once.
     let mut slides = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     walk(&presentation, |event| {
         if let Event::Empty(element) | Event::Start(element) = event
             && xml::name(element.name()) == "sldId"
             && let Some(target) = prefixed_attr(element, "id").and_then(|id| targets.get(&id))
         {
-            slides.push(format!(
+            let path = format!(
                 "ppt/{}",
                 target.trim_start_matches('/').trim_start_matches("ppt/")
-            ));
+            );
+            if seen.insert(path.clone()) {
+                slides.push(path);
+            }
+            if slides.len() == SLIDE_LIMIT {
+                return Flow::Stop;
+            }
         }
         Flow::Go
     })?;
+    if slides.len() == SLIDE_LIMIT {
+        collector.truncated = true;
+    }
     for (index, path) in slides.iter().enumerate() {
         if collector.full() {
             collector.truncated = true;
@@ -684,6 +728,43 @@ mod tests {
             ]
         );
         assert!(!document.truncated);
+    }
+
+    #[test]
+    fn lists_each_slide_once() {
+        let mut list = String::new();
+        for _ in 0..5_000 {
+            list.push_str(r#"<p:sldId id="256" r:id="rId2"/>"#);
+        }
+        let presentation = format!(
+            r#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst>{list}</p:sldIdLst></p:presentation>"#
+        );
+        let relations = r#"<Relationships><Relationship Id="rId2" Target="slides/slide1.xml"/></Relationships>"#;
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:txBody>
+            <a:p><a:r><a:t>Nur einmal</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+        let bytes = zip(&[
+            ("ppt/presentation.xml", presentation.as_bytes()),
+            ("ppt/_rels/presentation.xml.rels", relations.as_bytes()),
+            ("ppt/slides/slide1.xml", slide.as_bytes()),
+        ]);
+        let document = super::document(&bytes, TextFormat::Pptx).unwrap();
+        assert_eq!(document.blocks, [Block::Slide(1), paragraph("Nur einmal")]);
+    }
+
+    #[test]
+    fn tables_stop_at_the_cell_limit() {
+        let cell = "<w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc>".repeat(TABLE_COLUMN_LIMIT);
+        let rows = format!("<w:tr>{cell}</w:tr>").repeat(TABLE_ROW_LIMIT);
+        let document =
+            format!("<w:document {W}><w:body><w:tbl>{rows}</w:tbl></w:body></w:document>");
+        let bytes = zip(&[("word/document.xml", document.as_bytes())]);
+        let document = super::document(&bytes, TextFormat::Docx).unwrap();
+        let [Block::Table(rows)] = document.blocks.as_slice() else {
+            panic!("one table expected: {:?}", document.blocks.len());
+        };
+        let cells: usize = rows.iter().map(Vec::len).sum();
+        assert_eq!(cells, TABLE_CELL_LIMIT);
+        assert!(document.truncated);
     }
 
     #[test]

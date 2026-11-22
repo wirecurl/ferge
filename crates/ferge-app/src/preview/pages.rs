@@ -266,17 +266,9 @@ fn render_width(window: &Window) -> u32 {
     width
 }
 
-/// A rendered page as an image GPUI can draw (BGRA, as GPUI keeps them).
+/// A rendered page as an image GPUI can draw.
 fn to_image(bitmap: Bitmap) -> Option<Arc<RenderImage>> {
-    let Bitmap {
-        width,
-        height,
-        mut rgba,
-    } = bitmap;
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
-    let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
+    let buffer = super::bgra(bitmap)?;
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 

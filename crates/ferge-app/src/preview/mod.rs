@@ -15,21 +15,20 @@ mod kind;
 mod pages;
 mod sheet;
 
-use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use ferge_core::document::pdf::Pdf;
-use ferge_core::document::{sheet as sheets, text};
+use ferge_core::document::{Bitmap, DocumentError, sheet as sheets, text, worker};
 use ferge_core::ops::{Head, read_head};
 use ferge_core::{Entry, EntryKind, Remote, RemotePath, quick_look};
 use gpui::{
-    AnyElement, Context, Entity, Image, ImageFormat, ImageSource, InteractiveElement as _,
-    IntoElement, ObjectFit, ParentElement as _, Render, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, SvgRenderer,
-    Task, UniformListScrollHandle, WeakEntity, Window, div, img, relative, uniform_list,
+    AnyElement, Context, Entity, ImageFormat, ImageSource, InteractiveElement as _, IntoElement,
+    ObjectFit, ParentElement as _, Render, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, div, img, relative, uniform_list,
 };
 use gpui_base::SelectableText;
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
@@ -54,8 +53,6 @@ const LINE_WIDTH: usize = 400;
 const SETTLE: Duration = Duration::from_millis(80);
 /// Pixels on the longer side of a Quick Look picture.
 const QUICK_LOOK_SIZE: u32 = 2_400;
-/// Images with more pixels than this are not decoded.
-const PIXEL_LIMIT: u64 = 120_000_000;
 
 enum Content {
     /// Nothing selected, or a folder.
@@ -174,7 +171,6 @@ impl Preview {
         }
         self.set_content(Content::Loading, cx);
         let io = runtime::handle(cx);
-        let svg = cx.svg_renderer();
         let file = File {
             remote,
             path,
@@ -192,7 +188,7 @@ impl Preview {
             };
             let loaded = cx
                 .background_executor()
-                .spawn(async move { decode(read, &svg) })
+                .spawn(async move { decode(read) })
                 .await;
             let _ = this.update(cx, |preview, cx| {
                 preview.loading = None;
@@ -302,14 +298,22 @@ async fn read(plan: Plan, file: File) -> Read {
     Read::File(plan.kind, head)
 }
 
-/// Turns what was read into something to show. CPU work, off the UI thread.
-fn decode(read: Read, svg: &SvgRenderer) -> Loaded {
+/// Turns what was read into something to show. CPU work, off the UI
+/// thread. Documents and pictures are decoded by the preview worker, so a
+/// crafted file cannot exhaust ferge's memory or crash it; what is decoded
+/// here is bounded text, and a panic in it only costs the preview.
+fn decode(read: Read) -> Loaded {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_unguarded(read)))
+        .unwrap_or_else(|_| Loaded::Unavailable(DocumentError::Damaged.to_string().into()))
+}
+
+fn decode_unguarded(read: Read) -> Loaded {
     let unavailable = |reason: &str| Loaded::Unavailable(SharedString::from(reason.to_owned()));
     let (kind, head) = match read {
         Read::QuickLook(png) => {
-            return match image(ImageFormat::Png, &png, svg) {
-                Some(image) => Loaded::Image(image, Some("First page, as Quick Look shows it.")),
-                None => unavailable("Quick Look gave no picture of this file."),
+            return match image(ImageFormat::Png, &png) {
+                Ok(image) => Loaded::Image(image, Some("First page, as Quick Look shows it.")),
+                Err(_) => unavailable("Quick Look gave no picture of this file."),
             };
         }
         Read::Unavailable(reason) => return Loaded::Unavailable(reason),
@@ -320,10 +324,11 @@ fn decode(read: Read, svg: &SvgRenderer) -> Loaded {
         return unavailable("This file is too large to preview.");
     }
     match kind {
-        Kind::Image(format) => image(format, &head.bytes, svg).map_or_else(
-            || unavailable("This image could not be read."),
-            |image| Loaded::Image(image, None),
-        ),
+        Kind::Image(format) => match image(format, &head.bytes) {
+            Ok(image) => Loaded::Image(image, None),
+            Err(DocumentError::TooLarge) => unavailable("This image is too large to preview."),
+            Err(_) => unavailable("This image could not be read."),
+        },
         Kind::Text => text_lines(&head).map_or_else(
             || unavailable("This file is not text."),
             |(lines, cut)| Loaded::Text {
@@ -337,15 +342,15 @@ fn decode(read: Read, svg: &SvgRenderer) -> Loaded {
             let sheet = sheets::delimited(&text, delimiter, head.truncated);
             Loaded::Sheets(vec![Grid::new(sheet)])
         }
-        Kind::Workbook(format) => match sheets::workbook(&head.bytes, format) {
+        Kind::Workbook(format) => match worker::workbook(&head.bytes, format) {
             Ok(found) => Loaded::Sheets(found.into_iter().map(Grid::new).collect()),
             Err(error) => unavailable(&error.to_string()),
         },
-        Kind::Document(format) => match text::document(&head.bytes, format) {
+        Kind::Document(format) => match worker::document(&head.bytes, format) {
             Ok(document) => Loaded::Document(document),
             Err(error) => unavailable(&error.to_string()),
         },
-        Kind::Pdf => match Pdf::open(head.bytes) {
+        Kind::Pdf => match Pdf::open(&head.bytes) {
             Ok(pdf) => Loaded::Pdf(pdf),
             Err(error) => unavailable(&error.to_string()),
         },
@@ -353,22 +358,37 @@ fn decode(read: Read, svg: &SvgRenderer) -> Loaded {
     }
 }
 
-/// Decodes an image, unless it is damaged or has more pixels than is sane
-/// to hold.
-fn image(format: ImageFormat, bytes: &[u8], svg: &SvgRenderer) -> Option<Arc<RenderImage>> {
-    if format != ImageFormat::Svg {
-        let (width, height) = image::ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .ok()?
-            .into_dimensions()
-            .ok()?;
-        if u64::from(width) * u64::from(height) > PIXEL_LIMIT {
-            return None;
-        }
+/// Decodes a picture in the preview worker, which refuses ones with more
+/// pixels than is sane to hold and scales large ones down.
+fn image(format: ImageFormat, bytes: &[u8]) -> Result<Arc<RenderImage>, DocumentError> {
+    let picture = worker::picture(bytes, format == ImageFormat::Svg)?;
+    let frames = picture
+        .frames
+        .into_iter()
+        .map(|frame| {
+            let buffer = bgra(frame.bitmap).ok_or(DocumentError::Damaged)?;
+            Ok(image::Frame::from_parts(
+                buffer,
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(frame.delay_ms, 1),
+            ))
+        })
+        .collect::<Result<Vec<_>, DocumentError>>()?;
+    Ok(Arc::new(RenderImage::new(frames)))
+}
+
+/// A bitmap in the channel order GPUI keeps images in (BGRA).
+pub(super) fn bgra(bitmap: Bitmap) -> Option<image::RgbaImage> {
+    let Bitmap {
+        width,
+        height,
+        mut rgba,
+    } = bitmap;
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
     }
-    Image::from_bytes(format, bytes.to_vec())
-        .to_image_data(svg.clone())
-        .ok()
+    image::RgbaImage::from_raw(width, height, rgba)
 }
 
 /// The lines of `head`, or `None` if it is not UTF-8 text.

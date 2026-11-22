@@ -21,9 +21,13 @@ mod transfers;
 mod vault;
 mod workspace;
 
+use std::alloc::System;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
+
+use cap::Cap;
+use ferge_core::document::worker;
 
 use clap::Parser;
 use gpui::{
@@ -56,13 +60,34 @@ struct Cli {
     bench: Option<bench::Scenario>,
 }
 
+/// The system allocator, counting what is allocated so that the preview
+/// worker can be held to a memory limit (see [`worker::run`]). The app
+/// itself runs without a limit.
+#[global_allocator]
+static ALLOCATOR: Cap<System> = Cap::new(System, usize::MAX);
+
 fn main() -> ExitCode {
+    // ferge started by itself to read a file for a preview: nothing else
+    // is set up in that process.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == worker::ARGUMENT)
+    {
+        return worker::run(|limit| {
+            let used = ALLOCATOR.allocated();
+            ALLOCATOR.set_limit(used.saturating_add(limit)).is_ok()
+        });
+    }
     let started = Instant::now();
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with_writer(std::io::stderr)
         .init();
+    match worker::current_program() {
+        Ok(program) => worker::set_program(program),
+        Err(error) => tracing::warn!(%error, "previews of documents and pictures are unavailable"),
+    }
 
     gpui_platform::application()
         .with_assets(assets::Assets)

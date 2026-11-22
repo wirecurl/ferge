@@ -1065,6 +1065,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f125eb85b84a24c36b02ed1d22c9dd8632f53b3cde6e4d23512f94021030003"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2335,6 +2341,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "cap",
  "clap",
  "dirs 7.0.0",
  "ferge-core",
@@ -2350,6 +2357,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
@@ -2380,9 +2388,11 @@ dependencies = [
  "getrandom 0.4.3",
  "hayro",
  "hmac 0.13.0",
+ "image",
  "keyring-core",
  "notify",
  "quick-xml 0.42.0",
+ "resvg 0.46.0",
  "rusqlite",
  "russh",
  "russh-config",

@@ -21,6 +21,10 @@ const ENTRY_READ_LIMIT: u64 = 128 * 1024 * 1024;
 
 pub(super) struct Archive<'a> {
     zip: ZipArchive<Cursor<&'a [u8]>>,
+    /// What may still be unpacked, over all reads: a document that names
+    /// the same large entry again and again cannot unpack it again and
+    /// again.
+    budget: u64,
 }
 
 impl<'a> Archive<'a> {
@@ -35,11 +39,42 @@ impl<'a> Archive<'a> {
             DocumentError::Damaged
         })?;
         check(&mut zip)?;
-        Ok(Self { zip })
+        Ok(Self {
+            zip,
+            budget: UNPACKED_LIMIT,
+        })
     }
 
     /// The entry `name` as text, or `None` if there is no such entry.
     pub(super) fn text(&mut self, name: &str) -> Result<Option<String>, DocumentError> {
+        let Some(bytes) = self.read(name, ENTRY_READ_LIMIT, true)? else {
+            return Ok(None);
+        };
+        let text = String::from_utf8(bytes).map_err(|_| DocumentError::Damaged)?;
+        Ok(Some(match text.strip_prefix('\u{feff}') {
+            Some(rest) => rest.to_owned(),
+            None => text,
+        }))
+    }
+
+    /// Up to `limit` bytes from the start of entry `name`, or `None` if
+    /// there is no such entry.
+    pub(super) fn head(
+        &mut self,
+        name: &str,
+        limit: u64,
+    ) -> Result<Option<Vec<u8>>, DocumentError> {
+        self.read(name, limit, false)
+    }
+
+    /// Reads entry `name`, at most `limit` bytes. With `whole`, an entry
+    /// longer than that is an error; otherwise it is cut.
+    fn read(
+        &mut self,
+        name: &str,
+        limit: u64,
+        whole: bool,
+    ) -> Result<Option<Vec<u8>>, DocumentError> {
         let mut entry = match self.zip.by_name(name) {
             Ok(entry) => entry,
             Err(zip::result::ZipError::FileNotFound) => return Ok(None),
@@ -48,22 +83,24 @@ impl<'a> Archive<'a> {
                 return Err(DocumentError::Damaged);
             }
         };
+        let allowed = limit.min(self.budget);
         let mut bytes = Vec::new();
         (&mut entry)
-            .take(ENTRY_READ_LIMIT + 1)
+            .take(allowed.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|error| {
                 tracing::debug!(%error, name, "unreadable archive entry");
                 DocumentError::Damaged
             })?;
-        if bytes.len() as u64 > ENTRY_READ_LIMIT {
-            return Err(DocumentError::TooLarge);
+        let read = bytes.len() as u64;
+        if read > allowed {
+            if whole || allowed < limit {
+                return Err(DocumentError::TooLarge);
+            }
+            bytes.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         }
-        let text = String::from_utf8(bytes).map_err(|_| DocumentError::Damaged)?;
-        Ok(Some(match text.strip_prefix('\u{feff}') {
-            Some(rest) => rest.to_owned(),
-            None => text,
-        }))
+        self.budget = self.budget.saturating_sub(read.min(allowed));
+        Ok(Some(bytes))
     }
 }
 
@@ -128,6 +165,29 @@ pub(super) mod tests {
         let bytes = zip(&[("content.xml", &bomb)]);
         assert!(bytes.len() < 64 * 1024);
         assert_eq!(Archive::open(&bytes).err(), Some(DocumentError::TooLarge));
+    }
+
+    #[test]
+    fn reading_the_same_entry_again_uses_up_the_budget() {
+        let content = vec![b'a'; 1024 * 1024];
+        let bytes = zip(&[("a.xml", &content)]);
+        let mut archive = Archive::open(&bytes).unwrap();
+        let mut reads = 0;
+        while archive.text("a.xml").is_ok() {
+            reads += 1;
+            assert!(reads <= 512, "the budget must run out");
+        }
+        assert_eq!(archive.text("a.xml").err(), Some(DocumentError::TooLarge));
+        assert!(reads >= 511);
+    }
+
+    #[test]
+    fn reads_the_head_of_an_entry() {
+        let bytes = zip(&[("a.xml", b"0123456789")]);
+        let mut archive = Archive::open(&bytes).unwrap();
+        assert_eq!(archive.head("a.xml", 4).unwrap().unwrap(), b"0123");
+        assert_eq!(archive.head("a.xml", 40).unwrap().unwrap(), b"0123456789");
+        assert_eq!(archive.head("missing", 4).unwrap(), None);
     }
 
     #[test]

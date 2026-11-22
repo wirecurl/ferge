@@ -8,7 +8,9 @@ PLAN.md is the binding source for technology, architecture and performance budge
   pause/resume, conflicts), `library` (SQLite: favorites, folders, history), `secrets`
   (keyring / encrypted file), `settings` (TOML file, edited in place, watched), `desktop`
   (desktop fonts via the XDG portal), `document` (previews: spreadsheets, office text, PDF
-  pages; bounded against hostile files). Never depends on GPUI.
+  pages, pictures; bounded against hostile files, and read by the app only through
+  `document::worker`, a separate `ferge --preview-worker` process with a memory limit from the
+  app's `cap` allocator and a timeout). Never depends on GPUI.
 - `crates/ferge-app` – GPUI desktop application (binary `ferge`).
 - `crates/ferge-bench` – benchmark harness for the PLAN.md budgets.
 

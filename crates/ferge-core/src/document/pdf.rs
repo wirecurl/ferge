@@ -1,10 +1,13 @@
 //! PDF pages as bitmaps, rendered with hayro (pure Rust, on the CPU).
 //!
-//! A [`Pdf`] owns a thread that holds the parsed document and renders pages
-//! on request, one at a time. Requests whose answer is no longer awaited are
-//! skipped, so scrolling past pages does not queue up work. The thread ends
-//! when the [`Pdf`] is dropped.
+//! A [`Pdf`] owns a worker process (see [`super::worker`]) that holds the
+//! parsed document and renders pages on request, one at a time, so a file
+//! that drives hayro too far ends the worker, not ferge. A thread talks to
+//! the worker; requests whose answer is no longer awaited are skipped, so
+//! scrolling past pages does not queue up work. The worker ends when the
+//! [`Pdf`] is dropped.
 
+use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, mpsc};
 
@@ -16,7 +19,10 @@ use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::vello_cpu::peniko::ImageAlphaType;
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
 
+pub use super::Bitmap;
 use super::DocumentError;
+use super::wire::{Reader, Writer};
+use super::worker::{self, Worker};
 
 /// Pages listed at most.
 pub const PAGE_LIMIT: usize = 1_000;
@@ -30,14 +36,6 @@ const WIDTHS: std::ops::RangeInclusive<u32> = 16..=4_096;
 pub struct PageSize {
     pub width: f32,
     pub height: f32,
-}
-
-/// A rendered page: opaque RGBA, 8 bits per channel, row by row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Bitmap {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
 }
 
 struct Request {
@@ -65,48 +63,20 @@ impl std::fmt::Debug for Request {
 }
 
 impl Pdf {
-    /// Parses `bytes` on a new rendering thread. Blocks until the document is
-    /// read; call it off the UI thread.
-    pub fn open(bytes: Bytes) -> Result<Self, DocumentError> {
+    /// Opens `bytes` in a worker. Blocks until the document is read; call it
+    /// off the UI thread.
+    pub fn open(bytes: &[u8]) -> Result<Self, DocumentError> {
+        let mut worker = Worker::start()?;
+        let reply = worker.call(&worker::pdf_open_request(bytes))?;
+        let (pages, truncated) = decode_opened(&reply)?;
         let (requests, incoming) = mpsc::channel::<Request>();
-        let (opened, opening) = mpsc::channel();
         std::thread::Builder::new()
             .name("ferge-pdf".to_owned())
-            .spawn(move || {
-                let document = match catch_unwind(|| Document::new(Arc::new(bytes))) {
-                    Ok(Ok(document)) => document,
-                    Ok(Err(LoadPdfError::Decryption(_))) => {
-                        let _ = opened.send(Err(DocumentError::Encrypted));
-                        return;
-                    }
-                    Ok(Err(LoadPdfError::Invalid)) | Err(_) => {
-                        let _ = opened.send(Err(DocumentError::Damaged));
-                        return;
-                    }
-                };
-                let pages = document.pages();
-                let sizes: Vec<PageSize> = pages
-                    .iter()
-                    .take(PAGE_LIMIT)
-                    .map(|page| {
-                        let (width, height) = page.render_dimensions();
-                        PageSize { width, height }
-                    })
-                    .collect();
-                if sizes.is_empty() {
-                    let _ = opened.send(Err(DocumentError::Damaged));
-                    return;
-                }
-                if opened.send(Ok((sizes, pages.len() > PAGE_LIMIT))).is_err() {
-                    return;
-                }
-                serve(&document, &incoming);
-            })
+            .spawn(move || relay(worker, &incoming))
             .map_err(|error| {
                 tracing::warn!(%error, "cannot start the PDF renderer");
                 DocumentError::Damaged
             })?;
-        let (pages, truncated) = opening.recv().map_err(|_| DocumentError::Damaged)??;
         Ok(Self {
             pages: pages.into(),
             truncated,
@@ -142,27 +112,121 @@ impl Pdf {
     }
 }
 
-/// Renders requested pages until the [`Pdf`] is dropped.
-fn serve(document: &Document, requests: &mpsc::Receiver<Request>) {
-    let cache = RenderCache::new();
-    let settings = InterpreterSettings::default();
-    let pages = document.pages();
+/// Passes page requests to the worker until the [`Pdf`] is dropped. Once
+/// the worker failed, every request fails.
+fn relay(mut worker: Worker, requests: &mpsc::Receiver<Request>) {
+    let mut alive = true;
     while let Ok(request) = requests.recv() {
         if request.reply.is_canceled() {
             continue;
         }
-        let result = pages
-            .get(request.page)
-            .ok_or(DocumentError::Damaged)
-            .and_then(|page| {
-                // hayro is young; a page it trips over must not take the
-                // renderer down with it.
+        let result = if alive {
+            let result = worker
+                .call(&worker::pdf_render_request(request.page, request.width))
+                .and_then(|reply| {
+                    let mut reader = Reader::new(&reply);
+                    let bitmap = worker::decode_bitmap(&mut reader)?;
+                    reader.end()?;
+                    Ok(bitmap)
+                });
+            // A page that is merely missing or damaged leaves the worker
+            // usable; a worker that died or timed out does not come back.
+            alive = !matches!(result, Err(DocumentError::TooLarge));
+            result
+        } else {
+            Err(DocumentError::TooLarge)
+        };
+        let _ = request.reply.send(result);
+    }
+}
+
+fn decode_opened(reply: &[u8]) -> Result<(Vec<PageSize>, bool), DocumentError> {
+    let mut reader = Reader::new(reply);
+    let truncated = reader.bool()?;
+    let count = reader.count(8)?;
+    if count == 0 || count > PAGE_LIMIT {
+        return Err(DocumentError::Damaged);
+    }
+    let mut pages = Vec::with_capacity(count);
+    for _ in 0..count {
+        let width = reader.f32()?;
+        let height = reader.f32()?;
+        if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+            return Err(DocumentError::Damaged);
+        }
+        pages.push(PageSize { width, height });
+    }
+    reader.end()?;
+    Ok((pages, truncated))
+}
+
+/// The worker's side: opens the document, reports its pages, then renders
+/// pages as they are asked for until `input` ends.
+pub(crate) fn serve_worker(
+    bytes: Bytes,
+    input: &mut impl Read,
+    output: &mut impl Write,
+) -> std::io::Result<()> {
+    let document = match catch_unwind(|| Document::new(Arc::new(bytes))) {
+        Ok(Ok(document)) => document,
+        Ok(Err(LoadPdfError::Decryption(_))) => {
+            return worker::write_frame(output, &worker::error_reply(DocumentError::Encrypted));
+        }
+        Ok(Err(LoadPdfError::Invalid)) | Err(_) => {
+            return worker::write_frame(output, &worker::error_reply(DocumentError::Damaged));
+        }
+    };
+    let pages = document.pages();
+    let sizes: Vec<PageSize> = pages
+        .iter()
+        .take(PAGE_LIMIT)
+        .map(|page| {
+            let (width, height) = page.render_dimensions();
+            PageSize { width, height }
+        })
+        .collect();
+    if sizes.is_empty() {
+        return worker::write_frame(output, &worker::error_reply(DocumentError::Damaged));
+    }
+    let mut opened = Writer::new();
+    opened.bool(pages.len() > PAGE_LIMIT);
+    opened.len(sizes.len());
+    for size in &sizes {
+        opened.f32(size.width);
+        opened.f32(size.height);
+    }
+    worker::write_frame(output, &worker::ok_reply(opened))?;
+
+    let cache = RenderCache::new();
+    let settings = InterpreterSettings::default();
+    loop {
+        let frame = match worker::read_frame(input) {
+            Ok(frame) => frame,
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let reply = worker::read_render_request(&frame)
+            .and_then(|(page, width)| {
+                pages
+                    .get(page)
+                    .map(|page| (page, width))
+                    .ok_or(DocumentError::Damaged)
+            })
+            .and_then(|(page, width)| {
                 catch_unwind(AssertUnwindSafe(|| {
-                    render_page(page, &cache, &settings, request.width)
+                    render_page(page, &cache, &settings, width)
                 }))
                 .map_err(|_| DocumentError::Damaged)
             });
-        let _ = request.reply.send(result);
+        let reply = match reply {
+            Ok(bitmap) => {
+                let mut body = Writer::new();
+                worker::encode_bitmap(&mut body, &bitmap);
+                worker::ok_reply(body)
+            }
+            Err(error) => worker::error_reply(error),
+        };
+        worker::write_frame(output, &reply)?;
     }
 }
 
@@ -237,7 +301,7 @@ mod tests {
 
     #[test]
     fn renders_pages() {
-        let pdf = Pdf::open(square()).unwrap();
+        let pdf = Pdf::open(&square()).unwrap();
         assert_eq!(
             pdf.pages(),
             [PageSize {
@@ -257,13 +321,13 @@ mod tests {
 
     #[test]
     fn reports_missing_pages_and_damaged_files() {
-        let pdf = Pdf::open(square()).unwrap();
+        let pdf = Pdf::open(&square()).unwrap();
         assert_eq!(
             futures::executor::block_on(pdf.render(5, 100)),
             Err(DocumentError::Damaged)
         );
         assert_eq!(
-            Pdf::open(Bytes::from_static(b"%PDF-1.4 nothing")).err(),
+            Pdf::open(b"%PDF-1.4 nothing").err(),
             Some(DocumentError::Damaged)
         );
     }

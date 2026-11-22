@@ -2357,9 +2357,12 @@ name = "ferge-bench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
+ "dirs 7.0.0",
  "ferge-core",
  "futures",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -2380,6 +2383,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hayro",
  "hmac 0.13.0",
+ "jiff",
  "keyring-core",
  "notify",
  "quick-xml 0.42.0",
@@ -2388,6 +2392,7 @@ dependencies = [
  "russh-config",
  "russh-sftp",
  "secrecy",
+ "serde_json",
  "sha1",
  "tempfile",
  "thiserror 2.0.21",

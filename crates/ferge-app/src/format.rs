@@ -16,6 +16,19 @@ pub(crate) fn load_time_zone() {
     let _ = TIME_ZONE.set(TimeZone::system());
 }
 
+/// A file name or path as shown: control characters (a line break, a tab)
+/// become their visible symbols (`␊`, `␉`), so a name stays on one line and
+/// shows what it holds. Only for display; the real name is used otherwise.
+pub(crate) fn name(text: &str) -> String {
+    text.chars()
+        .map(|character| match u32::from(character) {
+            code @ 0..=0x1f => char::from_u32(0x2400 + code).unwrap_or('\u{fffd}'),
+            0x7f => '\u{2421}',
+            _ => character,
+        })
+        .collect()
+}
+
 /// Formats a byte count with decimal units, e.g. `1.2 MB`.
 pub(crate) fn size(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["KB", "MB", "GB", "TB", "PB", "EB"];
@@ -94,6 +107,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn names_stay_on_one_line() {
+        assert_eq!(name("line\nbreak.txt"), "line\u{240a}break.txt");
+        assert_eq!(name("tab\tand\u{7f}"), "tab\u{2409}and\u{2421}");
+        assert_eq!(name("ümlaut 日本 🦀"), "ümlaut 日本 🦀");
+    }
 
     #[test]
     fn sizes() {

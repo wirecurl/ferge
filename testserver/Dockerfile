@@ -3,9 +3,10 @@
 FROM alpine:3.24
 
 # Working as root: ferge may use sudo with its password, ferge-nopasswd without
-# one, and ferge-nosudo not at all. sftp-server is the program sudo runs.
-RUN apk add --no-cache openssh-server openssh-sftp-server python3 sudo \
-    && ssh-keygen -A \
+# one, and ferge-nosudo not at all. sftp-server is the program sudo runs. The
+# SSH client lets two test servers copy between each other directly. Host keys
+# are created when a container starts, so two containers differ.
+RUN apk add --no-cache openssh-server openssh-sftp-server openssh-client-default python3 sudo \
     && for user in ferge ferge-nopasswd ferge-nosudo; do \
            adduser -D -s /bin/sh "$user" && echo "$user:ferge" | chpasswd; \
        done \

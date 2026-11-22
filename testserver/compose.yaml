@@ -1,12 +1,29 @@
 # Started by ./testserver/up.sh, which creates the client keys first.
-name: ferge-testserver
+#
+# sshd is the main test server. sshd2 is a second, empty one for direct
+# transfers between two servers; inside the compose network they reach each
+# other as sshd:22 and sshd2:22.
+name: ${FERGE_TESTSERVER_NAME:-ferge-testserver}
 
 services:
   sshd:
     build: .
-    image: ferge-testserver:latest
+    image: ${FERGE_TESTSERVER_NAME:-ferge-testserver}:latest
     ports:
-      - "127.0.0.1:2222:22"
+      - "127.0.0.1:${FERGE_TEST_PORT:-2222}:22"
+    volumes:
+      - ../.testserver/authorized_keys:/etc/ferge/authorized_keys:ro
+    restart: unless-stopped
+
+  sshd2:
+    build: .
+    image: ${FERGE_TESTSERVER_NAME:-ferge-testserver}:latest
+    depends_on:
+      - sshd
+    environment:
+      FERGE_FIXTURES: none
+    ports:
+      - "127.0.0.1:${FERGE_TEST_PORT2:-2223}:22"
     volumes:
       - ../.testserver/authorized_keys:/etc/ferge/authorized_keys:ro
     restart: unless-stopped

@@ -83,15 +83,17 @@ impl Scripted {
 
 /// Options that touch nothing outside the test: no agent, no user config, no
 /// default keys, a private known_hosts file.
+fn test_port() -> u16 {
+    std::env::var("FERGE_TEST_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(2222)
+}
+
 fn options(known_hosts: &Path) -> SftpOptions {
     let mut options =
         SftpOptions::new(std::env::var("FERGE_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into()));
-    options.port = Some(
-        std::env::var("FERGE_TEST_PORT")
-            .ok()
-            .and_then(|port| port.parse().ok())
-            .unwrap_or(2222),
-    );
+    options.port = Some(test_port());
     options.user = Some("ferge".into());
     options.use_agent = false;
     options.use_default_identities = false;
@@ -147,7 +149,7 @@ async fn unknown_host_key_is_confirmed_once_then_trusted() {
         .expect("first connect");
     let prompts = first.host_prompts.lock().unwrap().clone();
     assert_eq!(prompts.len(), 1);
-    assert_eq!(prompts[0].host, "[127.0.0.1]:2222");
+    assert_eq!(prompts[0].host, format!("[127.0.0.1]:{}", test_port()));
     assert!(prompts[0].fingerprint.starts_with("SHA256:"));
 
     let second = Arc::new(Scripted::default());
@@ -176,7 +178,10 @@ async fn rejected_and_changed_host_keys_fail() {
     // Record a different ed25519 key for the server.
     std::fs::write(
         &known_hosts,
-        "[127.0.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJzaHLNcaADvZ+bfJbe+3qF3Z3UkZs0s717aac8buuEz\n",
+        format!(
+            "[127.0.0.1]:{} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJzaHLNcaADvZ+bfJbe+3qF3Z3UkZs0s717aac8buuEz\n",
+            test_port()
+        ),
     )
     .unwrap();
     let error = connect(key_options(&known_hosts), Arc::new(Scripted::accepting()))
@@ -647,7 +652,7 @@ async fn works_as_root_with_the_sudo_password() {
         .expect("elevate");
     assert_eq!(*interaction.sudo_retries.lock().unwrap(), [false, true]);
     assert!(root.is_elevated() && !remote.is_elevated());
-    assert_eq!(root.label(), "root@127.0.0.1:2222");
+    assert_eq!(root.label(), format!("root@127.0.0.1:{}", test_port()));
     assert_eq!(root.account(), remote.account());
     assert_eq!(root.home_dir().await.unwrap(), path("/home/ferge"));
 

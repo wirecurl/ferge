@@ -1,11 +1,15 @@
-//! Copying the files of a plan: conflicts, partial files, resuming.
+//! Copying the files of a plan through this computer or within one server:
+//! conflicts, partial files, resuming.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use futures::StreamExt as _;
+use serde_json::json;
 
 use super::plan::{FileStatus, Plan, PlannedFile, part_path};
+use super::route::Route;
 use super::{Conflict, ConflictAction, Shared, Stop, Transfer, lock, names};
 use crate::entry::Metadata;
 use crate::error::{Error, Result};
@@ -15,8 +19,9 @@ use crate::path::RemotePath;
 /// applies on top).
 const FILES_PER_TRANSFER: usize = 4;
 
-enum Outcome {
-    Copied,
+pub(super) enum Outcome {
+    /// Copied; how (`relay`, `copy-data`, `cp`, `direct`).
+    Copied(&'static str),
     Skipped,
 }
 
@@ -41,18 +46,62 @@ pub(super) async fn copy_files(transfer: &Arc<Transfer>, shared: &Arc<Shared>, p
                 };
                 let file = &plan.files[index];
                 transfer.control().current = file.source.file_name().map(str::to_owned);
-                let outcome = copy_file(&transfer, file).await;
+                let started = Instant::now();
+                if transfer.trace.is_enabled() {
+                    let size = lock(&file.state).size;
+                    transfer.trace.event(
+                        "file.start",
+                        json!({ "i": index, "path": file.source.as_str(), "size": size }),
+                    );
+                }
+                let outcome = copy_file(&transfer, index, file).await;
+                trace_outcome(&transfer, index, file, &outcome, started);
                 finish_file(&transfer, file, outcome);
+                let (status, resume_at) = {
+                    let state = lock(&file.state);
+                    (state.status, state.resume_at)
+                };
+                transfer.journal.settled(index, status, resume_at);
             }
         })
         .await;
 }
 
-fn finish_file(transfer: &Transfer, file: &PlannedFile, outcome: Result<Outcome>) {
+fn trace_outcome(
+    transfer: &Transfer,
+    index: usize,
+    file: &PlannedFile,
+    outcome: &Result<Outcome>,
+    started: Instant,
+) {
+    if !transfer.trace.is_enabled() {
+        return;
+    }
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    match outcome {
+        Ok(Outcome::Copied(method)) => {
+            let bytes = lock(&file.state).size;
+            transfer.trace.event(
+                "file.done",
+                json!({ "i": index, "bytes": bytes, "ms": ms, "method": method }),
+            );
+        }
+        Ok(Outcome::Skipped) => transfer
+            .trace
+            .event("file.skip", json!({ "i": index, "ms": ms })),
+        Err(error) => transfer.trace.event(
+            "file.error",
+            json!({ "i": index, "ms": ms, "error": error.to_string() }),
+        ),
+    }
+}
+
+/// Records how a file ended and updates the transfer's counters.
+pub(super) fn finish_file(transfer: &Transfer, file: &PlannedFile, outcome: Result<Outcome>) {
     let progress = &transfer.progress;
     let mut state = lock(&file.state);
     match outcome {
-        Ok(Outcome::Copied) => {
+        Ok(Outcome::Copied(_)) => {
             state.status = FileStatus::Done;
             progress.files_done.fetch_add(1, Ordering::Relaxed);
         }
@@ -63,6 +112,11 @@ fn finish_file(transfer: &Transfer, file: &PlannedFile, outcome: Result<Outcome>
             state.counted = state.size;
             progress.files_done.fetch_add(1, Ordering::Relaxed);
             progress.files_skipped.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(error) if error.is_connection_lost() => {
+            // Not the file's fault: it waits for a new connection.
+            drop(state);
+            transfer.stop(Stop::Lost);
         }
         Err(error) => {
             state.status = FileStatus::Failed;
@@ -75,9 +129,9 @@ fn finish_file(transfer: &Transfer, file: &PlannedFile, outcome: Result<Outcome>
     }
 }
 
-async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
-    let source = transfer.source.as_ref();
-    let target = transfer.target.as_ref();
+async fn copy_file(transfer: &Transfer, index: usize, file: &PlannedFile) -> Result<Outcome> {
+    let (source, target) = (transfer.source(), transfer.target());
+    let (source, target) = (source.as_ref(), target.as_ref());
 
     // The source may have changed since it was planned or last attempted.
     let current = source.stat(&file.source).await?;
@@ -104,6 +158,9 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
         None => match choose_destination(transfer, file, &current).await? {
             Some(destination) => {
                 lock(&file.state).destination = Some(destination.clone());
+                transfer
+                    .journal
+                    .decided(index, &destination.0, destination.1);
                 destination
             }
             None => return Ok(Outcome::Skipped),
@@ -112,37 +169,45 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
     let part =
         part_path(&destination).ok_or_else(|| Error::InvalidPath(destination.as_str().into()))?;
 
-    // Continue a partial file only if it still matches what was confirmed.
-    let resume_at = lock(&file.state).resume_at;
-    let offset = match resume_at {
-        Some(at) if unchanged && at > 0 => match target.stat(&part).await {
-            Ok(metadata) if metadata.size >= at && at <= current.size => at,
-            _ => 0,
-        },
-        _ => 0,
+    let offset = resume_offset(
+        transfer,
+        index,
+        file,
+        &part,
+        unchanged.then_some(current.size),
+    )
+    .await;
+    let on_server = if transfer.route() == Some(Route::Server) {
+        source.server_side()
+    } else {
+        None
     };
-    {
-        let mut state = lock(&file.state);
-        transfer
-            .progress
-            .add_bytes(i128::from(offset) - i128::from(state.counted));
-        state.counted = offset;
-    }
-
-    let mut reader = source.read_from(&file.source, offset).await?;
-    let mut writer = target.open_writer(&part, offset).await?;
-    lock(&file.state).resume_at = Some(offset);
-    while let Some(chunk) = reader.next().await {
-        let chunk = chunk?;
-        let len = chunk.len() as u64;
-        writer.write(chunk).await?;
-        let confirmed = writer.confirmed();
-        let mut state = lock(&file.state);
-        state.counted += len;
-        state.resume_at = Some(confirmed);
-        transfer.progress.add_bytes(i128::from(len));
-    }
-    let length = writer.finish().await?;
+    let (length, method) = match on_server {
+        Some(server) => {
+            let progress = |confirmed: u64| {
+                let mut state = lock(&file.state);
+                transfer
+                    .progress
+                    .add_bytes(i128::from(confirmed) - i128::from(state.counted));
+                state.counted = confirmed;
+                state.resume_at = Some(confirmed);
+                drop(state);
+                transfer.journal.progressed(index, confirmed);
+            };
+            match server
+                .copy_within(&file.source, &part, offset, &progress)
+                .await
+            {
+                Ok((length, method)) => (length, method.as_str()),
+                Err(Error::Unsupported(what)) => {
+                    tracing::debug!(what, "copying on the server is not possible; relaying");
+                    (relay(transfer, index, file, &part, offset).await?, "relay")
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        None => (relay(transfer, index, file, &part, offset).await?, "relay"),
+    };
     {
         let mut state = lock(&file.state);
         // The file may have grown or shrunk while it was read.
@@ -163,17 +228,79 @@ async fn copy_file(transfer: &Transfer, file: &PlannedFile) -> Result<Outcome> {
     {
         tracing::debug!(path = %destination, %error, "could not keep the modification time");
     }
-    Ok(Outcome::Copied)
+    Ok(Outcome::Copied(method))
+}
+
+/// Where the copy of `file` starts: where it stopped, if the source is
+/// unchanged (its `size` given) and the partial file still holds what was
+/// confirmed; else at the start.
+async fn resume_offset(
+    transfer: &Transfer,
+    index: usize,
+    file: &PlannedFile,
+    part: &RemotePath,
+    size: Option<u64>,
+) -> u64 {
+    let resume_at = lock(&file.state).resume_at;
+    let offset = match (resume_at, size) {
+        (Some(at), Some(size)) if at > 0 => match transfer.target().stat(part).await {
+            Ok(metadata) if metadata.size >= at && at <= size => at,
+            _ => 0,
+        },
+        _ => 0,
+    };
+    {
+        let mut state = lock(&file.state);
+        transfer
+            .progress
+            .add_bytes(i128::from(offset) - i128::from(state.counted));
+        state.counted = offset;
+        state.resume_at = Some(offset);
+    }
+    if offset > 0 {
+        transfer
+            .trace
+            .event("file.resume", json!({ "i": index, "offset": offset }));
+    }
+    offset
+}
+
+/// Reads the source from `offset` and writes it to `part` through this
+/// computer. Returns the length of `part`.
+async fn relay(
+    transfer: &Transfer,
+    index: usize,
+    file: &PlannedFile,
+    part: &RemotePath,
+    offset: u64,
+) -> Result<u64> {
+    let mut reader = transfer.source().read_from(&file.source, offset).await?;
+    let mut writer = transfer.target().open_writer(part, offset).await?;
+    while let Some(chunk) = reader.next().await {
+        let chunk = chunk?;
+        let len = chunk.len() as u64;
+        writer.write(chunk).await?;
+        let confirmed = writer.confirmed();
+        {
+            let mut state = lock(&file.state);
+            state.counted += len;
+            state.resume_at = Some(confirmed);
+        }
+        transfer.progress.add_bytes(i128::from(len));
+        transfer.journal.progressed(index, confirmed);
+    }
+    writer.finish().await
 }
 
 /// Where the file goes and whether that replaces an existing file; `None` to
 /// skip it.
-async fn choose_destination(
+pub(super) async fn choose_destination(
     transfer: &Transfer,
     file: &PlannedFile,
     source: &Metadata,
 ) -> Result<Option<(RemotePath, bool)>> {
-    let target = transfer.target.as_ref();
+    let target = transfer.target();
+    let target = target.as_ref();
     let existing = match target.stat(&file.target).await {
         Err(Error::NotFound { .. }) => return Ok(Some((file.target.clone(), false))),
         Err(error) => return Err(error),
@@ -184,9 +311,7 @@ async fn choose_destination(
             path: file.target.clone(),
         });
     }
-    let same_remote = Arc::ptr_eq(&transfer.source, &transfer.target)
-        || (transfer.source.is_local() && transfer.target.is_local());
-    let same_file = same_remote && file.source == file.target;
+    let same_file = transfer.same_files() && file.source == file.target;
     let action = if same_file {
         // Copying a file onto itself can only mean "duplicate".
         ConflictAction::KeepBoth

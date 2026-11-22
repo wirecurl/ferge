@@ -13,6 +13,10 @@ use crate::interaction::{HostKeyDecision, HostKeyPrompt, Interaction};
 /// itself only surfaces a generic "unknown key" error.
 pub(crate) type HostKeyFailure = Arc<Mutex<Option<HostKeyError>>>;
 
+/// Slot that receives the host key once it was accepted, so the session can
+/// hand it on (direct transfers tell the other server which key to expect).
+pub(crate) type AcceptedHostKey = Arc<Mutex<Option<PublicKey>>>;
+
 pub(crate) struct ClientHandler {
     /// Name under which the host is recorded, e.g. `[host]:2222`.
     host_key_name: String,
@@ -21,6 +25,7 @@ pub(crate) struct ClientHandler {
     failure: HostKeyFailure,
     /// Key accepted during the initial handshake; re-keying must present the same.
     accepted: Option<PublicKey>,
+    reported: AcceptedHostKey,
 }
 
 impl ClientHandler {
@@ -29,6 +34,7 @@ impl ClientHandler {
         known_hosts: KnownHosts,
         interaction: Arc<dyn Interaction>,
         failure: HostKeyFailure,
+        reported: AcceptedHostKey,
     ) -> Self {
         Self {
             host_key_name,
@@ -36,6 +42,7 @@ impl ClientHandler {
             interaction,
             failure,
             accepted: None,
+            reported,
         }
     }
 
@@ -104,6 +111,7 @@ impl client::Handler for ClientHandler {
         match self.verify(key).await {
             Ok(()) => {
                 self.accepted = Some(key.clone());
+                *self.reported.lock().unwrap_or_else(PoisonError::into_inner) = Some(key.clone());
                 Ok(true)
             }
             Err(error) => {

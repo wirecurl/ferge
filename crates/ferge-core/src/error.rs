@@ -83,6 +83,11 @@ pub enum Error {
     #[error(transparent)]
     Elevation(#[from] ElevationError),
 
+    /// A direct transfer between two servers was not possible or lost
+    /// contact with its job.
+    #[error("direct transfer: {0}")]
+    Direct(String),
+
     /// The SSH client configuration could not be used.
     #[error("SSH configuration: {0}")]
     Config(String),
@@ -124,6 +129,12 @@ impl Error {
     }
 
     /// Whether retrying with other credentials could help.
+    /// Whether the connection to the server is gone, so that the same work
+    /// may succeed on a new one.
+    pub fn is_connection_lost(&self) -> bool {
+        matches!(self, Self::Disconnected | Self::Timeout(_))
+    }
+
     pub fn is_authentication(&self) -> bool {
         matches!(self, Self::AuthenticationFailed { .. })
     }

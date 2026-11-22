@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use super::handler::ClientHandler;
 use super::{REQUEST_TIMEOUT_SECS, SftpChannel};
 use crate::error::{ElevationError, Error, Result};
+use crate::remote::server::CommandOutput;
 
 /// Where `sftp-server` lives on common systems, tried after the path in
 /// `sshd_config`: Debian and Ubuntu, Fedora and RHEL, Arch and Alpine, macOS
@@ -143,65 +144,27 @@ pub(super) fn sudo_reply(status: Option<u32>, stderr: &str) -> SudoReply {
     SudoReply::Refused(message.trim_end_matches('.').to_owned())
 }
 
-/// The outcome of a command run on the server.
-struct Output {
-    status: Option<u32>,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-/// Runs `command`, feeds it `input` and collects what it prints.
+/// Runs `command` and feeds it `input`; a refusal means the account may not
+/// run commands at all.
 async fn run(
     ssh: &client::Handle<ClientHandler>,
     host: &str,
     command: &str,
     input: Option<&[u8]>,
-) -> Result<Output> {
-    let work = async {
-        let mut channel = ssh
-            .channel_open_session()
-            .await
-            .map_err(|error| Error::protocol("opening an SSH channel failed", error))?;
-        channel
-            .exec(true, command)
-            .await
-            .map_err(|error| Error::protocol("running a command failed", error))?;
-        if let Some(input) = input {
-            channel
-                .data(input)
-                .await
-                .map_err(|error| Error::protocol("running a command failed", error))?;
+) -> Result<CommandOutput> {
+    super::exec::run(
+        ssh,
+        command,
+        input,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+    )
+    .await?
+    .ok_or_else(|| {
+        ElevationError::CommandsRefused {
+            host: host.to_owned(),
         }
-        channel
-            .eof()
-            .await
-            .map_err(|error| Error::protocol("running a command failed", error))?;
-        let mut output = Output {
-            status: None,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        while let Some(message) = channel.wait().await {
-            match message {
-                ChannelMsg::Failure => {
-                    return Err(ElevationError::CommandsRefused {
-                        host: host.to_owned(),
-                    }
-                    .into());
-                }
-                ChannelMsg::Data { data } => output.stdout.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { data, ext: 1 } => {
-                    output.stderr.extend_from_slice(&data);
-                }
-                ChannelMsg::ExitStatus { exit_status } => output.status = Some(exit_status),
-                _ => {}
-            }
-        }
-        Ok(output)
-    };
-    tokio::time::timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), work)
-        .await
-        .map_err(|_| Error::Timeout("running a command on the server"))?
+        .into()
+    })
 }
 
 /// Finds out how to run `sftp-server` as root and asks for the password if

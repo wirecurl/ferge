@@ -219,7 +219,7 @@ impl Session {
                     move |this, _: &ClickEvent, _, cx| this.go_to_path(path.clone(), cx)
                 }))
                 .map(|this| match path.file_name() {
-                    Some(name) => this.child(SharedString::from(name.to_owned())),
+                    Some(name) => this.child(SharedString::from(crate::format::name(name))),
                     None => this
                         .when(as_root, |this| this.text_color(warning))
                         .child(root_icon.clone().size(em(1.)))

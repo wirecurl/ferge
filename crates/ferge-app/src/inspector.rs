@@ -147,7 +147,7 @@ impl Inspector {
                         div()
                             .text_center()
                             .text_title()
-                            .child(SharedString::from(entry.name.as_str().to_owned())),
+                            .child(SharedString::from(crate::format::name(entry.name.as_str()))),
                     ),
             )
             .child(

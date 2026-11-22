@@ -582,7 +582,7 @@ impl FileBrowser {
             .overflow_x_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .child(SharedString::from(entry.name.as_str().to_owned()))
+            .child(SharedString::from(crate::format::name(entry.name.as_str())))
             .into_any_element()
     }
 }

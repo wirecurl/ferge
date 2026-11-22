@@ -32,7 +32,7 @@ use crate::prompts::{self, PromptRequest, SessionId, TaggedPrompt};
 use crate::runtime;
 use crate::session::{ConnectRequest, Session, SessionContext, SessionEvent};
 use crate::style::TypeScale as _;
-use crate::transfers::{TransferPanel, Transfers};
+use crate::transfers::{OpenPlace, TransferPanel, Transfers};
 use crate::vault::Vault;
 use gpui_base::TextSelection;
 
@@ -165,6 +165,10 @@ impl Panes {
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent switches: open panels, a confirmed close"
+)]
 pub(crate) struct Workspace {
     context: SessionContext,
     tabs: Vec<Panes>,
@@ -194,12 +198,130 @@ pub(crate) struct Workspace {
     palette: Option<(Entity<crate::palette::Palette>, Subscription)>,
     /// The last problem with the settings that was shown.
     shown_settings_issue: u64,
+    /// Closing was confirmed; the window closes without asking again.
+    closing: bool,
     /// Background work and subscriptions owned by the window.
     tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
+    /// The transfer list; its links to source and target folders open new
+    /// tabs.
+    fn transfer_panel(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<TransferPanel>, Subscription) {
+        let panel = cx.new(TransferPanel::new);
+        let open_places = cx.subscribe_in(
+            &panel,
+            window,
+            |this, _, OpenPlace(place): &OpenPlace, window, cx| {
+                this.show_place(place, window, cx);
+                cx.notify();
+            },
+        );
+        (panel, open_places)
+    }
+
+    /// Shows `place`: in the pane that shows that folder already, else in a
+    /// new tab.
+    fn show_place(&mut self, place: &Destination, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.tabs.iter().enumerate().find_map(|(tab, panes)| {
+            panes
+                .panes
+                .iter()
+                .position(|pane| {
+                    let session = pane.read(cx);
+                    // A pane on its way there counts too: a second click must
+                    // not open a second tab.
+                    session.connecting_to() == Some(place)
+                        || session.browser().is_some_and(|browser| {
+                            let browser = browser.read(cx);
+                            place.is_served_by(browser.remote().as_ref())
+                                && place.path() == Some(browser.path())
+                        })
+                })
+                .map(|pane| (tab, pane))
+        });
+        match found {
+            Some((tab, pane)) => {
+                self.activate(tab, window, cx);
+                self.focus_pane(pane, window, cx);
+            }
+            None => {
+                self.add_tab(Some(ConnectRequest::to(place.clone())), window, cx);
+            }
+        }
+    }
+
+    /// Closing the window while transfers need ferge asks first: they pause
+    /// and come back at the next start.
+    fn ask_before_closing(window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |workspace, cx| workspace.may_close(window, cx))
+                .unwrap_or(true)
+        });
+    }
+
+    fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.closing {
+            return true;
+        }
+        let transfers = Transfers::needing_ferge(cx);
+        if transfers.is_empty() {
+            return true;
+        }
+        self.confirm(ConfirmAction::CloseWhileCopying(transfers), window, cx);
+        false
+    }
+
+    /// Pauses `transfers`, waits a moment for them to save where they stand,
+    /// and closes the window.
+    pub(super) fn close_after_pausing(
+        &mut self,
+        transfers: Vec<TransferId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.closing = true;
+        let queue = Transfers::queue(cx);
+        for id in &transfers {
+            queue.pause(*id);
+        }
+        cx.spawn_in(window, async move |_, cx| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline
+                && queue
+                    .snapshot()
+                    .iter()
+                    .any(|snapshot| transfers.contains(&snapshot.id) && snapshot.state.is_active())
+            {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+            }
+            let _ = cx.update(|window, _| window.remove_window());
+        })
+        .detach();
+    }
+
+    /// The password store, opened early and off the UI thread, so the first
+    /// saved password is not delayed by D-Bus.
+    fn open_vault(ephemeral: bool, cx: &mut Context<Self>) -> Arc<Vault> {
+        let vault = if ephemeral {
+            Vault::ephemeral()
+        } else {
+            Vault::new()
+        };
+        let warm_up = Arc::clone(&vault);
+        runtime::spawn(cx, async move {
+            warm_up.store().await;
+        });
+        vault
+    }
+
     pub(crate) fn new(options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Appearance::follow_window(window, cx);
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
@@ -227,7 +349,7 @@ impl Workspace {
                 }
             }
         });
-        let mut transfer_events = Transfers::install(sender.clone(), cx);
+        let mut transfer_events = Transfers::install(sender.clone(), options.ephemeral, cx);
         let transfer_listener = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = transfer_events.next().await {
                 let delivered = this.update_in(cx, |workspace, window, cx| {
@@ -238,17 +360,16 @@ impl Workspace {
                 }
             }
         });
-        let vault = if options.ephemeral {
-            Vault::ephemeral()
-        } else {
-            Vault::new()
-        };
-        // Open the password store early and off the UI thread, so the first
-        // saved password is not delayed by D-Bus.
-        let warm_up = Arc::clone(&vault);
-        runtime::spawn(cx, async move {
-            warm_up.store().await;
-        });
+        let vault = Self::open_vault(options.ephemeral, cx);
+        Transfers::start_connecting(
+            crate::reconnect::Connector::new(
+                sender.clone(),
+                Arc::clone(&vault),
+                options.ssh_config.clone(),
+            ),
+            cx,
+        );
+        Self::ask_before_closing(window, cx);
 
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter this folder"));
         let filter_events =
@@ -260,6 +381,8 @@ impl Workspace {
                     }
                 }
             });
+
+        let (transfer_panel, open_places) = Self::transfer_panel(window, cx);
 
         let mut workspace = Self {
             context: SessionContext {
@@ -278,7 +401,7 @@ impl Workspace {
             prompt: None,
             dialog: None,
             prompt_focus: cx.focus_handle(),
-            transfer_panel: cx.new(TransferPanel::new),
+            transfer_panel,
             transfers_open: false,
             seen_transfers: HashSet::new(),
             inspector: cx.new(|_| Inspector::new()),
@@ -288,8 +411,9 @@ impl Workspace {
             filter,
             tasks: Vec::new(),
             shown_settings_issue: 0,
+            closing: false,
             palette: None,
-            _subscriptions: vec![appearance, settings_issues, filter_events],
+            _subscriptions: vec![appearance, settings_issues, filter_events, open_places],
         };
         workspace.tasks = vec![
             prompt_listener,
@@ -731,6 +855,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TransferEvent::ConnectionLost(id) => Transfers::connection_lost(id, cx),
             TransferEvent::Changed(id) => {
                 // A new transfer shows the panel; later changes do not reopen it.
                 if self.seen_transfers.insert(id) {

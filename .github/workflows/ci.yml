@@ -73,11 +73,13 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --locked
-      - name: Start the SFTP test server
+      - name: Start the SFTP test servers
         run: ./testserver/up.sh
       - name: SFTP integration tests
         run: cargo test -p ferge-core --test sftp --locked -- --ignored
-      - name: Stop the SFTP test server
+      - name: Direct transfer integration tests
+        run: cargo test -p ferge-core --test direct --locked -- --ignored
+      - name: Stop the SFTP test servers
         if: always()
         run: ./testserver/down.sh
 

@@ -25,7 +25,7 @@ favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
   renamed when complete, keeping their modification time; cancelling removes partial files.
 - Existing files are not overwritten silently: replace, skip or keep both, optionally for the
   rest of a transfer.
-- SFTP reads and writes are pipelined (16 requests in flight, up to 256 KiB each) over separate
+- SFTP reads and writes are pipelined (16 requests in flight, up to 255 KiB each) over separate
   data channels, so transfers never block browsing.
 - Two file browsers per tab, side by side (one in narrow windows). A server panel in each:
   favorites in folders, `~/.ssh/config` hosts, recent connections, Quick Connect, and a search

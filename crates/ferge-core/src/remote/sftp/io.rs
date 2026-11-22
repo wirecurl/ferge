@@ -41,8 +41,11 @@ impl ChunkSizes {
         write: 32 * 1024,
     };
 
-    /// Upper bound even if a server allows more; larger chunks only add latency.
-    const MAX: u64 = 256 * 1024;
+    /// Upper bound even if a server allows more; larger chunks only add
+    /// latency. 1 KiB below 256 KiB, as OpenSSH does: a reply of 256 KiB of
+    /// data plus its header would exceed the 256 KiB packets russh-sftp
+    /// (and many servers) accept, and fail the whole session.
+    const MAX: u64 = 256 * 1024 - 1024;
 
     /// Sizes allowed by the server's limits (`0` means "no limit").
     pub(super) fn from_limits(max_read: u64, max_write: u64) -> Self {
@@ -378,10 +381,13 @@ mod tests {
 
     #[test]
     fn chunk_sizes_respect_limits() {
+        // "No limit" still keeps a reply within a 256 KiB packet: data,
+        // its length, the request id and the packet type.
         let sizes = ChunkSizes::from_limits(0, 0);
-        assert_eq!((sizes.read, sizes.write), (256 * 1024, 256 * 1024));
+        assert_eq!((sizes.read, sizes.write), (261_120, 261_120));
+        assert!(u64::from(sizes.read) + 9 <= 256 * 1024);
         let sizes = ChunkSizes::from_limits(261_120, 1024 * 1024);
-        assert_eq!((sizes.read, sizes.write), (261_120, 256 * 1024));
+        assert_eq!((sizes.read, sizes.write), (261_120, 261_120));
         let sizes = ChunkSizes::from_limits(16_384, 8_192);
         assert_eq!((sizes.read, sizes.write), (16_384, 8_192));
     }

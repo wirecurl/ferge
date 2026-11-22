@@ -20,6 +20,7 @@ PLAN.md is the binding source for technology, architecture and performance budge
 cargo build                      # debug build of the app (deps at opt-level 3)
 cargo run                        # start the app
 cargo build --release            # release build
+./packaging/build.sh             # build for distribution: target/dist/ferge, no paths of this machine
 cargo test --workspace           # all tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check

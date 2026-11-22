@@ -113,6 +113,14 @@ lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
 
+# Builds that are handed out (packages, releases): the release build without
+# debug info. Symbol names stay, so a backtrace still names the functions.
+# packaging/build.sh builds with it and keeps the build machine's paths out.
+[profile.dist]
+inherits = "release"
+debug = false
+strip = "debuginfo"
+
 # CI: no debug info and unoptimised dependencies. Tests need neither, and
 # the build takes a fraction of the time on small CI runners.
 [profile.ci]

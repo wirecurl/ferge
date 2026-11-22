@@ -172,6 +172,7 @@ cargo test --workspace
 ./testserver/up.sh && cargo test --workspace -- --include-ignored
 cargo deny check                 # licenses and security advisories of all dependencies
 cargo build --release && cargo run --release -p ferge-bench
+./packaging/build.sh             # binary for packages and releases, without this machine's paths
 ```
 
 CI runs formatting, clippy, the tests, the SFTP integration tests against the test server and

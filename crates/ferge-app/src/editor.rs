@@ -8,7 +8,7 @@ use ferge_core::{Destination, RemotePath, SftpTarget};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, EventEmitter, IntoElement, ParentElement as _,
-    PathPromptOptions, Render, SharedString, Styled as _, Subscription, Window, div, px,
+    PathPromptOptions, Render, SharedString, Styled as _, Subscription, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _, DropdownButton};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -307,7 +307,7 @@ impl Render for BookmarkEditor {
                     h_flex()
                         .gap_3()
                         .child(field("Host", &self.host))
-                        .child(div().w(px(88.)).child(field("Port", &self.port))),
+                        .child(div().w(style::em(6.5)).child(field("Port", &self.port))),
                 )
                 .child(field("User", &self.user))
                 .child(

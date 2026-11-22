@@ -13,7 +13,7 @@ use ferge_core::transfer::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Subscription, Window, div, px,
+    ParentElement as _, SharedString, Styled as _, Subscription, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
@@ -674,7 +674,7 @@ impl Workspace {
     fn card(cx: &Context<Self>) -> gpui::Div {
         let theme = cx.theme();
         v_flex()
-            .w(px(460.))
+            .w(style::em(33.))
             .max_w_full()
             .p_5()
             .gap_3()
@@ -706,7 +706,9 @@ impl Workspace {
         let danger = theme.danger;
         let card =
             match self.dialog.as_ref()? {
-                Dialog::Editor { editor, .. } => Self::card(cx).w(px(520.)).child(editor.clone()),
+                Dialog::Editor { editor, .. } => {
+                    Self::card(cx).w(style::em(37.)).child(editor.clone())
+                }
                 Dialog::FolderName {
                     input,
                     purpose,
@@ -1008,7 +1010,7 @@ impl Workspace {
         let describe = |label: &'static str, size: u64, modified, highlight: bool| {
             h_flex()
                 .gap_2()
-                .child(div().w(px(72.)).text_color(muted).child(label))
+                .child(div().w(style::em(5.5)).text_color(muted).child(label))
                 .child(crate::format::size(size))
                 .child(div().text_color(muted).child("·"))
                 .child(
@@ -1022,7 +1024,9 @@ impl Workspace {
                     this.child(div().text_small().text_color(muted).child("newer"))
                 })
         };
-        let card = Self::card(cx).w(px(500.)).track_focus(&self.prompt_focus);
+        let card = Self::card(cx)
+            .w(style::em(36.))
+            .track_focus(&self.prompt_focus);
         let card = if conflict.kind == ConflictKind::Folder {
             card.child(div().text_title().child(format!("Merge into “{name}”?")))
                 .child(div().text_body().child(format!(
@@ -1089,7 +1093,7 @@ impl Workspace {
             })
         };
         Self::card(cx)
-            .w(px(520.))
+            .w(style::em(37.))
             .track_focus(&self.prompt_focus)
             .child(
                 div()

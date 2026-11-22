@@ -464,6 +464,7 @@ mod design_rules {
         (".text_base()", "text_body()"),
         (".text_lg()", "text_title()"),
         ("rems(", "style::em(…)"),
+        (".w(px(", "style::em(…), so that widths grow with the font"),
         (".xsmall()", "the default size or .small()"),
         (".icon(IconName::", "style::IconButton for icon buttons"),
         (".icon(Icon::", "style::IconButton for icon buttons"),

@@ -175,7 +175,7 @@ pub(crate) fn resolve(options: &SftpOptions) -> Result<ResolvedTarget> {
     target.host_key_alias =
         lookup_option(&normalized, &options.host, "hostkeyalias").filter(|alias| !alias.is_empty());
     if let Some(alias) = &target.host_key_alias {
-        validate_name("HostKeyAlias", alias, is_plain_char)?;
+        validate_name("HostKeyAlias", alias, is_host_char)?;
     }
     target.identities_only = lookup_option(&normalized, &options.host, "identitiesonly")
         .is_some_and(|value| value.eq_ignore_ascii_case("yes"));
@@ -293,7 +293,7 @@ fn build_target(
     if port == 0 {
         return Err(Error::Config("port 0 is not valid".into()));
     }
-    validate_name("host", &alias, is_plain_char)?;
+    validate_name("host", &alias, is_alias_char)?;
     validate_name("user", &user, is_plain_char)?;
     let local_user = local_user_name();
     let home_text = home
@@ -320,7 +320,10 @@ fn build_target(
 
     let (identity_files, identities_configured) = identity_files(options, config, &tokens, home);
 
-    validate_name("host name", &hostname, is_plain_char)?;
+    // The host name is what host keys are recorded under, so it must be a
+    // literal name: `*`, `?`, `!` or `,` would turn a known_hosts line into a
+    // pattern that matches other hosts.
+    validate_name("host name", &hostname, is_host_char)?;
     let proxy_command = match config
         .proxy_command
         .as_deref()
@@ -435,10 +438,45 @@ fn validate_name(what: &str, value: &str, allowed: fn(char) -> bool) -> Result<(
     Ok(())
 }
 
-/// Anything but whitespace and control characters; these would corrupt
-/// known_hosts lines and log output.
-fn is_plain_char(c: char) -> bool {
-    !(c.is_whitespace() || c.is_control())
+/// Anything visible: no whitespace, control or invisible formatting
+/// characters, which would corrupt known_hosts lines and log output or make
+/// a name look like another in a dialog.
+pub(crate) fn is_plain_char(c: char) -> bool {
+    !(c.is_whitespace() || c.is_control() || is_invisible_format_char(c))
+}
+
+/// Characters of a literal host name: letters and digits (internationalised
+/// names included), `.`, `-`, `_`, and `:` and `%` for IPv6 addresses and
+/// their zones. Everything known_hosts treats as a pattern or separator
+/// (`*`, `?`, `!`, `,`, `|`, `[`, `]`, `#`) is excluded.
+pub(crate) fn is_host_char(c: char) -> bool {
+    (c.is_alphanumeric() && !is_invisible_format_char(c))
+        || matches!(c, '.' | '-' | '_' | ':' | '%')
+}
+
+/// Characters of a host alias as typed or written after `Host` in an SSH
+/// configuration: those of a host name, plus `/`, `+` and `~`, which some
+/// configurations use to group aliases.
+pub(crate) fn is_alias_char(c: char) -> bool {
+    is_host_char(c) || matches!(c, '/' | '+' | '~')
+}
+
+/// Unicode format characters that change how text is shown without being
+/// visible themselves: bidirectional controls, zero-width characters, the
+/// soft hyphen and the byte order mark.
+pub(crate) fn is_invisible_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
 }
 
 /// Characters that are inert in a POSIX shell word.
@@ -848,6 +886,42 @@ Match host box
         let mut options = SftpOptions::new("host\nevil ssh-ed25519 AAAA");
         options.ssh_config = SshConfigSource::Disabled;
         assert!(matches!(resolve(&options), Err(Error::Config(_))));
+
+        // Host key names must stay literal: a pattern or list written to
+        // known_hosts would trust the key for other hosts.
+        for host in [
+            "*",
+            "*,x.evil.example",
+            "a,b",
+            "host?",
+            "!host",
+            "a|b",
+            "a#b",
+            "[a]",
+            "evil\u{202E}gro.example",
+            "zero\u{200B}width",
+        ] {
+            let mut options = SftpOptions::new(host);
+            options.ssh_config = SshConfigSource::Disabled;
+            assert!(
+                matches!(resolve(&options), Err(Error::Config(_))),
+                "{host:?}"
+            );
+        }
+        for config in [
+            "Host box\n  HostName *.example\n",
+            "Host box\n  HostKeyAlias a,b\n",
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let file = dir.path().join("config");
+            std::fs::write(&file, config).expect("write");
+            let mut options = SftpOptions::new("box");
+            options.ssh_config = SshConfigSource::File(file);
+            assert!(
+                matches!(resolve(&options), Err(Error::Config(_))),
+                "{config:?}"
+            );
+        }
 
         let mut options = SftpOptions::new("ok-host.example");
         options.user = Some("first.last@corp".into());

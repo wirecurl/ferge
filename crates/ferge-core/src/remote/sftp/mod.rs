@@ -9,7 +9,7 @@
 //! connection whose SFTP server runs as root (see [`elevate`]).
 
 mod auth;
-mod config;
+pub(crate) mod config;
 mod elevate;
 mod handler;
 mod io;

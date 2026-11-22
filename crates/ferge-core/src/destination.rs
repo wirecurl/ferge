@@ -35,8 +35,9 @@ pub struct SftpTarget {
 impl SftpTarget {
     /// A target for `host` with everything else left to the configuration.
     ///
-    /// The host must be non-empty and contain no whitespace, control
-    /// characters, `@`, `/` or brackets (except around an IPv6 address).
+    /// The host must be a non-empty host name or alias: letters, digits,
+    /// `.`, `-`, `_`, `+`, `~`, and `:` and `%` for IPv6 addresses, which may
+    /// be in brackets. It must not start with `-`.
     pub fn new(host: &str) -> Result<Self> {
         let host = host.trim();
         let bare = host
@@ -47,7 +48,7 @@ impl SftpTarget {
             && !bare.starts_with('-')
             && bare
                 .chars()
-                .all(|c| !(c.is_whitespace() || c.is_control() || "@/[]".contains(c)));
+                .all(|c| c != '/' && crate::remote::sftp::config::is_alias_char(c));
         if !valid {
             return Err(Error::Config(format!("invalid host {host:?}")));
         }
@@ -284,6 +285,20 @@ mod tests {
     }
 
     #[test]
+    fn host_names_and_addresses_pass() {
+        for good in [
+            "example.org",
+            "box+1",
+            "team~a",
+            "10.0.0.1",
+            "[fe80::1%eth0]",
+            "bücher.example",
+        ] {
+            assert!(SftpTarget::new(good).is_ok(), "{good:?}");
+        }
+    }
+
+    #[test]
     fn invalid_destinations() {
         for bad in [
             "",
@@ -294,10 +309,26 @@ mod tests {
             "user@",
             "-oProxyCommand=x",
             "host name",
+            "sftp://*,x.evil.example/",
+            "sftp://[*,x.evil.example]:2222/",
+            "sftp://a,b/",
         ] {
             assert!(Destination::parse(bad).is_err(), "{bad:?}");
         }
-        for bad in ["", "a b", "a/b", "u@h", "-x", "[]"] {
+        for bad in [
+            "",
+            "a b",
+            "a/b",
+            "u@h",
+            "-x",
+            "[]",
+            "*",
+            "a,b",
+            "a?",
+            "!a",
+            "a|b",
+            "a\u{202E}b",
+        ] {
             assert!(SftpTarget::new(bad).is_err(), "{bad:?}");
         }
     }

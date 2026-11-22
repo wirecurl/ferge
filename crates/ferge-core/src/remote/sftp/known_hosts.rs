@@ -92,6 +92,10 @@ impl KnownHosts {
     }
 
     /// Appends `key` for `name` to the first user file.
+    ///
+    /// `name` must be one literal host key name; anything that known_hosts
+    /// would read as a pattern or a list is refused, so a confirmed key can
+    /// never be trusted for other hosts.
     pub(crate) async fn remember(&self, name: &str, key: &PublicKey) -> Result<(), HostKeyError> {
         let Some(file) = self.user_files.first().cloned() else {
             return Err(HostKeyError::Save {
@@ -99,6 +103,12 @@ impl KnownHosts {
                 source: "no writable known_hosts file is configured".into(),
             });
         };
+        if !is_literal_name(name) {
+            return Err(HostKeyError::Save {
+                path: file,
+                source: format!("{name:?} is not a single host name").into(),
+            });
+        }
         let line = format!(
             "{name} {}\n",
             key.to_openssh().map_err(|error| HostKeyError::Save {
@@ -118,6 +128,19 @@ impl KnownHosts {
                 source: error.into(),
             })
     }
+}
+
+/// Whether `name` is a single literal host key name: `host` or
+/// `[host]:port`, where `host` has only host name characters.
+fn is_literal_name(name: &str) -> bool {
+    let host = match name.strip_prefix('[') {
+        Some(rest) => match rest.split_once("]:") {
+            Some((host, port)) if port.parse::<u16>().is_ok_and(|port| port != 0) => host,
+            _ => return false,
+        },
+        None => name,
+    };
+    !host.is_empty() && !host.starts_with('-') && host.chars().all(super::config::is_host_char)
 }
 
 async fn read_if_exists(path: &Path) -> Result<Option<String>, HostKeyError> {
@@ -179,8 +202,15 @@ fn entry_matches(entry: &Entry, name: &str) -> bool {
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        // Like OpenSSH's ~/.ssh: private to the user.
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(parent)?;
     }
     let mut file = std::fs::OpenOptions::new()
         .read(true)
@@ -365,6 +395,64 @@ mod tests {
             known.check("other", &key(ED25519_B)).await.expect("check"),
             Verdict::Trusted
         );
+    }
+
+    #[tokio::test]
+    async fn remember_refuses_patterns_and_lists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join(".ssh/known_hosts");
+        let known = KnownHosts {
+            user_files: vec![file.clone()],
+            global_files: Vec::new(),
+        };
+        for name in [
+            "*",
+            "*,x.evil.example",
+            "a,b",
+            "!other",
+            "host?",
+            "[*,x.evil.example]:2222",
+            "[host]:0",
+            "[host]",
+            "|1|abc|def",
+            "@revoked",
+            "host name",
+            "-host",
+            "",
+        ] {
+            assert!(
+                known.remember(name, &key(ED25519_A)).await.is_err(),
+                "{name:?} must be refused"
+            );
+        }
+        assert!(!file.exists(), "nothing may be written");
+
+        for name in [
+            "example.org",
+            "[example.org]:2222",
+            "fe80::1%eth0",
+            "bücher.example",
+        ] {
+            known.remember(name, &key(ED25519_A)).await.expect(name);
+        }
+        assert_eq!(
+            known
+                .check("other.example", &key(ED25519_A))
+                .await
+                .expect("check"),
+            Verdict::Unknown {
+                other_types_known: false
+            }
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.path().join(".ssh"))
+                .expect("dir")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
     }
 
     #[test]

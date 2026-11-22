@@ -18,6 +18,9 @@ use secrecy::SecretString;
 use crate::error::{Error, Result};
 use crate::interaction::{Account, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt};
 
+/// How often the limit is looked at while a question is open.
+const QUESTION_CHECK: Duration = Duration::from_secs(1);
+
 /// Measures the time spent waiting for answers.
 #[derive(Debug, Default)]
 pub(super) struct Clock {
@@ -33,13 +36,12 @@ struct State {
 }
 
 impl Clock {
-    /// Time spent on questions, the current one included.
-    fn asked(&self) -> Duration {
+    /// Time spent on questions, the current one included, and whether one
+    /// is open now.
+    fn asked(&self) -> (Duration, bool) {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.asked
-            + state
-                .asking_since
-                .map_or(Duration::ZERO, |since| since.elapsed())
+        let open = state.asking_since.map(|since| since.elapsed());
+        (state.asked + open.unwrap_or(Duration::ZERO), open.is_some())
     }
 
     async fn asking<T>(&self, question: impl Future<Output = T>) -> T {
@@ -65,13 +67,20 @@ impl Clock {
         let started = Instant::now();
         let mut work = std::pin::pin!(work);
         loop {
-            let used = started.elapsed().saturating_sub(self.asked());
-            let Some(left) = limit.checked_sub(used).filter(|left| !left.is_zero()) else {
+            let (asked, asking) = self.asked();
+            let used = started.elapsed().saturating_sub(asked);
+            let left = limit.saturating_sub(used);
+            if left.is_zero() && !asking {
                 return Err(Error::Timeout("connecting"));
+            }
+            // While a question is open the clock stands still: look again
+            // in a while rather than at once.
+            let wait = if asking {
+                left.max(QUESTION_CHECK)
+            } else {
+                left
             };
-            // While a question is open, look again later rather than at the
-            // deadline: the answer may take a while.
-            if let Ok(result) = tokio::time::timeout(left, &mut work).await {
+            if let Ok(result) = tokio::time::timeout(wait, &mut work).await {
                 return result;
             }
         }

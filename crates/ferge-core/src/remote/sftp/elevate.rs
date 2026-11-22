@@ -124,7 +124,14 @@ fn password_probe(server: &str) -> String {
 
 /// Whether sudo's answer to [`password_probe`] means a password is needed.
 fn needs_password(stderr: &str) -> bool {
-    stderr.contains("password is required") || stderr.contains("a terminal is required")
+    // sudo, and sudo-rs (the default on newer Ubuntu releases).
+    [
+        "password is required",
+        "a terminal is required",
+        "interactive authentication is required",
+    ]
+    .iter()
+    .any(|wording| stderr.contains(wording))
 }
 
 /// A server's explanation as it may appear in ferge's messages: one line,
@@ -483,6 +490,9 @@ mod tests {
             "env LC_ALL=C sudo -n -k -- /usr/lib/ssh/sftp-server </dev/null"
         );
         assert!(needs_password("sudo: a password is required\n"));
+        assert!(needs_password(
+            "sudo: interactive authentication is required\n"
+        ));
         assert!(!needs_password("sudo: user is not in the sudoers file\n"));
     }
 }

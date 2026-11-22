@@ -761,6 +761,34 @@ async fn asks_sudo_about_sftp_server_itself() {
 
 #[tokio::test]
 #[ignore = "requires the test server (./testserver/up.sh)"]
+async fn a_closed_root_session_stays_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = connect(
+        user_options(&dir.path().join("known_hosts"), "ferge-nopasswd"),
+        Arc::new(Scripted::accepting()),
+    )
+    .await
+    .expect("connect");
+    let root = remote
+        .elevate(Arc::new(Scripted::accepting()) as Arc<dyn Interaction>)
+        .await
+        .expect("elevate");
+    // Whoever still holds the root session (a copy, a finished transfer)
+    // finds it closed once it was left; the login works on.
+    let kept = root.clone();
+    root.disconnect().await;
+    assert!(
+        kept.list(&path("/root/private"))
+            .try_concat()
+            .await
+            .is_err()
+    );
+    assert!(kept.stat(&path("/root/private/secret.txt")).await.is_err());
+    assert!(remote.stat(&remote.home_dir().await.unwrap()).await.is_ok());
+}
+
+#[tokio::test]
+#[ignore = "requires the test server (./testserver/up.sh)"]
 async fn working_as_root_fails_clearly() {
     let dir = tempfile::tempdir().unwrap();
     let known_hosts = dir.path().join("known_hosts");

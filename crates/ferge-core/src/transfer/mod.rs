@@ -291,6 +291,25 @@ impl TransferQueue {
             .collect()
     }
 
+    /// Whether a transfer that is working or paused copies from or to
+    /// `remote` (this very connection, not just the same server).
+    pub fn is_using(&self, remote: &Arc<dyn Remote>) -> bool {
+        lock(&self.shared.transfers).iter().any(|transfer| {
+            let state = transfer.state();
+            (state.is_active() || state == TransferState::Paused)
+                && (std::ptr::addr_eq(Arc::as_ptr(&transfer.source), Arc::as_ptr(remote))
+                    || std::ptr::addr_eq(Arc::as_ptr(&transfer.target), Arc::as_ptr(remote)))
+        })
+    }
+
+    /// Waits until no transfer [uses](Self::is_using) `remote`, for
+    /// instance to close a connection once its transfers are done.
+    pub async fn until_unused(&self, remote: &Arc<dyn Remote>) {
+        while self.is_using(remote) {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
     /// Whether any transfer is working.
     pub fn is_busy(&self) -> bool {
         lock(&self.shared.transfers)

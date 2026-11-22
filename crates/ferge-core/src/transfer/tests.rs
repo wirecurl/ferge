@@ -460,6 +460,49 @@ async fn a_source_that_sends_without_end_fails_instead_of_filling_the_disk() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tells_which_connections_transfers_use() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let data = vec![7_u8; 4 * 1024 * 1024];
+    write(&from.path().join("big.bin"), &data);
+    let slow: Arc<dyn Remote> = Arc::new(Slow::default());
+    let other = local();
+    let (queue, _events) = TransferQueue::new(2);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: Arc::clone(&slow),
+            items: vec![path(&from.path().join("big.bin"))],
+            target: local(),
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    wait_for(&queue, id, |snapshot| {
+        snapshot.state == TransferState::Running
+    })
+    .await;
+    assert!(queue.is_using(&slow));
+    assert!(
+        !queue.is_using(&other),
+        "the same kind of remote, but not this one"
+    );
+    queue.pause(id);
+    wait_for(&queue, id, |snapshot| {
+        snapshot.state == TransferState::Paused
+    })
+    .await;
+    assert!(
+        queue.is_using(&slow),
+        "a paused transfer still needs its connection"
+    );
+    queue.resume(id);
+    tokio::time::timeout(Duration::from_secs(30), queue.until_unused(&slow))
+        .await
+        .unwrap();
+    assert_eq!(settled(&queue, id).await.state, TransferState::Completed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pauses_and_resumes_in_the_middle_of_a_file() {
     let from = tempfile::tempdir().unwrap();
     let to = tempfile::tempdir().unwrap();

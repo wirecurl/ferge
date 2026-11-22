@@ -84,6 +84,13 @@ pub(crate) struct FileClipboard {
 
 impl Global for FileClipboard {}
 
+impl FileClipboard {
+    /// Whether the items were copied from `remote` (this very session).
+    pub(crate) fn is_from(&self, remote: &Arc<dyn Remote>) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.source), Arc::as_ptr(remote))
+    }
+}
+
 /// What is carried while rows are dragged: the browser they come from and
 /// the row that was grabbed. The items are looked up when they are dropped.
 #[derive(Clone)]

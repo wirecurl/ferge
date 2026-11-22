@@ -11,6 +11,7 @@ use std::sync::Arc;
 use ferge_core::library::{BookmarkId, LibrarySnapshot};
 use ferge_core::remote::local::LocalRemote;
 use ferge_core::remote::sftp::{SftpRemote, SshConfigSource};
+use ferge_core::transfer::TransferQueue;
 use ferge_core::{Destination, EntryKind, Remote, RemotePath};
 use futures::channel::mpsc;
 use gpui::prelude::FluentBuilder as _;
@@ -120,8 +121,12 @@ enum Root {
         _task: Task<()>,
         abort: tokio::task::AbortHandle,
     },
-    /// The browser works on a session as root.
-    On,
+    /// The browser works on a session as root: `remote` as the browser
+    /// has it, `session` to close it.
+    On {
+        remote: Arc<dyn Remote>,
+        session: SftpRemote,
+    },
 }
 
 /// Whether the pane shows its files or the server panel.
@@ -137,8 +142,54 @@ struct Connection {
     browser: Entity<FileBrowser>,
     /// The SFTP session of the login, which can open one as root.
     login: Option<SftpRemote>,
+    /// The browser's remote for the login session, to tell its transfers.
+    login_remote: Arc<dyn Remote>,
     root: Root,
+    /// Closes sessions once nothing uses them.
+    closer: Closer,
     _events: [Subscription; 2],
+}
+
+/// Closes SFTP sessions once no transfer uses them any more, so that
+/// neither a connection nor, above all, a session as root outlives what
+/// the user sees. What still holds the session (a finished transfer, the
+/// copied items of another tab) finds it closed.
+#[derive(Clone)]
+struct Closer {
+    runtime: tokio::runtime::Handle,
+    transfers: TransferQueue,
+}
+
+impl Closer {
+    fn new(cx: &App) -> Self {
+        Self {
+            runtime: runtime::handle(cx),
+            transfers: crate::transfers::Transfers::queue(cx),
+        }
+    }
+
+    /// Closes `session` once no transfer uses any of `remotes` (the
+    /// session as transfers know it, and for a login also its session as
+    /// root, which runs on the same connection).
+    fn close(&self, remotes: Vec<Arc<dyn Remote>>, session: SftpRemote) {
+        let transfers = self.transfers.clone();
+        self.runtime.spawn(async move {
+            for remote in &remotes {
+                transfers.until_unused(remote).await;
+            }
+            session.disconnect().await;
+        });
+    }
+}
+
+/// Forgets copied items that come from `remote`, whose session is closing.
+fn forget_copied_from(remote: &Arc<dyn Remote>, cx: &mut App) {
+    if cx
+        .try_global::<crate::browser::FileClipboard>()
+        .is_some_and(|clipboard| clipboard.is_from(remote))
+    {
+        cx.remove_global::<crate::browser::FileClipboard>();
+    }
 }
 
 impl Drop for Connection {
@@ -146,6 +197,14 @@ impl Drop for Connection {
         // Stop asking for a sudo password on behalf of a connection that is gone.
         if let Root::Opening { abort, .. } = &self.root {
             abort.abort();
+        }
+        let mut users = vec![Arc::clone(&self.login_remote)];
+        if let Root::On { remote, session } = std::mem::replace(&mut self.root, Root::Off) {
+            users.push(Arc::clone(&remote));
+            self.closer.close(vec![remote], session);
+        }
+        if let Some(login) = self.login.take() {
+            self.closer.close(users, login);
         }
     }
 }
@@ -405,6 +464,7 @@ impl Session {
         let options = self.options;
         let address = &request.destination;
         let can_elevate = login.is_some();
+        let remote_for_login = Arc::clone(&remote);
         let browser = cx.new(|cx| {
             let mut browser = FileBrowser::new(remote, address, path, options, cx);
             browser.set_can_elevate(can_elevate, cx);
@@ -440,7 +500,9 @@ impl Session {
             destination: request.destination.with_path(None),
             browser,
             login,
+            login_remote: remote_for_login,
             root: Root::Off,
+            closer: Closer::new(cx),
             _events: [navigated, requests],
         });
         self.state = ConnectState::Idle;
@@ -452,12 +514,19 @@ impl Session {
         }
     }
 
-    /// Closes the connection and shows the server panel.
+    /// Closes the connection and shows the server panel. Transfers on it
+    /// finish first; then the connection closes.
     pub(crate) fn disconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.abandon_attempt(cx);
         if self.opens_root() {
             // Withdraws its password question.
             self.leave_root(cx);
+        }
+        if let Some(connection) = &self.connection {
+            forget_copied_from(&connection.login_remote, cx);
+            if let Root::On { remote, .. } = &connection.root {
+                forget_copied_from(remote, cx);
+            }
         }
         self.connection = None;
         self.go_to = None;
@@ -597,11 +666,14 @@ impl Session {
             Some(Ok(root)) => {
                 // A sudo password the user asked to remember is saved now that it worked.
                 runtime::spawn(cx, async move { interaction.commit().await });
-                let remote: Arc<dyn Remote> = Arc::new(root);
-                connection
-                    .browser
-                    .update(cx, |browser, cx| browser.set_remote(remote, cx));
-                connection.root = Root::On;
+                let remote: Arc<dyn Remote> = Arc::new(root.clone());
+                connection.browser.update(cx, |browser, cx| {
+                    browser.set_remote(Arc::clone(&remote), cx);
+                });
+                connection.root = Root::On {
+                    remote,
+                    session: root,
+                };
             }
             Some(Err(message)) => self.state = ConnectState::Failed(message),
             None => {}
@@ -609,20 +681,21 @@ impl Session {
         self.sync_root(cx);
     }
 
-    /// Goes back to the login user. Transfers started as root finish as root:
-    /// the root session closes once nothing uses it any more.
+    /// Goes back to the login user. Transfers started as root finish as
+    /// root; then the root session closes, whatever still holds it. Items
+    /// copied as root are forgotten.
     fn leave_root(&mut self, cx: &mut Context<Self>) {
         let Some(connection) = self.connection.as_mut() else {
             return;
         };
         match std::mem::replace(&mut connection.root, Root::Off) {
-            Root::On => {
-                if let Some(login) = connection.login.clone() {
-                    let remote: Arc<dyn Remote> = Arc::new(login);
-                    connection
-                        .browser
-                        .update(cx, |browser, cx| browser.set_remote(remote, cx));
-                }
+            Root::On { remote, session } => {
+                let login = Arc::clone(&connection.login_remote);
+                connection
+                    .browser
+                    .update(cx, |browser, cx| browser.set_remote(login, cx));
+                forget_copied_from(&remote, cx);
+                connection.closer.close(vec![remote], session);
             }
             Root::Opening { abort, .. } => {
                 abort.abort();

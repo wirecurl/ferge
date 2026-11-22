@@ -28,6 +28,9 @@ use super::worker::{self, Worker};
 pub const PAGE_LIMIT: usize = 1_000;
 /// The tallest bitmap rendered, in pixels; taller pages render smaller.
 const MAX_HEIGHT: f32 = 16_384.0;
+/// Pixels of one rendered page at most (64 MiB as RGBA); larger pages
+/// render smaller.
+const MAX_PIXELS: f32 = 16.0 * 1024.0 * 1024.0;
 /// Widths a page may be rendered at, in pixels.
 const WIDTHS: std::ops::RangeInclusive<u32> = 16..=4_096;
 
@@ -242,7 +245,10 @@ fn render_page<'a>(
         reason = "widths are clamped to a few thousand pixels"
     )]
     let wanted = width.clamp(*WIDTHS.start(), *WIDTHS.end()) as f32;
-    let scale = (wanted / page_width.max(1.0)).min(MAX_HEIGHT / page_height.max(1.0));
+    let area = page_width.max(1.0) * page_height.max(1.0);
+    let scale = (wanted / page_width.max(1.0))
+        .min(MAX_HEIGHT / page_height.max(1.0))
+        .min((MAX_PIXELS / area).sqrt());
     let pixmap = hayro::render(
         page,
         cache,
@@ -269,11 +275,19 @@ mod tests {
 
     /// A one-page PDF, 200 × 100 points, with a black square in the corner.
     fn square() -> Bytes {
+        page_of(200, 100)
+    }
+
+    /// A one-page PDF of `width` × `height` points with a black square in
+    /// the corner.
+    fn page_of(width: u32, height: u32) -> Bytes {
         let content = "0 0 0 rg 0 0 50 50 re f";
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R >>".to_owned(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Contents 4 0 R >>"
+            ),
             format!(
                 "<< /Length {} >>\nstream\n{content}\nendstream",
                 content.len()
@@ -317,6 +331,21 @@ mod tests {
         // The square sits at the bottom left; the rest is white paper.
         assert_eq!(pixel(10, 190), [0, 0, 0, 255]);
         assert_eq!(pixel(390, 10), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn huge_pages_render_within_the_pixel_limit() {
+        // PDF allows pages of up to 14,400 points a side.
+        let pdf = Pdf::open(&page_of(14_400, 14_400)).unwrap();
+        let bitmap = futures::executor::block_on(pdf.render(0, 4_096)).unwrap();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small constant"
+        )]
+        let most = MAX_PIXELS as u64;
+        assert!(u64::from(bitmap.width) * u64::from(bitmap.height) <= most);
+        assert!(bitmap.width >= 4_000, "rendered as large as allowed");
     }
 
     #[test]

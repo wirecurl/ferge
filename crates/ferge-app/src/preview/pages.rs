@@ -21,6 +21,9 @@ use crate::style::{self, TypeScale as _, em};
 const PAGE_WIDTH: f32 = 52.0;
 /// Rendered pages kept; the ones farthest from the latest are let go.
 const KEEP: usize = 12;
+/// Bytes of rendered pages kept at most, whatever their count: a document
+/// of huge pages must not fill the memory.
+const KEEP_BYTES: usize = 256 * 1024 * 1024;
 /// Pages are rendered at multiples of this width, in pixels, so resizing a
 /// window a little does not render them again.
 const WIDTH_STEP: f32 = 256.0;
@@ -146,7 +149,9 @@ impl PageView {
         self.rendered.retain(|&page| page != index);
         self.rendered.push(index);
         // Let go of the rendered pages farthest from this one.
-        while self.rendered.len() > KEEP {
+        while self.rendered.len() > KEEP
+            || (self.rendered.len() > 1 && self.rendered_bytes() > KEEP_BYTES)
+        {
             let Some((position, _)) = self
                 .rendered
                 .iter()
@@ -160,6 +165,19 @@ impl PageView {
                 release(Arc::clone(image), cx);
             }
         }
+    }
+
+    /// The memory the rendered pages take.
+    fn rendered_bytes(&self) -> usize {
+        self.rendered
+            .iter()
+            .filter_map(|&page| self.pages[page].image())
+            .map(|image| {
+                let size = image.size(0);
+                usize::try_from(size.width.0.max(0) * size.height.0.max(0) * 4)
+                    .unwrap_or(usize::MAX)
+            })
+            .sum()
     }
 
     pub(super) fn render(&self, window: &Window, cx: &mut Context<Preview>) -> AnyElement {

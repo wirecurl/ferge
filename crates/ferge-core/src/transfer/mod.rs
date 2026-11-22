@@ -316,10 +316,11 @@ impl TransferQueue {
         })
     }
 
-    /// Waits until no transfer [uses](Self::is_using) `remote`, for
-    /// instance to close a connection once its transfers are done.
+    /// Waits until no transfer [uses](Self::is_using) `remote` and no
+    /// other operation holds it ([`crate::remote::InUse`]), for instance to
+    /// close a connection once the work on it is done.
     pub async fn until_unused(&self, remote: &Arc<dyn Remote>) {
-        while self.is_using(remote) {
+        while self.is_using(remote) || crate::remote::is_in_use(remote) {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
     }

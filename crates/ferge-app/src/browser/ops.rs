@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use ferge_core::remote::InUse;
 use ferge_core::transfer::TransferRequest;
 use ferge_core::{EntryKind, EntryName, RemotePath, ops};
 use gpui::{AppContext as _, ClipboardItem, Context, Entity, Subscription, Window};
@@ -93,7 +94,11 @@ impl FileBrowser {
         let from = renaming.dir.join(&renaming.name);
         let to = renaming.dir.join(&new_name);
         let remote = Arc::clone(&self.remote);
-        let renaming_task = runtime::spawn(cx, async move { remote.rename(&from, &to).await });
+        let in_use = InUse::new(&remote);
+        let renaming_task = runtime::spawn(cx, async move {
+            let _in_use = in_use;
+            remote.rename(&from, &to).await
+        });
         cx.spawn(async move |this, cx| {
             let result = renaming_task.await;
             let _ = this.update(cx, |browser, cx| match result {
@@ -149,7 +154,9 @@ impl FileBrowser {
     fn create(&mut self, folder: bool, cx: &mut Context<Self>) {
         let remote = Arc::clone(&self.remote);
         let dir = self.path.clone();
+        let in_use = InUse::new(&remote);
         let creating = runtime::spawn(cx, async move {
+            let _in_use = in_use;
             let base = if folder {
                 "untitled folder"
             } else {
@@ -243,7 +250,10 @@ impl FileBrowser {
         });
         cx.notify();
         let remote = Arc::clone(&self.remote);
+        // A session left meanwhile (as root) stays open until this is done.
+        let in_use = InUse::new(&remote);
         let deleting = runtime::spawn(cx, async move {
+            let _in_use = in_use;
             ops::delete(remote.as_ref(), &items, &|_| {}).await
         });
         cx.spawn(async move |this, cx| {

@@ -75,7 +75,12 @@ impl Inspector {
             return;
         };
         let remote = Arc::clone(browser.read(cx).remote());
-        let changing = runtime::spawn(cx, async move { remote.chmod(&path, mode).await });
+        // Taken now, so the session cannot close before the work starts.
+        let in_use = ferge_core::remote::InUse::new(&remote);
+        let changing = runtime::spawn(cx, async move {
+            let _in_use = in_use;
+            remote.chmod(&path, mode).await
+        });
         self.status = Some("Saving…".into());
         cx.notify();
         cx.spawn(async move |this, cx| {

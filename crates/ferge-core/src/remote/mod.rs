@@ -136,6 +136,59 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
 /// Size of the chunks produced by [`ByteStream`]s of the built-in backends.
 pub(crate) const READ_CHUNK: usize = 256 * 1024;
 
+/// Remotes with operations running on them, by address, with how many.
+static IN_USE: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+
+fn address(remote: &std::sync::Arc<dyn Remote>) -> usize {
+    std::sync::Arc::as_ptr(remote).cast::<()>() as usize
+}
+
+/// Marks `remote` (this very connection) as in use by an operation such as
+/// a delete or a rename, until the guard is dropped, so that it is not
+/// closed underneath (see [`crate::transfer::TransferQueue::until_unused`]).
+#[derive(Debug)]
+pub struct InUse {
+    address: usize,
+}
+
+impl InUse {
+    pub fn new(remote: &std::sync::Arc<dyn Remote>) -> Self {
+        let address = address(remote);
+        let mut in_use = IN_USE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match in_use.iter_mut().find(|(known, _)| *known == address) {
+            Some((_, count)) => *count += 1,
+            None => in_use.push((address, 1)),
+        }
+        Self { address }
+    }
+}
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        let mut in_use = IN_USE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = in_use.iter().position(|(known, _)| *known == self.address) {
+            in_use[index].1 -= 1;
+            if in_use[index].1 == 0 {
+                in_use.swap_remove(index);
+            }
+        }
+    }
+}
+
+/// Whether an [`InUse`] guard for `remote` is alive.
+pub fn is_in_use(remote: &std::sync::Arc<dyn Remote>) -> bool {
+    let address = address(remote);
+    IN_USE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|(known, _)| *known == address)
+}
+
 /// Entries a listing may have at most. A server that never ends a listing
 /// (or a folder far beyond what anyone browses) would otherwise fill the
 /// memory; past this, the listing fails.
@@ -157,4 +210,27 @@ where
     tokio_util::io::ReaderStream::with_capacity(reader, READ_CHUNK)
         .map(move |chunk| chunk.map_err(|error| Error::from_io(&path, error)))
         .boxed()
+}
+
+#[cfg(test)]
+mod in_use_tests {
+    use std::sync::Arc;
+
+    use super::{InUse, Remote, is_in_use};
+    use crate::remote::local::LocalRemote;
+
+    #[test]
+    fn guards_mark_a_remote_in_use_until_dropped() {
+        let remote: Arc<dyn Remote> = Arc::new(LocalRemote::new());
+        let other: Arc<dyn Remote> = Arc::new(LocalRemote::new());
+        assert!(!is_in_use(&remote));
+        let first = InUse::new(&remote);
+        let second = InUse::new(&remote);
+        assert!(is_in_use(&remote));
+        assert!(!is_in_use(&other));
+        drop(first);
+        assert!(is_in_use(&remote));
+        drop(second);
+        assert!(!is_in_use(&remote));
+    }
 }

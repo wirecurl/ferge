@@ -145,6 +145,9 @@ struct Connection {
     /// The browser's remote for the login session, to tell its transfers.
     login_remote: Arc<dyn Remote>,
     root: Root,
+    /// Sessions as root that were left while work on them went on; the
+    /// login connection they run on waits for them too.
+    left_roots: Vec<Arc<dyn Remote>>,
     /// Closes sessions once nothing uses them.
     closer: Closer,
     _events: [Subscription; 2],
@@ -199,6 +202,7 @@ impl Drop for Connection {
             abort.abort();
         }
         let mut users = vec![Arc::clone(&self.login_remote)];
+        users.append(&mut self.left_roots);
         if let Root::On { remote, session } = std::mem::replace(&mut self.root, Root::Off) {
             users.push(Arc::clone(&remote));
             self.closer.close(vec![remote], session);
@@ -506,6 +510,7 @@ impl Session {
             login,
             login_remote: remote_for_login,
             root: Root::Off,
+            left_roots: Vec::new(),
             closer: Closer::new(cx),
             _events: [navigated, requests],
         });
@@ -699,6 +704,7 @@ impl Session {
                     .browser
                     .update(cx, |browser, cx| browser.set_remote(login, cx));
                 forget_copied_from(&remote, cx);
+                connection.left_roots.push(Arc::clone(&remote));
                 connection.closer.close(vec![remote], session);
             }
             Root::Opening { abort, .. } => {

@@ -48,6 +48,8 @@ The first release, 0.1.0, is in preparation.
 - Follows the desktop's fonts and light or dark preference.
 - An app icon: the f of ferge crossing a wave, for the Linux icon theme (with a symbolic
   variant) and X11 windows.
+- Packages: a tarball, `.deb` and `.rpm` for x86_64 and aarch64 Linux (glibc 2.35 and newer),
+  `ferge.app` for macOS on Apple silicon and Intel, AUR recipes and a Homebrew cask.
 
 ### Security
 

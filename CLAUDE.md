@@ -13,8 +13,9 @@ PLAN.md is the binding source for technology, architecture and performance budge
   app's `cap` allocator and a timeout). Never depends on GPUI.
 - `crates/ferge-app` – GPUI desktop application (binary `ferge`).
 - `crates/ferge-bench` – benchmark harness for the PLAN.md budgets.
-- `packaging/` – desktop file, icons (`icons/README.md`), macOS `.icns`, and `build.sh` for
-  binaries that are handed out.
+- `packaging/` – everything for packages and releases: desktop file, metainfo, icons, macOS
+  bundle, AUR recipes, Homebrew cask, `build.sh` for binaries that are handed out. How to make a
+  release: `packaging/README.md`; `.github/workflows/release.yml` builds the packages from a tag.
 
 ## Commands
 

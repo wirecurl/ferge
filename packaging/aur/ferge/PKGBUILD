@@ -1,0 +1,44 @@
+# Maintainer: wirecurl <andreas@wirecurl.com>
+
+pkgname=ferge
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Fast, keyboard-first file transfer client (SFTP)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/wirecurl/ferge'
+license=('GPL-3.0-or-later')
+depends=('glibc' 'libgcc' 'hicolor-icon-theme' 'libxcb' 'libxkbcommon'
+         'libxkbcommon-x11' 'vulkan-driver' 'vulkan-icd-loader' 'wayland')
+makedepends=('cargo')
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The LLVM of rustc 1.99 crashes (SIGILL) compiling the p256 and p384
+  # crates for znver4, which `-C target-cpu=native` from CachyOS's
+  # makepkg.conf picks on Zen 4. Build for the generic target instead.
+  RUSTFLAGS=${RUSTFLAGS//-C target-cpu=native/}
+  RUSTFLAGS=${RUSTFLAGS//-Ctarget-cpu=native/}
+  # Keeps the build folder out of the binary's panic locations.
+  export RUSTFLAGS="$RUSTFLAGS --remap-path-prefix=$srcdir=/build"
+  cargo build --frozen --profile dist -p ferge-app
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/dist/ferge "$pkgdir/usr/bin/ferge"
+  install -Dm644 packaging/linux/com.wirecurl.ferge.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 packaging/linux/com.wirecurl.ferge.metainfo.xml -t "$pkgdir/usr/share/metainfo"
+  cd packaging/linux/icons
+  find hicolor -type f -exec install -Dm644 {} "$pkgdir/usr/share/icons/{}" \;
+}

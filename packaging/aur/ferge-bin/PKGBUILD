@@ -1,0 +1,28 @@
+# Maintainer: wirecurl <andreas@wirecurl.com>
+
+pkgname=ferge-bin
+_pkgname=ferge
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Fast, keyboard-first file transfer client (SFTP), prebuilt'
+arch=('x86_64' 'aarch64')
+url='https://github.com/wirecurl/ferge'
+license=('GPL-3.0-or-later')
+depends=('glibc' 'libgcc' 'hicolor-icon-theme' 'libxcb' 'libxkbcommon'
+         'libxkbcommon-x11' 'vulkan-driver' 'vulkan-icd-loader' 'wayland')
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+options=('!strip' '!debug')
+source_x86_64=("$url/releases/download/v$pkgver/$_pkgname-$pkgver-x86_64-linux.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/$_pkgname-$pkgver-aarch64-linux.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "$_pkgname-$pkgver-$CARCH-linux"
+  install -Dm755 bin/ferge "$pkgdir/usr/bin/ferge"
+  install -Dm644 share/applications/com.wirecurl.ferge.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 share/metainfo/com.wirecurl.ferge.metainfo.xml -t "$pkgdir/usr/share/metainfo"
+  install -Dm644 share/doc/ferge/README.md share/doc/ferge/CHANGELOG.md -t "$pkgdir/usr/share/doc/ferge"
+  find share/icons -type f -exec install -Dm644 {} "$pkgdir/usr/{}" \;
+}

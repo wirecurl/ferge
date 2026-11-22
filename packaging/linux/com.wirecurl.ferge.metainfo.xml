@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.wirecurl.ferge</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>ferge</name>
+  <summary>Move files between your computer and servers</summary>
+  <developer id="com.wirecurl">
+    <name>wirecurl</name>
+  </developer>
+
+  <description>
+    <p>
+      ferge is a fast, keyboard-first file transfer client. This computer is on the left, a
+      server on the right, and files go between them, or between two servers, with copy and
+      paste, a key press or drag and drop.
+    </p>
+    <ul>
+      <li>SFTP with your SSH configuration, keys, agent and known hosts</li>
+      <li>Folders with 100,000 entries scroll, sort and filter without delay</li>
+      <li>A transfer queue that pauses, resumes within a file and survives a restart</li>
+      <li>Direct copies between two servers that never pass through this computer</li>
+      <li>Working as root through sudo, without a root login</li>
+      <li>Previews of text, pictures, spreadsheets, office documents and PDF pages</li>
+      <li>Saved passwords in the desktop's keyring</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">com.wirecurl.ferge.desktop</launchable>
+  <provides>
+    <binary>ferge</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/wirecurl/ferge</url>
+  <url type="bugtracker">https://github.com/wirecurl/ferge/issues</url>
+  <url type="vcs-browser">https://github.com/wirecurl/ferge</url>
+
+  <categories>
+    <category>Network</category>
+    <category>FileTransfer</category>
+  </categories>
+  <keywords>
+    <keyword>sftp</keyword>
+    <keyword>ssh</keyword>
+    <keyword>transfer</keyword>
+    <keyword>remote</keyword>
+  </keywords>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#f3f4f1</color>
+    <color type="primary" scheme_preference="dark">#0d1215</color>
+  </branding>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+  </releases>
+</component>

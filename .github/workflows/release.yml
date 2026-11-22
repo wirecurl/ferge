@@ -1,0 +1,164 @@
+name: Release
+
+# A tag vX.Y.Z builds the packages and creates a draft release with them,
+# which is published by hand after a look. Started by hand, the workflow only
+# builds and keeps the packages as workflow artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+# Actions are pinned to commit SHAs; the comment names the release.
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: version
+        name: Read and check the version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            ./packaging/release.sh check "$REF_NAME"
+          fi
+          echo "version=$(./packaging/release.sh version)" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            nfpm: nfpm_2.49.0_Linux_x86_64.tar.gz
+            nfpm-sha256: 2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            nfpm: nfpm_2.49.0_Linux_arm64.tar.gz
+            nfpm-sha256: d4eee71839e92c68cbd3b101640bad32d2856fc551acae0635be9118e48c9d9c
+    runs-on: ${{ matrix.runner }}
+    # Built against glibc 2.35, so the packages run on Ubuntu 22.04, Debian 12,
+    # Fedora 36 and everything newer.
+    container: ubuntu:22.04@sha256:f64b2ffc2f10ab8f8505aa56b2664bd846cbb9df87c7e2532e30f7667021c0e6
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Install build tools and libraries
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig-dev libfreetype-dev libx11-xcb-dev libxcb1-dev
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install rustup and the toolchain from rust-toolchain.toml
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --default-toolchain none --profile minimal
+          "$HOME/.cargo/bin/rustup" toolchain install
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install nfpm
+        env:
+          NFPM: ${{ matrix.nfpm }}
+          NFPM_SHA256: ${{ matrix.nfpm-sha256 }}
+        run: |
+          curl -sSfL -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v2.49.0/$NFPM"
+          echo "$NFPM_SHA256  /tmp/nfpm.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+      - name: Build
+        id: build
+        run: echo "binary=$(./packaging/build.sh)" >> "$GITHUB_OUTPUT"
+      - name: Package
+        env:
+          BINARY: ${{ steps.build.outputs.binary }}
+        run: ./packaging/linux/package.sh "$VERSION" "$ARCH" "$BINARY" dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS
+    needs: version
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build for Apple silicon and Intel
+        run: |
+          arm=$(./packaging/build.sh --target aarch64-apple-darwin)
+          intel=$(./packaging/build.sh --target x86_64-apple-darwin)
+          lipo -create -output ferge "$arm" "$intel"
+          lipo -info ferge
+      - name: Bundle
+        run: ./packaging/macos/bundle.sh "$VERSION" ferge dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: github.ref_type == 'tag'
+    needs: [version, linux, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./packaging/release.sh notes > notes.md
+          gh release create "v$VERSION" --draft --verify-tag \
+            --title "ferge $VERSION" --notes-file notes.md dist/*

@@ -1,4 +1,4 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-print-in-tests = true
-doc-valid-idents = ["known_hosts", "OpenSSH", "WebDAV", "SFTPv3", "GPUI", "KeePassXC", "KWallet", "XChaCha20", "SQLite", "OpenDocument", "PowerPoint", ".."]
+doc-valid-idents = ["known_hosts", "OpenSSH", "WebDAV", "SFTPv3", "GPUI", "KeePassXC", "KWallet", "XChaCha20", "SQLite", "OpenDocument", "PowerPoint", "ProFTPD", ".."]

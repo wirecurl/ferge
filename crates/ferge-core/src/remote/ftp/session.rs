@@ -1,6 +1,7 @@
 //! FTP control connections: opening and logging in, the pool they live in,
 //! and the commands ferge sends on them.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -19,7 +20,7 @@ use crate::destination::FtpTls;
 use crate::error::{Error, Result};
 use crate::interaction::Interaction;
 use crate::path::RemotePath;
-use crate::tls::{self, ServerId, TlsClient};
+use crate::tls::{self, ServerId, TlsClient, Versions};
 
 type Stream = AsyncRustlsFtpStream;
 
@@ -29,9 +30,19 @@ pub(super) type Transfer = suppaftp::tokio::TransferStream<AsyncRustlsStream>;
 /// How the connections to a server are secured, as the first one settled.
 #[derive(Clone, Debug)]
 enum Security {
-    Tls(TlsClient),
+    /// TLS with the versions the first connection settled on.
+    Tls(TlsClient, Versions),
     /// The user agreed to go without encryption.
     Plain,
+}
+
+impl Security {
+    fn versions(&self) -> Option<Versions> {
+        match self {
+            Self::Tls(_, versions) => Some(*versions),
+            Self::Plain => None,
+        }
+    }
 }
 
 /// An idle connection is checked with `NOOP` before it is used again
@@ -97,7 +108,7 @@ impl Pool {
             .await
             .map_err(|error| ftp_error(error, None, "PWD").0)?;
         let home = RemotePath::parse(&home).unwrap_or_else(|_| RemotePath::root());
-        tracing::debug!(?features, %home, plain = matches!(security, Security::Plain), "FTP server");
+        tracing::debug!(?features, %home, tls = ?security.versions(), "FTP server");
         session.used = Instant::now();
         let limit = options.max_connections.max(1);
         Ok(Self {
@@ -471,18 +482,28 @@ impl Lease {
 async fn secure(options: &FtpOptions, interaction: &dyn Interaction) -> Result<(Stream, Security)> {
     let server = ServerId::new(&options.host, options.port());
     if options.tls == FtpTls::Implicit {
-        let (ftp, client) = tls::establish(&server, &options.tls_options, interaction, |client| {
-            open_implicit(options, client)
-        })
+        let ((ftp, versions), client) = tls::establish(
+            &server,
+            &options.tls_options,
+            interaction,
+            |client| async move {
+                preferring_resumable(|versions| open_implicit(options, &client, versions)).await
+            },
+        )
         .await?;
-        return Ok((ftp, Security::Tls(client)));
+        return Ok((ftp, Security::Tls(client, versions)));
     }
-    let (outcome, client) = tls::establish(&server, &options.tls_options, interaction, |client| {
-        open_explicit(options, client)
-    })
+    let ((outcome, versions), client) = tls::establish(
+        &server,
+        &options.tls_options,
+        interaction,
+        |client| async move {
+            preferring_resumable(|versions| open_explicit(options, &client, versions)).await
+        },
+    )
     .await?;
     match outcome {
-        Ok(ftp) => Ok((ftp, Security::Tls(client))),
+        Ok(ftp) => Ok((ftp, Security::Tls(client, versions))),
         Err(reason) => {
             tls::allow_plaintext(&server, "FTP", &reason, &options.tls_options, interaction)
                 .await?;
@@ -577,10 +598,11 @@ async fn open_plain(options: &FtpOptions) -> Result<Stream> {
 /// server does not offer it.
 async fn open_explicit(
     options: &FtpOptions,
-    client: TlsClient,
+    client: &TlsClient,
+    versions: Versions,
 ) -> Result<std::result::Result<Stream, String>> {
     let ftp = open_plain(options).await?;
-    let connector = AsyncRustlsConnector::from(client.connector_of_its_own());
+    let connector = AsyncRustlsConnector::from(client.connector_of_its_own(versions));
     match bounded(
         options,
         "AUTH TLS",
@@ -598,8 +620,12 @@ async fn open_explicit(
 }
 
 /// Connects with TLS from the start.
-async fn open_implicit(options: &FtpOptions, client: TlsClient) -> Result<Stream> {
-    let connector = AsyncRustlsConnector::from(client.connector_of_its_own());
+async fn open_implicit(
+    options: &FtpOptions,
+    client: &TlsClient,
+    versions: Versions,
+) -> Result<Stream> {
+    let connector = AsyncRustlsConnector::from(client.connector_of_its_own(versions));
     let address = (options.host.as_str(), options.port());
     let connect = Stream::connect_secure_implicit(address, connector, &options.host);
     let target = ServerId::new(&options.host, options.port()).to_string();
@@ -628,13 +654,33 @@ async fn open_implicit(options: &FtpOptions, client: TlsClient) -> Result<Stream
     }
 }
 
+/// Opens the first connection with `open`, offering only TLS 1.2 so that
+/// every data connection can resume the session (see
+/// [`Versions::Resumable`]), and TLS 1.3 to a server that knows nothing
+/// older.
+async fn preferring_resumable<T, F, Fut>(mut open: F) -> Result<(T, Versions)>
+where
+    F: FnMut(Versions) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    match open(Versions::Resumable).await {
+        Err(error) if tls::is_version_refusal(&error) => {
+            tracing::debug!(%error, "the server knows no TLS 1.2, trying TLS 1.3");
+            Ok((open(Versions::Any).await?, Versions::Any))
+        }
+        opened => Ok((opened?, Versions::Resumable)),
+    }
+}
+
 /// Opens one more connection the way the first one was secured.
 async fn open_with(options: &FtpOptions, security: &Security) -> Result<Stream> {
     match (security, options.tls) {
         (Security::Plain, _) => open_plain(options).await,
-        (Security::Tls(client), FtpTls::Implicit) => open_implicit(options, client.clone()).await,
-        (Security::Tls(client), FtpTls::Explicit) => {
-            match open_explicit(options, client.clone()).await? {
+        (Security::Tls(client, versions), FtpTls::Implicit) => {
+            open_implicit(options, client, *versions).await
+        }
+        (Security::Tls(client, versions), FtpTls::Explicit) => {
+            match open_explicit(options, client, *versions).await? {
                 Ok(ftp) => Ok(ftp),
                 Err(reason) => Err(Error::protocol(
                     "AUTH TLS",

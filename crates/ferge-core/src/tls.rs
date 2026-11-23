@@ -208,8 +208,24 @@ impl KnownCertificates {
 /// connection's TLS session, as FTP servers often require.
 #[derive(Clone, Debug)]
 pub(crate) struct TlsClient {
+    /// TLS 1.3 and 1.2.
     config: Arc<ClientConfig>,
+    /// TLS 1.2 only, see [`Versions::Resumable`].
+    resumable: Arc<ClientConfig>,
     verifier: Arc<Verifier>,
+}
+
+/// The TLS versions a connection offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Versions {
+    /// TLS 1.3 and 1.2; the server picks, usually 1.3.
+    Any,
+    /// Only TLS 1.2, whose sessions can be resumed any number of times.
+    /// FTP servers want every data connection to resume the control
+    /// connection's session, but rustls resumes a TLS 1.3 session only
+    /// once per ticket: with a server that hands out no new tickets on data
+    /// connections (ProFTPD), the third data connection would be refused.
+    Resumable,
 }
 
 impl TlsClient {
@@ -219,14 +235,24 @@ impl TlsClient {
             accepted,
             rejected: Mutex::new(None),
         });
-        let config = ClientConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions()
-            .map_err(|error| Error::protocol("setting up TLS", error))?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::clone(&verifier) as Arc<dyn ServerCertVerifier>)
-            .with_no_client_auth();
+        let config = |versions: &[&'static rustls::SupportedProtocolVersion]| {
+            ClientConfig::builder_with_provider(provider())
+                .with_protocol_versions(versions)
+                .map_err(|error| Error::protocol("setting up TLS", error))
+                .map(|builder| {
+                    Arc::new(
+                        builder
+                            .dangerous()
+                            .with_custom_certificate_verifier(
+                                Arc::clone(&verifier) as Arc<dyn ServerCertVerifier>
+                            )
+                            .with_no_client_auth(),
+                    )
+                })
+        };
         Ok(Self {
-            config: Arc::new(config),
+            config: config(rustls::DEFAULT_VERSIONS)?,
+            resumable: config(&[&rustls::version::TLS12])?,
             verifier,
         })
     }
@@ -239,11 +265,34 @@ impl TlsClient {
     /// A connector with the same trust but its own TLS session cache, for
     /// a connection whose data connections must resume exactly its session
     /// (FTP servers check that), not one of a parallel connection.
-    pub(crate) fn connector_of_its_own(&self) -> tokio_rustls::TlsConnector {
-        let mut config = ClientConfig::clone(&self.config);
+    pub(crate) fn connector_of_its_own(&self, versions: Versions) -> tokio_rustls::TlsConnector {
+        let mut config = ClientConfig::clone(match versions {
+            Versions::Any => &self.config,
+            Versions::Resumable => &self.resumable,
+        });
         config.resumption = rustls::client::Resumption::in_memory_sessions(16);
         tokio_rustls::TlsConnector::from(Arc::new(config))
     }
+}
+
+/// Whether a handshake failed because the server does not speak the
+/// versions offered, as a server that knows only TLS 1.3 answers an offer of
+/// [`Versions::Resumable`]. Goes by the text of `error` and its sources,
+/// since some libraries pass on no more than that.
+pub(crate) fn is_version_refusal(error: &(dyn std::error::Error + 'static)) -> bool {
+    let refusals = [
+        rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion),
+        rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig,
+        ),
+    ]
+    .map(|refusal| refusal.to_string());
+    std::iter::successors(Some(error), |error| error.source()).any(|error| {
+        let text = error.to_string();
+        refusals
+            .iter()
+            .any(|refusal| text.contains(refusal.as_str()))
+    })
 }
 
 fn provider() -> Arc<CryptoProvider> {

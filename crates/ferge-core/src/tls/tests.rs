@@ -49,8 +49,16 @@ fn signed() -> (Vec<u8>, Identity) {
 
 /// Serves `identity` on a local port: every connection gets "hello".
 async fn serve(identity: &Identity) -> u16 {
+    serve_versions(identity, rustls::DEFAULT_VERSIONS).await
+}
+
+/// Like [`serve`], with only `versions` of TLS.
+async fn serve_versions(
+    identity: &Identity,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> u16 {
     let config = rustls::ServerConfig::builder_with_provider(provider())
-        .with_safe_default_protocol_versions()
+        .with_protocol_versions(versions)
         .unwrap()
         .with_no_client_auth()
         .with_single_cert(
@@ -92,6 +100,24 @@ async fn hello(client: TlsClient, port: u16) -> Result<String> {
         .await
         .map_err(|error| Error::protocol("reading", error))?;
     Ok(text)
+}
+
+/// Connects offering `versions` and tells which one the server chose.
+async fn negotiated(
+    client: &TlsClient,
+    port: u16,
+    versions: Versions,
+) -> Result<rustls::ProtocolVersion> {
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .map_err(|error| Error::protocol("connecting", error))?;
+    let name = ServerId::new("127.0.0.1", port).server_name()?;
+    let stream = client
+        .connector_of_its_own(versions)
+        .connect(name, stream)
+        .await
+        .map_err(|error| Error::protocol("TLS handshake", error))?;
+    Ok(stream.get_ref().1.protocol_version().unwrap())
 }
 
 /// Gives one answer to every question and keeps the questions.
@@ -383,4 +409,62 @@ async fn calls_a_self_signed_authority_what_it_is() {
     .unwrap();
     let prompt = answer.prompts.lock().unwrap().pop().unwrap();
     assert_eq!(prompt.problem, "is self-signed");
+}
+
+#[test]
+fn tells_a_refused_version_from_other_failures() {
+    // As FTP passes it on: the I/O error as text, below what was tried.
+    let as_ftp_says = |error: rustls::Error| {
+        Error::protocol(
+            "the TLS handshake",
+            std::io::Error::other(error).to_string(),
+        )
+    };
+    for refusal in [
+        rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion),
+        rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig,
+        ),
+    ] {
+        assert!(is_version_refusal(&as_ftp_says(refusal)));
+    }
+    for other in [
+        rustls::Error::AlertReceived(rustls::AlertDescription::HandshakeFailure),
+        rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+    ] {
+        assert!(!is_version_refusal(&as_ftp_says(other)));
+    }
+}
+
+#[tokio::test]
+async fn offers_resumable_sessions_and_tells_when_the_server_wants_newer() {
+    let identity = self_signed();
+    let answer = Answer::new(HostKeyDecision::AcceptOnce);
+    let any = serve(&identity).await;
+    let (_, client) = establish(
+        &ServerId::new("127.0.0.1", any),
+        &options(KnownCertificates::none()),
+        &answer,
+        |client| hello(client, any),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        negotiated(&client, any, Versions::Resumable).await.unwrap(),
+        rustls::ProtocolVersion::TLSv1_2
+    );
+    assert_eq!(
+        negotiated(&client, any, Versions::Any).await.unwrap(),
+        rustls::ProtocolVersion::TLSv1_3
+    );
+    // The same certificate on a server that knows only TLS 1.3.
+    let newer = serve_versions(&identity, &[&rustls::version::TLS13]).await;
+    let refused = negotiated(&client, newer, Versions::Resumable)
+        .await
+        .unwrap_err();
+    assert!(is_version_refusal(&refused), "{refused:?}");
+    assert_eq!(
+        negotiated(&client, newer, Versions::Any).await.unwrap(),
+        rustls::ProtocolVersion::TLSv1_3
+    );
 }

@@ -12,7 +12,7 @@ use futures::StreamExt as _;
 use super::*;
 use crate::entry::Metadata;
 use crate::remote::local::LocalRemote;
-use crate::remote::{ByteStream, FileWriter, ListStream};
+use crate::remote::{ByteStream, Capabilities, FileWriter, ListStream};
 
 fn path(path: &Path) -> RemotePath {
     RemotePath::parse(path.to_str().unwrap()).unwrap()
@@ -764,4 +764,292 @@ async fn unreadable_items_do_not_stop_the_others() {
     assert_eq!(done.state, TransferState::Failed);
     assert_eq!(done.errors.len(), 1, "{:?}", done.errors);
     assert!(done.errors[0].contains("dangling"));
+}
+
+/// Local files behind the rules of an object store: a file appears only
+/// once it is complete, nothing can be resumed, times cannot be set.
+#[derive(Debug)]
+struct ObjectStore {
+    inner: LocalRemote,
+    /// Where files are written until they are complete.
+    staging: tempfile::TempDir,
+    times_set: AtomicUsize,
+    /// Like WebDAV instead: files appear while they are written, but
+    /// cannot be resumed either.
+    visible_while_written: bool,
+}
+
+impl ObjectStore {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: LocalRemote::new(),
+            staging: tempfile::tempdir().unwrap(),
+            times_set: AtomicUsize::new(0),
+            visible_while_written: false,
+        })
+    }
+
+    async fn staged_writer(
+        &self,
+        target: &RemotePath,
+        replace: bool,
+    ) -> crate::Result<Box<dyn FileWriter>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let staged = self
+            .staging
+            .path()
+            .join(NEXT.fetch_add(1, Ordering::Relaxed).to_string());
+        let writer = self.inner.open_writer(&path(&staged), 0).await?;
+        Ok(Box::new(StagedWriter {
+            writer: Some(writer),
+            staged,
+            target: target.clone(),
+            replace,
+        }))
+    }
+}
+
+/// Writes to a staging file and moves it into place when finished; a
+/// writer dropped before that leaves nothing behind.
+struct StagedWriter {
+    writer: Option<Box<dyn FileWriter>>,
+    staged: std::path::PathBuf,
+    target: RemotePath,
+    replace: bool,
+}
+
+impl Drop for StagedWriter {
+    fn drop(&mut self) {
+        if self.writer.is_some() {
+            let _ = std::fs::remove_file(&self.staged);
+        }
+    }
+}
+
+#[async_trait]
+impl FileWriter for StagedWriter {
+    async fn write(&mut self, data: Bytes) -> crate::Result<()> {
+        self.writer.as_mut().unwrap().write(data).await
+    }
+    fn confirmed(&self) -> u64 {
+        0
+    }
+    async fn finish(mut self: Box<Self>) -> crate::Result<u64> {
+        let length = self.writer.take().unwrap().finish().await?;
+        let local = LocalRemote::new();
+        let staged = path(&self.staged);
+        if self.replace {
+            local.rename_replace(&staged, &self.target).await?;
+        } else {
+            local.rename(&staged, &self.target).await?;
+        }
+        Ok(length)
+    }
+}
+
+#[async_trait]
+impl Remote for ObjectStore {
+    fn label(&self) -> &'static str {
+        "objects"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            resume_writes: false,
+            atomic_writes: !self.visible_while_written,
+            set_modified: false,
+            permissions: false,
+        }
+    }
+    async fn home_dir(&self) -> crate::Result<RemotePath> {
+        self.inner.home_dir().await
+    }
+    async fn canonicalize(&self, path: &RemotePath) -> crate::Result<RemotePath> {
+        self.inner.canonicalize(path).await
+    }
+    fn list(&self, path: &RemotePath) -> ListStream {
+        self.inner.list(path)
+    }
+    async fn stat(&self, path: &RemotePath) -> crate::Result<Metadata> {
+        self.inner.stat(path).await
+    }
+    async fn lstat(&self, path: &RemotePath) -> crate::Result<Metadata> {
+        self.inner.lstat(path).await
+    }
+    async fn read_from(&self, path: &RemotePath, offset: u64) -> crate::Result<ByteStream> {
+        self.inner.read_from(path, offset).await
+    }
+    async fn open_writer(
+        &self,
+        path: &RemotePath,
+        offset: u64,
+    ) -> crate::Result<Box<dyn FileWriter>> {
+        assert_eq!(offset, 0, "an object store cannot resume");
+        if self.visible_while_written {
+            return self.inner.open_writer(path, 0).await;
+        }
+        if self.inner.lstat(path).await.is_ok() {
+            return Err(crate::Error::AlreadyExists { path: path.clone() });
+        }
+        self.staged_writer(path, false).await
+    }
+    async fn open_replacing_writer(&self, path: &RemotePath) -> crate::Result<Box<dyn FileWriter>> {
+        self.staged_writer(path, true).await
+    }
+    async fn rename(&self, from: &RemotePath, to: &RemotePath) -> crate::Result<()> {
+        self.inner.rename(from, to).await
+    }
+    async fn rename_replace(&self, from: &RemotePath, to: &RemotePath) -> crate::Result<()> {
+        self.inner.rename_replace(from, to).await
+    }
+    async fn set_modified(&self, _path: &RemotePath, _time: SystemTime) -> crate::Result<()> {
+        self.times_set.fetch_add(1, Ordering::SeqCst);
+        Err(crate::Error::Unsupported("setting times"))
+    }
+    async fn delete_file(&self, path: &RemotePath) -> crate::Result<()> {
+        self.inner.delete_file(path).await
+    }
+    async fn delete_dir(&self, path: &RemotePath) -> crate::Result<()> {
+        self.inner.delete_dir(path).await
+    }
+    async fn mkdir(&self, path: &RemotePath) -> crate::Result<()> {
+        self.inner.mkdir(path).await
+    }
+    async fn chmod(&self, _path: &RemotePath, _mode: u32) -> crate::Result<()> {
+        Err(crate::Error::Unsupported("permissions"))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_straight_to_a_target_that_writes_atomically() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    write(&from.path().join("project/a.txt"), b"alpha");
+    write(
+        &from.path().join("project/sub/b.bin"),
+        &vec![3_u8; 2_000_000],
+    );
+    write(&to.path().join("project/a.txt"), b"old");
+    let store = ObjectStore::new();
+    let (queue, _events) = TransferQueue::new(DEFAULT_PARALLEL_FILES);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: Arc::new(Slow::default()),
+            items: vec![path(&from.path().join("project"))],
+            target: Arc::clone(&store) as Arc<dyn Remote>,
+            target_dir: path(to.path()),
+        },
+        Answer::new(ConflictAction::Overwrite, true),
+    );
+    // Nothing shows up half-written, and no partial file appears.
+    while !queue
+        .snapshot()
+        .iter()
+        .find(|snapshot| snapshot.id == id)
+        .unwrap()
+        .state
+        .is_settled()
+    {
+        let files = files_below(to.path());
+        assert!(
+            !files.iter().any(|name| name.ends_with(PART_SUFFIX)),
+            "{files:?}"
+        );
+        if let Ok(written) = std::fs::read(to.path().join("project/sub/b.bin")) {
+            assert_eq!(written.len(), 2_000_000);
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let done = settled(&queue, id).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    assert_eq!(
+        std::fs::read(to.path().join("project/a.txt")).unwrap(),
+        b"alpha",
+        "replaced"
+    );
+    assert_eq!(
+        std::fs::read(to.path().join("project/sub/b.bin")).unwrap(),
+        vec![3_u8; 2_000_000]
+    );
+    assert_eq!(
+        store.times_set.load(Ordering::SeqCst),
+        0,
+        "times are not set where they cannot be"
+    );
+    assert_eq!(std::fs::read_dir(store.staging.path()).unwrap().count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starts_a_file_again_where_the_target_cannot_resume() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..8 * 1024 * 1024_u32)
+        .map(|i| (i.wrapping_mul(13) % 251) as u8)
+        .collect();
+    write(&from.path().join("big.bin"), &data);
+    let slow = Arc::new(Slow::default());
+    let store = ObjectStore::new();
+    let (queue, _events) = TransferQueue::new(2);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: Arc::clone(&slow) as Arc<dyn Remote>,
+            items: vec![path(&from.path().join("big.bin"))],
+            target: Arc::clone(&store) as Arc<dyn Remote>,
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    wait_for(&queue, id, |s| s.bytes_done > 2 * 1024 * 1024).await;
+    queue.pause(id);
+    let paused = settled(&queue, id).await;
+    assert_eq!(paused.state, TransferState::Paused);
+    assert_eq!(files_below(to.path()), Vec::<String>::new());
+    assert_eq!(
+        std::fs::read_dir(store.staging.path()).unwrap().count(),
+        0,
+        "an abandoned write leaves nothing"
+    );
+
+    queue.resume(id);
+    let done = settled(&queue, id).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    assert_eq!(done.bytes_done, data.len() as u64);
+    assert_eq!(std::fs::read(to.path().join("big.bin")).unwrap(), data);
+    assert_eq!(*slow.reads_from.lock().unwrap(), [0, 0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrites_a_partial_file_from_the_start_where_the_target_cannot_resume() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..8 * 1024 * 1024_u32)
+        .map(|i| (i.wrapping_mul(17) % 251) as u8)
+        .collect();
+    write(&from.path().join("big.bin"), &data);
+    let slow = Arc::new(Slow::default());
+    let store = Arc::new(ObjectStore {
+        visible_while_written: true,
+        ..Arc::into_inner(ObjectStore::new()).unwrap()
+    });
+    let (queue, _events) = TransferQueue::new(2);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: Arc::clone(&slow) as Arc<dyn Remote>,
+            items: vec![path(&from.path().join("big.bin"))],
+            target: Arc::clone(&store) as Arc<dyn Remote>,
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    wait_for(&queue, id, |s| s.bytes_done > 2 * 1024 * 1024).await;
+    queue.pause(id);
+    assert_eq!(settled(&queue, id).await.state, TransferState::Paused);
+    assert_eq!(files_below(to.path()), [format!("big.bin{PART_SUFFIX}")]);
+
+    queue.resume(id);
+    let done = settled(&queue, id).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    assert_eq!(done.bytes_done, data.len() as u64);
+    assert_eq!(files_below(to.path()), ["big.bin"]);
+    assert_eq!(std::fs::read(to.path().join("big.bin")).unwrap(), data);
+    assert_eq!(*slow.reads_from.lock().unwrap(), [0, 0]);
 }

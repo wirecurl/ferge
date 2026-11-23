@@ -25,6 +25,16 @@ pub struct RecordedServer {
     pub label: String,
 }
 
+impl RecordedServer {
+    /// Where to connect to reach this server again.
+    pub fn destination(&self) -> Option<crate::Destination> {
+        let mut target = crate::SftpTarget::new(&self.alias).ok()?;
+        target.user = Some(self.user.clone());
+        target.port = Some(self.port);
+        Some(crate::Destination::Sftp(target))
+    }
+}
+
 /// A direct job ferge started and has not cleaned up after yet.
 #[derive(Clone, Debug)]
 pub struct JobRecord {

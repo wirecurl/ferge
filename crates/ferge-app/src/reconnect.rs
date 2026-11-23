@@ -5,9 +5,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ferge_core::connect::{self, ConnectOptions};
 use ferge_core::interaction::Interaction;
-use ferge_core::remote::local::LocalRemote;
-use ferge_core::remote::sftp::{SftpRemote, SshConfigSource};
 use ferge_core::{Destination, Remote};
 use futures::channel::mpsc;
 
@@ -47,24 +46,22 @@ impl Connector {
         &self,
         destination: &Destination,
     ) -> ferge_core::Result<Arc<dyn Remote>> {
-        match destination {
-            Destination::Local { .. } => Ok(Arc::new(LocalRemote::new())),
-            Destination::Sftp(target) => {
-                let mut options = target.options();
-                if let Some(file) = &self.ssh_config {
-                    options.ssh_config = SshConfigSource::File(file.clone());
-                }
-                let interaction = Arc::new(UiInteraction::new(
-                    Prompter::new(self.prompts.clone(), None),
-                    Arc::clone(&self.vault),
-                ));
-                let sftp =
-                    SftpRemote::connect(options, Arc::clone(&interaction) as Arc<dyn Interaction>)
-                        .await?;
-                interaction.commit().await;
-                Ok(Arc::new(sftp))
-            }
-        }
+        let interaction = Arc::new(UiInteraction::new(
+            Prompter::new(self.prompts.clone(), None),
+            Arc::clone(&self.vault),
+        ));
+        let options = ConnectOptions {
+            ssh_config: self.ssh_config.clone(),
+            ..ConnectOptions::default()
+        };
+        let connection = connect::connect(
+            destination,
+            &options,
+            Arc::clone(&interaction) as Arc<dyn Interaction>,
+        )
+        .await?;
+        interaction.commit().await;
+        Ok(connection.remote)
     }
 
     /// Connects to both sides of a transfer at once.

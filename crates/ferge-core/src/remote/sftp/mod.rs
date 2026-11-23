@@ -639,6 +639,14 @@ impl Remote for SftpRemote {
         Some(self)
     }
 
+    fn destination(&self) -> Option<crate::Destination> {
+        let endpoint = ServerSide::endpoint(self);
+        let mut target = crate::destination::SftpTarget::new(&endpoint.alias).ok()?;
+        target.user = Some(endpoint.user.clone());
+        target.port = Some(endpoint.port);
+        Some(crate::Destination::Sftp(target))
+    }
+
     async fn home_dir(&self) -> Result<RemotePath> {
         Ok(self.inner.home.clone())
     }

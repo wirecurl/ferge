@@ -7,6 +7,7 @@
 //!
 //! [`Interaction`]: interaction::Interaction
 
+pub mod connect;
 pub mod desktop;
 pub mod destination;
 pub mod document;

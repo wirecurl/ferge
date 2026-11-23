@@ -248,9 +248,7 @@ impl Transfers {
         runtime::spawn(cx, async move {
             for record in direct::recorded_jobs(&dir).await {
                 tracing::info!(job = %record.job, title = %record.title, "following a direct transfer again");
-                let side = |server: &direct::RecordedServer| {
-                    ferge_core::transfer::SavedSide::Server(server.clone()).destination()
-                };
+                let side = direct::RecordedServer::destination;
                 let (source, target) = (side(&record.source), side(&record.target));
                 match connector
                     .connect_both(source.as_ref(), target.as_ref())

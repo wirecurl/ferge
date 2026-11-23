@@ -22,7 +22,7 @@ use super::direct::RecordedServer;
 use super::lock;
 use super::plan::{FileStatus, Plan, SavedFile};
 use super::route::Route;
-use crate::destination::{Destination, SftpTarget};
+use crate::destination::Destination;
 use crate::path::RemotePath;
 use crate::remote::Remote;
 
@@ -38,30 +38,28 @@ pub enum SavedSide {
     /// This computer.
     Local { label: String },
     /// A server, the way it was connected.
-    Server(RecordedServer),
+    Server {
+        destination: Destination,
+        label: String,
+    },
 }
 
 impl SavedSide {
     /// The side of `remote`, if it can be connected to again.
     pub(super) fn of(remote: &dyn Remote) -> Option<Self> {
+        let label = remote.label().to_owned();
         if remote.is_local() {
-            return Some(Self::Local {
-                label: remote.label().to_owned(),
-            });
+            return Some(Self::Local { label });
         }
-        let endpoint = remote.server_side()?.endpoint();
-        Some(Self::Server(RecordedServer {
-            alias: endpoint.alias.clone(),
-            user: endpoint.user.clone(),
-            port: endpoint.port,
-            label: remote.label().to_owned(),
-        }))
+        Some(Self::Server {
+            destination: remote.destination()?.with_path(None),
+            label,
+        })
     }
 
     pub fn label(&self) -> &str {
         match self {
-            Self::Local { label } => label,
-            Self::Server(server) => &server.label,
+            Self::Local { label } | Self::Server { label, .. } => label,
         }
     }
 
@@ -69,23 +67,16 @@ impl SavedSide {
     pub fn destination(&self) -> Option<Destination> {
         match self {
             Self::Local { .. } => Some(Destination::Local { path: None }),
-            Self::Server(server) => {
-                let mut target = SftpTarget::new(&server.alias).ok()?;
-                target.user = Some(server.user.clone());
-                target.port = Some(server.port);
-                Some(Destination::Sftp(target))
-            }
+            Self::Server { destination, .. } => Some(destination.clone()),
         }
     }
 
     fn to_json(&self) -> Value {
         match self {
             Self::Local { label } => json!({ "local": true, "label": label }),
-            Self::Server(server) => json!({
-                "alias": server.alias,
-                "user": server.user,
-                "port": server.port,
-                "label": server.label,
+            Self::Server { destination, label } => json!({
+                "address": destination.address(),
+                "label": label,
             }),
         }
     }
@@ -95,12 +86,21 @@ impl SavedSide {
         if value["local"].as_bool() == Some(true) {
             return Some(Self::Local { label });
         }
-        Some(Self::Server(RecordedServer {
-            alias: value["alias"].as_str()?.to_owned(),
-            user: value["user"].as_str()?.to_owned(),
-            port: u16::try_from(value["port"].as_u64()?).ok()?,
-            label,
-        }))
+        let destination = match value["address"].as_str() {
+            Some(address) => Destination::parse(address).ok()?,
+            // Saved by ferge 0.1, which knew only SFTP.
+            None => RecordedServer {
+                alias: value["alias"].as_str()?.to_owned(),
+                user: value["user"].as_str()?.to_owned(),
+                port: u16::try_from(value["port"].as_u64()?).ok()?,
+                label: label.clone(),
+            }
+            .destination()?,
+        };
+        if matches!(destination, Destination::Local { .. }) {
+            return None;
+        }
+        Some(Self::Server { destination, label })
     }
 }
 
@@ -506,12 +506,10 @@ mod tests {
             SavedSide::Local {
                 label: "This computer".into(),
             },
-            SavedSide::Server(RecordedServer {
-                alias: "vm".into(),
-                user: "root".into(),
-                port: 22,
+            SavedSide::Server {
+                destination: Destination::parse("sftp://root@vm:22").unwrap(),
                 label: "root@vm".into(),
-            }),
+            },
         );
         let record = record(
             "t01",
@@ -551,5 +549,26 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(saved_transfers(dir.path()).await.is_empty());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn reads_sides_saved_by_ferge_0_1() {
+        let side = SavedSide::from_json(&json!({
+            "alias": "vm", "user": "root", "port": 2222, "label": "root@vm",
+        }))
+        .unwrap();
+        assert_eq!(
+            side,
+            SavedSide::Server {
+                destination: Destination::parse("sftp://root@vm:2222").unwrap(),
+                label: "root@vm".into(),
+            }
+        );
+        assert_eq!(SavedSide::from_json(&side.to_json()), Some(side));
+        assert_eq!(
+            SavedSide::from_json(&json!({ "address": "/tmp", "label": "x" })),
+            None,
+            "a server side is never this computer"
+        );
     }
 }

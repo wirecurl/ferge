@@ -19,6 +19,7 @@ use futures::StreamExt as _;
 use futures::stream::BoxStream;
 use tokio::io::AsyncRead;
 
+use crate::destination::Destination;
 use crate::entry::{Entry, Metadata};
 use crate::error::{Error, Result};
 use crate::path::RemotePath;
@@ -52,6 +53,39 @@ pub trait FileWriter: Send {
     async fn finish(self: Box<Self>) -> Result<u64>;
 }
 
+/// What a backend can do beyond what every one can (list, read, write
+/// a new file, rename, delete). The transfer engine and the UI follow it
+/// instead of assuming a POSIX file system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent yes/no answers, read one at a time"
+)]
+pub struct Capabilities {
+    /// [`Remote::open_writer`] takes an offset beyond 0, so an interrupted
+    /// upload goes on where it stopped. Without it, it starts again.
+    pub resume_writes: bool,
+    /// A file being written appears under its name only once it is
+    /// complete (object stores), so a transfer writes straight to the
+    /// destination instead of a `.ferge-part` file, and replaces one
+    /// through [`Remote::open_replacing_writer`].
+    pub atomic_writes: bool,
+    /// [`Remote::set_modified`] works.
+    pub set_modified: bool,
+    /// [`Remote::chmod`] works and listings report permission bits.
+    pub permissions: bool,
+}
+
+impl Capabilities {
+    /// A POSIX file system: the local disk, SFTP.
+    pub const POSIX: Self = Self {
+        resume_writes: true,
+        atomic_writes: false,
+        set_modified: true,
+        permissions: true,
+    };
+}
+
 /// A file system reachable through some protocol.
 ///
 /// Paths are always absolute; use [`Remote::home_dir`] to find a sensible start.
@@ -71,6 +105,18 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
     /// The server behind this remote, if it can copy and run commands on its
     /// own (see [`server`]).
     fn server_side(&self) -> Option<&dyn server::ServerSide> {
+        None
+    }
+
+    /// What this backend can do.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::POSIX
+    }
+
+    /// Where to connect to get this file system again (without a start
+    /// folder, and as the login user even while working as root). `None`
+    /// if it cannot be connected to again.
+    fn destination(&self) -> Option<Destination> {
         None
     }
 
@@ -107,6 +153,15 @@ pub trait Remote: Send + Sync + fmt::Debug + 'static {
     /// not a symlink; its first `offset` bytes are kept and the rest is
     /// cut off.
     async fn open_writer(&self, path: &RemotePath, offset: u64) -> Result<Box<dyn FileWriter>>;
+
+    /// Opens `path` for writing from the start, replacing whatever file is
+    /// there once the writer finishes. Only backends with
+    /// [`Capabilities::atomic_writes`] offer it; until then, the old file
+    /// stays as it was.
+    async fn open_replacing_writer(&self, path: &RemotePath) -> Result<Box<dyn FileWriter>> {
+        let _ = path;
+        Err(Error::Unsupported("replacing a file as it is written"))
+    }
 
     /// Creates `path`, which must not exist yet, and writes `data` to it.
     /// Returns the number of bytes written.

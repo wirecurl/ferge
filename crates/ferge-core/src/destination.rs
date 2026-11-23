@@ -97,17 +97,17 @@ impl Destination {
     /// here (host as asked for, and user and port where set); the start
     /// directory is not compared.
     pub fn is_served_by(&self, remote: &dyn Remote) -> bool {
-        match self {
-            Self::Local { .. } => remote.is_local(),
-            Self::Sftp(target) => remote.server_side().is_some_and(|server| {
-                let endpoint = server.endpoint();
-                endpoint.alias.eq_ignore_ascii_case(&target.host)
+        match (self, remote.destination()) {
+            (Self::Local { .. }, _) => remote.is_local(),
+            (Self::Sftp(target), Some(Self::Sftp(served))) => {
+                target.host.eq_ignore_ascii_case(&served.host)
                     && target
                         .user
                         .as_ref()
-                        .is_none_or(|user| *user == endpoint.user)
-                    && target.port.is_none_or(|port| port == endpoint.port)
-            }),
+                        .is_none_or(|user| served.user.as_ref() == Some(user))
+                    && target.port.is_none_or(|port| served.port == Some(port))
+            }
+            _ => false,
         }
     }
 

@@ -8,9 +8,9 @@ mod servers;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ferge_core::connect::{self, ConnectOptions};
 use ferge_core::library::{BookmarkId, LibrarySnapshot};
-use ferge_core::remote::local::LocalRemote;
-use ferge_core::remote::sftp::{SftpRemote, SshConfigSource};
+use ferge_core::remote::sftp::SftpRemote;
 use ferge_core::transfer::TransferQueue;
 use ferge_core::{Destination, EntryKind, Remote, RemotePath};
 use futures::channel::mpsc;
@@ -439,34 +439,21 @@ impl Session {
         cx: &mut Context<Self>,
     ) -> PendingConnection {
         let start = request.destination.path().cloned();
-        match &request.destination {
-            Destination::Local { .. } => runtime::spawn(cx, async move {
-                let remote: Arc<dyn Remote> = Arc::new(LocalRemote::new());
-                let start = match start {
-                    Some(path) => path,
-                    None => remote.home_dir().await?,
-                };
-                Ok((remote, start, None))
-            }),
-            Destination::Sftp(target) => {
-                let mut options = target.options();
-                if let Some(file) = &self.context.ssh_config {
-                    options.ssh_config = SshConfigSource::File(file.clone());
-                }
-                options.identity_files.extend(request.identity_file.clone());
-                options.password.clone_from(&request.password);
-                let interaction = Arc::clone(interaction);
-                runtime::spawn(cx, async move {
-                    let sftp = SftpRemote::connect(options, interaction).await?;
-                    let remote: Arc<dyn Remote> = Arc::new(sftp.clone());
-                    let start = match start {
-                        Some(path) => path,
-                        None => remote.home_dir().await?,
-                    };
-                    Ok((remote, start, Some(sftp)))
-                })
-            }
-        }
+        let destination = request.destination.clone();
+        let options = ConnectOptions {
+            ssh_config: self.context.ssh_config.clone(),
+            identity_file: request.identity_file.clone(),
+            password: request.password.clone(),
+        };
+        let interaction = Arc::clone(interaction);
+        runtime::spawn(cx, async move {
+            let connection = connect::connect(&destination, &options, interaction).await?;
+            let start = match start {
+                Some(path) => path,
+                None => connection.remote.home_dir().await?,
+            };
+            Ok((connection.remote, start, connection.sftp))
+        })
     }
 
     fn show_browser(

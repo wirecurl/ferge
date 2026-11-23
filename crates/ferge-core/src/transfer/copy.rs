@@ -187,34 +187,35 @@ async fn copy_file(transfer: &Transfer, index: usize, file: &PlannedFile) -> Res
             None => return Ok(Outcome::Skipped),
         },
     };
-    let part =
-        part_path(&destination).ok_or_else(|| Error::InvalidPath(destination.as_str().into()))?;
-
-    let offset = resume_offset(
-        transfer,
-        index,
-        file,
-        &part,
-        unchanged.then_some(current.size),
-    )
-    .await;
-    let (length, method) = write_part(transfer, index, file, &part, offset, current.size).await?;
-    {
-        let mut state = lock(&file.state);
-        // The file may have grown or shrunk while it was read.
-        transfer
-            .progress
-            .adjust_total(i128::from(length) - i128::from(state.size));
-        state.size = length;
-        state.resume_at = Some(length);
-    }
-
-    if replace {
-        target.rename_replace(&part, &destination).await?;
+    let capabilities = target.capabilities();
+    let method = if capabilities.atomic_writes {
+        // The file appears only once it is complete: no partial file, and
+        // nothing to resume, so the copy starts at the beginning.
+        resume_offset(transfer, index, file, None).await;
+        let sink = Sink::Destination {
+            path: &destination,
+            replace,
+        };
+        let length = relay(transfer, index, file, sink, current.size).await?;
+        settle_length(transfer, file, length);
+        "relay"
     } else {
-        target.rename(&part, &destination).await?;
-    }
-    if let Some(modified) = current.modified
+        let part = part_path(&destination)
+            .ok_or_else(|| Error::InvalidPath(destination.as_str().into()))?;
+        let resumable = (unchanged && capabilities.resume_writes).then_some((&part, current.size));
+        let offset = resume_offset(transfer, index, file, resumable).await;
+        let (length, method) =
+            write_part(transfer, index, file, &part, offset, current.size).await?;
+        settle_length(transfer, file, length);
+        if replace {
+            target.rename_replace(&part, &destination).await?;
+        } else {
+            target.rename(&part, &destination).await?;
+        }
+        method
+    };
+    if capabilities.set_modified
+        && let Some(modified) = current.modified
         && let Err(error) = target.set_modified(&destination, modified).await
     {
         tracing::debug!(path = %destination, %error, "could not keep the modification time");
@@ -222,21 +223,32 @@ async fn copy_file(transfer: &Transfer, index: usize, file: &PlannedFile) -> Res
     Ok(Outcome::Copied(method))
 }
 
-/// Where the copy of `file` starts: where it stopped, if the source is
-/// unchanged (its `size` given) and the partial file still holds what was
+/// Records the length `file` ended up with: it may have grown or shrunk
+/// while it was read.
+fn settle_length(transfer: &Transfer, file: &PlannedFile, length: u64) {
+    let mut state = lock(&file.state);
+    transfer
+        .progress
+        .adjust_total(i128::from(length) - i128::from(state.size));
+    state.size = length;
+    state.resume_at = Some(length);
+}
+
+/// Where the copy of `file` starts: where it stopped, if `resumable` gives
+/// the partial file and the source's size (the source is unchanged and the
+/// target can go on writing) and the partial file still holds what was
 /// confirmed; else at the start.
 async fn resume_offset(
     transfer: &Transfer,
     index: usize,
     file: &PlannedFile,
-    part: &RemotePath,
-    size: Option<u64>,
+    resumable: Option<(&RemotePath, u64)>,
 ) -> u64 {
     // Continue only a regular file: never write through a symlink planted
     // there.
     let resume_at = lock(&file.state).resume_at;
-    let offset = match (resume_at, size) {
-        (Some(at), Some(size)) if at > 0 => match transfer.target().lstat(part).await {
+    let offset = match (resume_at, resumable) {
+        (Some(at), Some((part, size))) if at > 0 => match transfer.target().lstat(part).await {
             Ok(metadata)
                 if metadata.kind == EntryKind::File && metadata.size >= at && at <= size =>
             {
@@ -299,7 +311,14 @@ async fn write_part(
                 Err(Error::Unsupported(what)) => {
                     tracing::debug!(what, "copying on the server is not possible; relaying");
                     (
-                        relay(transfer, index, file, part, offset, size).await?,
+                        relay(
+                            transfer,
+                            index,
+                            file,
+                            Sink::Part { path: part, offset },
+                            size,
+                        )
+                        .await?,
                         "relay",
                     )
                 }
@@ -307,28 +326,57 @@ async fn write_part(
             }
         }
         None => (
-            relay(transfer, index, file, part, offset, size).await?,
+            relay(
+                transfer,
+                index,
+                file,
+                Sink::Part { path: part, offset },
+                size,
+            )
+            .await?,
             "relay",
         ),
     };
     Ok(written)
 }
 
-/// Reads the source from `offset` and writes it to `part` through this
-/// computer. Returns the length of `part`. `size` is the source's size as
-/// last seen: the file may grow while it is read (a log, say), but not
-/// without end.
+/// Where [`relay`] writes a file.
+#[derive(Clone, Copy)]
+enum Sink<'a> {
+    /// The partial file, from `offset`; it is renamed once complete.
+    Part { path: &'a RemotePath, offset: u64 },
+    /// The destination itself, on a target that writes atomically;
+    /// `replace` an existing file there.
+    Destination { path: &'a RemotePath, replace: bool },
+}
+
+/// Reads the source and writes it to `sink` through this computer.
+/// Returns the length written. `size` is the source's size as last seen:
+/// the file may grow while it is read (a log, say), but not without end.
 async fn relay(
     transfer: &Transfer,
     index: usize,
     file: &PlannedFile,
-    part: &RemotePath,
-    offset: u64,
+    sink: Sink<'_>,
     size: u64,
 ) -> Result<u64> {
     let target = transfer.target();
+    let offset = match sink {
+        Sink::Part { offset, .. } => offset,
+        Sink::Destination { .. } => 0,
+    };
     let mut reader = transfer.source().read_from(&file.source, offset).await?;
-    let mut writer = open_partial_file(target.as_ref(), part, offset).await?;
+    let mut writer = match sink {
+        Sink::Part { path, offset } => open_partial_file(target.as_ref(), path, offset).await?,
+        Sink::Destination {
+            path,
+            replace: true,
+        } => target.open_replacing_writer(path).await?,
+        Sink::Destination {
+            path,
+            replace: false,
+        } => target.open_writer(path, 0).await?,
+    };
     let most = size
         .saturating_add(size / 2)
         .saturating_add(GROWTH_ALLOWANCE);
@@ -338,10 +386,13 @@ async fn relay(
         let len = chunk.len() as u64;
         written = written.saturating_add(len);
         if written > most {
-            // Nothing of it is worth resuming.
+            // Nothing of it is worth resuming. A target that writes
+            // atomically keeps nothing of an abandoned writer.
             drop(writer);
-            if let Err(error) = target.delete_file(part).await {
-                tracing::debug!(path = %part, %error, "could not remove the partial file");
+            if let Sink::Part { path, .. } = sink
+                && let Err(error) = target.delete_file(path).await
+            {
+                tracing::debug!(%path, %error, "could not remove the partial file");
             }
             lock(&file.state).resume_at = None;
             return Err(Error::Remote {
@@ -350,14 +401,13 @@ async fn relay(
             });
         }
         writer.write(chunk).await?;
-        let confirmed = writer.confirmed();
-        {
-            let mut state = lock(&file.state);
-            state.counted += len;
-            state.resume_at = Some(confirmed);
-        }
+        lock(&file.state).counted += len;
         transfer.progress.add_bytes(i128::from(len));
-        transfer.journal.progressed(index, confirmed);
+        if let Sink::Part { .. } = sink {
+            let confirmed = writer.confirmed();
+            lock(&file.state).resume_at = Some(confirmed);
+            transfer.journal.progressed(index, confirmed);
+        }
     }
     writer.finish().await
 }

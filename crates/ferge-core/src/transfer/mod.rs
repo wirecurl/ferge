@@ -1331,7 +1331,9 @@ impl Transfer {
 /// `remote` as a place to connect to again: this computer, or the server
 /// the way it was connected (without working as root).
 fn server_of(remote: &dyn Remote) -> Option<Destination> {
-    SavedSide::of(remote).and_then(|side| side.destination())
+    remote
+        .destination()
+        .map(|destination| destination.with_path(None))
 }
 
 /// `error`, prefixed with `path` unless the message names it already.

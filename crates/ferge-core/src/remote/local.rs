@@ -202,6 +202,10 @@ impl Remote for LocalRemote {
         true
     }
 
+    fn destination(&self) -> Option<crate::Destination> {
+        Some(crate::Destination::Local { path: None })
+    }
+
     async fn home_dir(&self) -> Result<RemotePath> {
         let home = dirs::home_dir().ok_or_else(|| Error::Config("no home directory".into()))?;
         to_remote(&home)

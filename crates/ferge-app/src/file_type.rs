@@ -1,7 +1,7 @@
 //! What a file is, judged by its kind and name: for the Kind column, the
 //! icon in front of it and the color of that icon.
 
-use ferge_core::EntryKind;
+use ferge_core::{Entry, EntryKind};
 use gpui::Hsla;
 use gpui_component::Theme;
 use gpui_component_assets::IconName;
@@ -30,6 +30,10 @@ pub(crate) enum FileType {
     Lock,
     File,
 }
+
+/// The largest `.key` file taken for a key. Private keys are a few
+/// kilobytes; a Keynote file holds at least a preview picture.
+const KEY_SIZE_LIMIT: u64 = 64 * 1024;
 
 /// The palette color an icon is tinted with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,7 +73,11 @@ impl FileType {
         Self::File,
     ];
 
-    pub(crate) fn of(name: &str, kind: EntryKind) -> Self {
+    pub(crate) fn of(entry: &Entry) -> Self {
+        Self::judge(entry.name.as_str(), entry.kind(), entry.metadata.size)
+    }
+
+    fn judge(name: &str, kind: EntryKind, size: u64) -> Self {
         match kind {
             EntryKind::Directory => return Self::Folder,
             EntryKind::Symlink => return Self::Link,
@@ -106,6 +114,9 @@ impl FileType {
             "sh" | "bash" | "zsh" | "fish" | "ps1" => Self::Script,
             "doc" | "docx" | "odt" | "rtf" | "pages" => Self::Document,
             "xls" | "xlsx" | "ods" | "numbers" => Self::Spreadsheet,
+            // A private key on a server, or a Keynote presentation, which is
+            // far larger than any key.
+            "key" if size <= KEY_SIZE_LIMIT => Self::Key,
             "ppt" | "pptx" | "odp" | "key" => Self::Presentation,
             "iso" | "img" | "dmg" => Self::DiskImage,
             "deb" | "rpm" | "pkg" | "apk" | "appimage" => Self::Package,
@@ -217,7 +228,7 @@ mod tests {
     use super::*;
 
     fn file(name: &str) -> FileType {
-        FileType::of(name, EntryKind::File)
+        FileType::judge(name, EntryKind::File, 1000)
     }
 
     #[test]
@@ -232,14 +243,32 @@ mod tests {
         assert_eq!(file(".bashrc"), FileType::Configuration);
         assert_eq!(file("Makefile"), FileType::SourceCode);
         assert_eq!(file("notes"), FileType::File);
-        assert_eq!(FileType::of("x", EntryKind::Directory), FileType::Folder);
-        assert_eq!(FileType::of("x.png", EntryKind::Symlink), FileType::Link);
+        assert_eq!(
+            FileType::judge("x", EntryKind::Directory, 0),
+            FileType::Folder
+        );
+        assert_eq!(
+            FileType::judge("x.png", EntryKind::Symlink, 0),
+            FileType::Link
+        );
+    }
+
+    #[test]
+    fn a_small_key_file_is_a_key_and_a_large_one_a_presentation() {
+        assert_eq!(file("example.org.key"), FileType::Key);
+        assert_eq!(
+            FileType::judge("Launch.key", EntryKind::File, 2 * 1024 * 1024),
+            FileType::Presentation
+        );
     }
 
     #[test]
     fn labels() {
         assert_eq!(file("a.PDF").label(), "PDF document");
         assert_eq!(file("Makefile").label(), "Source code");
-        assert_eq!(FileType::of("x", EntryKind::Directory).label(), "Folder");
+        assert_eq!(
+            FileType::judge("x", EntryKind::Directory, 0).label(),
+            "Folder"
+        );
     }
 }

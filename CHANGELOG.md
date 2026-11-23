@@ -30,6 +30,8 @@ All notable changes to ferge are listed here. The format follows
   the button it highlights.
 - ferge asks whether two servers may copy directly before it makes any folder on the target;
   until now the folders of the transfer were there already while the question was open.
+- Small `.key` files, such as TLS keys on a server, are shown and previewed as keys instead of
+  Keynote presentations.
 
 ## [0.1.0] - 2026-11-22
 

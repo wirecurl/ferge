@@ -15,6 +15,8 @@ pub(super) const TABLE_TEXT_LIMIT: usize = 8 * 1024 * 1024;
 const IMAGE_LIMIT: u64 = 32 * 1024 * 1024;
 /// Documents are read whole, up to this size.
 pub(super) const DOCUMENT_LIMIT: usize = 64 * 1024 * 1024;
+/// Why Apple's office files are not previewed here.
+const KEYNOTE_ELSEWHERE: &str = "Pages, Numbers and Keynote files can be previewed on a Mac.";
 
 /// How a file is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +61,7 @@ impl Plan {
         if entry.kind() != EntryKind::File {
             return none(None);
         }
-        let file_type = FileType::of(entry.name.as_str(), entry.kind());
+        let file_type = FileType::of(entry);
         let lower = entry.name.as_str().to_ascii_lowercase();
         let extension = lower
             .rsplit_once('.')
@@ -84,9 +86,8 @@ impl Plan {
             "doc" | "xls" | "ppt" => Kind::None(Some(
                 "Older Office files (.doc, .xls, .ppt) cannot be previewed.",
             )),
-            "pages" | "numbers" | "key" => Kind::None(Some(
-                "Pages, Numbers and Keynote files can be previewed on a Mac.",
-            )),
+            "pages" | "numbers" => Kind::None(Some(KEYNOTE_ELSEWHERE)),
+            "key" if file_type == FileType::Presentation => Kind::None(Some(KEYNOTE_ELSEWHERE)),
             "rtf" => Kind::None(Some("Rich text files cannot be previewed yet.")),
             _ if file_type == FileType::Image => image_kind(extension, entry.metadata.size),
             _ => match file_type {
@@ -166,6 +167,15 @@ mod tests {
         assert_eq!(plan("photo.jpg", 10).kind, Kind::Image(ImageFormat::Jpeg));
         assert!(matches!(plan("old.doc", 10).kind, Kind::None(Some(_))));
         assert!(matches!(plan("movie.mkv", 10).kind, Kind::None(Some(_))));
+    }
+
+    #[test]
+    fn a_key_file_is_read_as_text_unless_it_is_a_presentation() {
+        assert_eq!(plan("example.org.key", 3_243).kind, Kind::Text);
+        assert!(!plan("example.org.key", 3_243).quick_look);
+        let talk = plan("Talk.key", 4 << 20);
+        assert_eq!(talk.kind, Kind::None(Some(KEYNOTE_ELSEWHERE)));
+        assert_eq!(talk.quick_look, cfg!(target_os = "macos"));
     }
 
     #[test]

@@ -228,7 +228,7 @@ impl FileBrowser {
                 let entry = self.view.get(index)?;
                 let cursor = self.selected == Some(index);
                 let marked = self.is_marked(&entry.name);
-                let file_type = FileType::of(entry.name.as_str(), entry.kind());
+                let file_type = FileType::of(entry);
                 let icon_color = file_type.color(cx.theme());
                 let size = if entry.kind() == EntryKind::File {
                     format::size(entry.metadata.size)
@@ -388,7 +388,7 @@ impl FileBrowser {
                     .text_small()
                     .truncate()
                     .text_color(muted)
-                    .child(FileType::of(entry.name.as_str(), entry.kind()).label()),
+                    .child(FileType::of(entry).label()),
             )
         })
         .when(self.options.show_permissions, |this| {

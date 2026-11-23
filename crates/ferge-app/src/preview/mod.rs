@@ -448,7 +448,7 @@ impl Render for Preview {
         let theme = cx.theme();
         let (muted, border, background) = (theme.muted_foreground, theme.border, theme.popover);
         let header = self.shown.as_ref().map(|(_, entry)| {
-            let file_type = FileType::of(entry.name.as_str(), entry.kind());
+            let file_type = FileType::of(entry);
             let mut details = vec![file_type.label().to_owned()];
             if entry.kind() == EntryKind::File {
                 details.push(format::size(entry.metadata.size));

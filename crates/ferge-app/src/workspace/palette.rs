@@ -314,7 +314,7 @@ impl Workspace {
                     if items.len() == ENTRY_LIMIT {
                         return items;
                     }
-                    let file_type = FileType::of(entry.name.as_str(), entry.kind());
+                    let file_type = FileType::of(entry);
                     items.push(Item {
                         group: Group::File,
                         icon: file_type.icon(),

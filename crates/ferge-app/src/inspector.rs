@@ -112,7 +112,7 @@ impl Inspector {
         let path = browser.read(cx).path().join(&entry.name);
         let address = browser.read(cx).address_of(&path);
         let can_chmod = browser.read(cx).remote().capabilities().permissions;
-        let file_type = FileType::of(entry.name.as_str(), entry.kind());
+        let file_type = FileType::of(entry);
         let (icon, color) = (file_type.icon(), file_type.color(cx.theme()));
         let fact = |index: usize, label: &'static str, value: SharedString| {
             let row = h_flex()

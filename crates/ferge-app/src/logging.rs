@@ -18,6 +18,11 @@ use tracing_subscriber::prelude::*;
 /// Lines waiting for the writer thread.
 const QUEUE: usize = 4096;
 
+/// Logged at error level by the certificate verifier whenever the system
+/// does not trust a certificate, which ferge then asks about: an expected
+/// case, not an error. ferge logs what matters about it itself.
+const QUIET: &str = "rustls_platform_verifier=off";
+
 /// Size at which the log is rotated at startup.
 const ROTATE_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -33,10 +38,12 @@ pub(crate) fn state_dir() -> Option<PathBuf> {
 pub(crate) fn init(to_file: bool) {
     let stderr = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
-        .with_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()));
+        .with_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| format!("info,{QUIET}").into()),
+        );
     let file = to_file.then(state_dir).flatten().map(|dir| {
         let filter = EnvFilter::try_from_env("FERGE_LOG")
-            .unwrap_or_else(|_| "info,ferge_core=debug,russh=warn".into());
+            .unwrap_or_else(|_| format!("info,ferge_core=debug,russh=warn,{QUIET}").into());
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_thread_names(true)

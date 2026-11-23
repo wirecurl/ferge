@@ -17,6 +17,11 @@ All notable changes to ferge are listed here. The format follows
 - Quick Connect and the favorite editor offer SFTP, FTP and FTPS; an address typed with a
   scheme picks the protocol itself.
 
+### Fixed
+
+- A certificate the system does not trust no longer shows up as an error in the log; ferge
+  notes it and asks.
+
 ## [0.1.0] - 2026-11-22
 
 The first release.

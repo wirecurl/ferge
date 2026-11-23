@@ -330,6 +330,13 @@ where
         return Err(error);
     };
     let fingerprint = Fingerprint::of(&rejected.certificate);
+    tracing::info!(
+        %server,
+        %fingerprint,
+        reason = %rejected.error,
+        remembered = remembered.is_some(),
+        "the system does not trust the certificate"
+    );
     if let Some((_, line)) = remembered {
         return Err(CertificateError::Changed {
             server: server.key(),

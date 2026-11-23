@@ -86,7 +86,8 @@ recorded in `known_certificates` in the data directory.
 ## Debugging transfers
 
 Every transfer records a trace (JSON lines) in `~/.local/state/ferge/transfers`; the app logs to
-`~/.local/state/ferge/ferge.log` (level `FERGE_LOG`, default `info,ferge_core=debug`).
+`~/.local/state/ferge/ferge.log` (level `FERGE_LOG`, default
+`info,ferge_core=debug,russh=warn,rustls_platform_verifier=off`).
 `cargo run -p ferge-bench --bin ferge-trace [-- FILE… | --last N] [--files] [--server] [--commands]`
 summarizes traces (route and why, probes, phases, throughput, per-file times, errors, server
 commands and logs). Overrides for experiments:

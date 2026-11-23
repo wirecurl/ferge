@@ -45,11 +45,14 @@ pub(super) async fn copy_files(transfer: &Arc<Transfer>, shared: &Arc<Shared>, p
             let shared = Arc::clone(shared);
             let plan = Arc::clone(plan);
             async move {
+                let file = &plan.files[index];
+                // Before the slot: a file that waits for another transfer
+                // must not keep others from being copied.
+                transfer.claim(&shared, index, &file.target).await;
                 // The semaphore is never closed, so acquiring cannot fail.
                 let Ok(_slot) = shared.slots.acquire().await else {
                     return;
                 };
-                let file = &plan.files[index];
                 transfer.control().current = file.source.file_name().map(str::to_owned);
                 let started = Instant::now();
                 if transfer.trace.is_enabled() {
@@ -66,6 +69,9 @@ pub(super) async fn copy_files(transfer: &Arc<Transfer>, shared: &Arc<Shared>, p
                     let state = lock(&file.state);
                     (state.status, state.resume_at)
                 };
+                if status != FileStatus::Pending {
+                    transfer.release(index);
+                }
                 transfer.journal.settled(index, status, resume_at);
             }
         })

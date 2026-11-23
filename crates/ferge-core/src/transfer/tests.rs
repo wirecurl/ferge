@@ -708,6 +708,91 @@ async fn pauses_and_resumes_in_the_middle_of_a_file() {
     assert!(reads[1] > 0, "the second read must resume: {reads:?}");
 }
 
+/// `len` bytes that differ from one to the next, so a mix-up shows.
+fn patterned(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|i| u8::try_from(i.wrapping_mul(13) % 251).expect("below 251"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_copy_of_a_file_waits_for_the_first() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let data = patterned(4 * 1024 * 1024);
+    write(&from.path().join("big.bin"), &data);
+    let slow: Arc<dyn Remote> = Arc::new(Slow::default());
+    let request = || TransferRequest {
+        source: Arc::clone(&slow),
+        items: vec![path(&from.path().join("big.bin"))],
+        target: local(),
+        target_dir: path(to.path()),
+    };
+    let (queue, _events) = TransferQueue::new(4);
+    let first = queue.enqueue(request(), Arc::new(FixedPolicy(ConflictAction::Overwrite)));
+    wait_for(&queue, first, |s| s.bytes_done > 0).await;
+    let answer = Answer::new(ConflictAction::Overwrite, false);
+    let second = queue.enqueue(request(), Arc::clone(&answer) as Arc<dyn ConflictResolver>);
+
+    // The second copy does not touch the file while the first writes it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let waiting = queue
+        .snapshot()
+        .into_iter()
+        .find(|snapshot| snapshot.id == second)
+        .unwrap();
+    assert_eq!(waiting.bytes_done, 0);
+    assert!(waiting.state.is_active(), "{waiting:?}");
+
+    let done = settled(&queue, first).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    // Then it finds the file there, as if it had started afterwards.
+    let done = settled(&queue, second).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    assert_eq!(answer.asked.load(Ordering::SeqCst), 1);
+    assert_eq!(std::fs::read(to.path().join("big.bin")).unwrap(), data);
+    assert_eq!(files_below(to.path()), ["big.bin"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_copy_keeps_its_partial_file_from_another_copy() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let data = patterned(8 * 1024 * 1024);
+    write(&from.path().join("big.bin"), &data);
+    let slow: Arc<dyn Remote> = Arc::new(Slow::default());
+    let request = || TransferRequest {
+        source: Arc::clone(&slow),
+        items: vec![path(&from.path().join("big.bin"))],
+        target: local(),
+        target_dir: path(to.path()),
+    };
+    let (queue, _events) = TransferQueue::new(4);
+    let first = queue.enqueue(request(), Arc::new(FixedPolicy(ConflictAction::Overwrite)));
+    wait_for(&queue, first, |s| s.bytes_done > 1024 * 1024).await;
+    queue.pause(first);
+    assert_eq!(settled(&queue, first).await.state, TransferState::Paused);
+    let part = to.path().join(format!("big.bin{PART_SUFFIX}"));
+    let partial = std::fs::read(&part).unwrap();
+
+    let second = queue.enqueue(request(), Arc::new(FixedPolicy(ConflictAction::Overwrite)));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(std::fs::read(&part).unwrap(), partial);
+    // Cancelling the waiting copy leaves the paused one's file alone.
+    queue.cancel(second);
+    assert_eq!(
+        settled(&queue, second).await.state,
+        TransferState::Cancelled
+    );
+    assert_eq!(std::fs::read(&part).unwrap(), partial);
+
+    queue.resume(first);
+    let done = settled(&queue, first).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    assert_eq!(std::fs::read(to.path().join("big.bin")).unwrap(), data);
+    assert_eq!(files_below(to.path()), ["big.bin"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelling_removes_partial_files() {
     let from = tempfile::tempdir().unwrap();

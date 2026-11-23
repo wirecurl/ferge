@@ -20,6 +20,7 @@
 //! Progress is read with [`TransferQueue::snapshot`]; state changes are
 //! announced as [`TransferEvent`]s.
 
+mod claims;
 mod copy;
 pub mod direct;
 mod names;
@@ -30,6 +31,7 @@ mod saved;
 mod tests;
 pub mod trace;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -311,6 +313,9 @@ struct Shared {
     next_id: AtomicU64,
     /// One permit per file being copied.
     slots: Arc<Semaphore>,
+    /// The target files being written, so that no two transfers write the
+    /// same one.
+    claims: Arc<claims::Claims>,
     transfers: Mutex<Vec<Arc<Transfer>>>,
     events: mpsc::UnboundedSender<TransferEvent>,
 }
@@ -344,6 +349,7 @@ impl TransferQueue {
                 options,
                 next_id: AtomicU64::new(1),
                 slots: Arc::new(Semaphore::new(parallel_files.max(1))),
+                claims: Arc::default(),
                 transfers: Mutex::new(Vec::new()),
                 events,
             }),
@@ -390,6 +396,7 @@ impl TransferQueue {
                 server_of(request.target.as_ref()),
             ),
             journal: saved::Journal::default(),
+            claims: Mutex::default(),
             remotes: Mutex::new(Remotes {
                 source: request.source,
                 target: request.target,
@@ -456,6 +463,7 @@ impl TransferQueue {
             direction: Direction::between(source.as_ref(), target.as_ref()),
             servers: (server_of(source.as_ref()), server_of(target.as_ref())),
             journal: saved::Journal::default(),
+            claims: Mutex::default(),
             remotes: Mutex::new(Remotes { source, target }),
             target_dir: record.target_dir.clone(),
             items: record.items.clone(),
@@ -620,6 +628,7 @@ impl TransferQueue {
             direction: Direction::between(source.as_ref(), target.as_ref()),
             servers: (saved.source.destination(), saved.target.destination()),
             journal,
+            claims: Mutex::default(),
             remotes: Mutex::new(Remotes { source, target }),
             target_dir: saved.target_dir.clone(),
             items: saved.items.clone(),
@@ -845,6 +854,9 @@ struct Transfer {
     servers: (Option<Destination>, Option<Destination>),
     /// Saves the transfer while it needs ferge, to resume it after a restart.
     journal: saved::Journal,
+    /// The target files this transfer writes, by their index in the plan.
+    /// Kept while the transfer is paused: its partial files wait there.
+    claims: Mutex<HashMap<usize, claims::Claim>>,
 }
 
 /// Answers that apply to all further conflicts of their kind.
@@ -885,6 +897,30 @@ impl Transfer {
 
     fn attached(&self) -> Option<direct::JobRecord> {
         lock(&self.attached).clone()
+    }
+
+    /// Claims the target of the plan's file `index` before it is written,
+    /// waiting while another transfer writes the same file.
+    async fn claim(&self, shared: &Shared, index: usize, target: &RemotePath) {
+        if lock(&self.claims).contains_key(&index) {
+            return;
+        }
+        let server = match &self.servers.1 {
+            Some(server) => server.address(),
+            // Not reachable again: the connection itself tells files apart.
+            None => format!("{:p}", Arc::as_ptr(&self.target()).cast::<()>()),
+        };
+        let key = claims::Key {
+            server,
+            path: target.clone(),
+        };
+        let claim = shared.claims.claim(key).await;
+        lock(&self.claims).insert(index, claim);
+    }
+
+    /// Lets other transfers write the target of the plan's file `index`.
+    fn release(&self, index: usize) {
+        lock(&self.claims).remove(&index);
     }
 
     fn state(&self) -> TransferState {
@@ -1094,6 +1130,9 @@ impl Transfer {
                 if let Some(plan) = &plan {
                     plan.remove_partial_files(self.target().as_ref()).await;
                 }
+                // Only now: another transfer must not start a partial file
+                // that is about to be removed.
+                lock(&self.claims).clear();
                 TransferState::Cancelled
             }
             (Some(Stop::Pause), _) | (None, None) => TransferState::Paused,
@@ -1121,6 +1160,10 @@ impl Transfer {
             }
         };
         self.control().running = false;
+        if state != TransferState::Paused {
+            // Nothing of this transfer will be written any more.
+            lock(&self.claims).clear();
+        }
         if matches!(state, TransferState::Completed | TransferState::Cancelled) {
             self.journal.forget();
         }

@@ -4,6 +4,7 @@
 //! server, later FTP, S3 or WebDAV. Every operation is asynchronous and runs on
 //! the tokio runtime; nothing here may block the caller's thread.
 
+pub mod ftp;
 pub mod local;
 pub mod offline;
 pub mod server;

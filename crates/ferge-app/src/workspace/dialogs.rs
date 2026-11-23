@@ -5,14 +5,14 @@
 //! Questions from connections take precedence and are shown on top; they
 //! belong to a tab and disappear with it.
 
-use ferge_core::interaction::{HostKeyDecision, HostKeyPrompt};
+use ferge_core::interaction::{CertificatePrompt, HostKeyDecision, HostKeyPrompt, PlaintextPrompt};
 use ferge_core::library::{BookmarkDraft, BookmarkId, FolderId, Library};
 use ferge_core::transfer::{
     Conflict, ConflictAction, ConflictDecision, ConflictKind, DirectRequest, TransferId,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
+    App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Styled as _, Subscription, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -26,6 +26,7 @@ use super::Workspace;
 use crate::editor::{BookmarkEditor, EditorEvent};
 use crate::prompts::{
     DirectAnswer, MasterPasswordRequest, PromptRequest, SecretRequest, SessionId, TaggedPrompt,
+    TrustQuestion,
 };
 use crate::style::{self, TypeScale as _};
 
@@ -49,9 +50,9 @@ pub(super) fn bind_keys(cx: &mut gpui::App) {
 
 /// A question from a connection that is currently shown.
 pub(super) enum ActivePrompt {
-    HostKey {
+    Trust {
         session: Option<SessionId>,
-        prompt: HostKeyPrompt,
+        question: TrustQuestion,
         reply: futures::channel::oneshot::Sender<HostKeyDecision>,
     },
     Secret {
@@ -85,7 +86,7 @@ pub(super) enum ActivePrompt {
 impl ActivePrompt {
     fn session(&self) -> Option<SessionId> {
         match self {
-            Self::HostKey { session, .. }
+            Self::Trust { session, .. }
             | Self::Secret { session, .. }
             | Self::Master { session, .. } => *session,
             Self::Conflict { .. } | Self::Direct { .. } => None,
@@ -213,11 +214,11 @@ impl Workspace {
             self.sync_active(window, cx);
         }
         self.prompt = match request {
-            PromptRequest::HostKey { prompt, reply } => {
+            PromptRequest::Trust { question, reply } => {
                 window.focus(&self.prompt_focus, cx);
-                Some(ActivePrompt::HostKey {
+                Some(ActivePrompt::Trust {
                     session,
-                    prompt,
+                    question,
                     reply,
                 })
             }
@@ -290,13 +291,13 @@ impl Workspace {
         cx.notify();
     }
 
-    fn answer_host_key(
+    fn answer_trust(
         &mut self,
         decision: HostKeyDecision,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ActivePrompt::HostKey { reply, .. }) = self.prompt.take() {
+        if let Some(ActivePrompt::Trust { reply, .. }) = self.prompt.take() {
             let _ = reply.send(decision);
         }
         self.show_next_prompt(window, cx);
@@ -407,8 +408,8 @@ impl Workspace {
 
     fn cancel_prompt(&mut self, _: &CancelPrompt, window: &mut Window, cx: &mut Context<Self>) {
         match self.prompt {
-            Some(ActivePrompt::HostKey { .. }) => {
-                self.answer_host_key(HostKeyDecision::Reject, window, cx);
+            Some(ActivePrompt::Trust { .. }) => {
+                self.answer_trust(HostKeyDecision::Reject, window, cx);
             }
             Some(ActivePrompt::Secret { .. }) => self.answer_secret(false, window, cx),
             Some(ActivePrompt::Master { .. }) => self.answer_master(false, window, cx),
@@ -784,7 +785,7 @@ impl Workspace {
 
     pub(super) fn render_prompt(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let card = match self.prompt.as_ref()? {
-            ActivePrompt::HostKey { prompt, .. } => self.render_host_key_prompt(prompt, cx),
+            ActivePrompt::Trust { question, .. } => self.render_trust_prompt(question, cx),
             ActivePrompt::Secret {
                 request,
                 input,
@@ -814,17 +815,52 @@ impl Workspace {
         )
     }
 
-    fn render_host_key_prompt(&self, prompt: &HostKeyPrompt, cx: &mut Context<Self>) -> gpui::Div {
-        let theme = cx.theme();
-        let (muted, danger, code_bg) = (theme.muted_foreground, theme.danger, theme.muted);
+    fn render_trust_prompt(&self, question: &TrustQuestion, cx: &mut Context<Self>) -> gpui::Div {
         let decide = |decision: HostKeyDecision| {
             cx.listener(move |this: &mut Self, _: &ClickEvent, window, cx| {
-                this.answer_host_key(decision, window, cx);
+                this.answer_trust(decision, window, cx);
             })
         };
-        Self::card(cx)
-            .track_focus(&self.prompt_focus)
-            .child(div().text_title().child("Unknown host key"))
+        let card = Self::card(cx).track_focus(&self.prompt_focus);
+        let card = match question {
+            TrustQuestion::HostKey(prompt) => Self::host_key_question(card, prompt, cx),
+            TrustQuestion::Certificate(prompt) => Self::certificate_question(card, prompt, cx),
+            TrustQuestion::Plaintext(prompt) => Self::plaintext_question(card, prompt),
+        };
+        // Going without encryption is never the suggested way.
+        let plaintext = matches!(question, TrustQuestion::Plaintext(_));
+        card.child(
+            h_flex()
+                .gap_2()
+                .justify_end()
+                .child(
+                    Button::new("trust-reject")
+                        .label("Cancel")
+                        .when(plaintext, gpui_component::button::ButtonVariants::primary)
+                        .on_click(decide(HostKeyDecision::Reject)),
+                )
+                .child(
+                    Button::new("trust-once")
+                        .label("Connect once")
+                        .on_click(decide(HostKeyDecision::AcceptOnce)),
+                )
+                .child(
+                    Button::new("trust-remember")
+                        .label(if plaintext {
+                            "Always allow"
+                        } else {
+                            "Trust and connect"
+                        })
+                        .when(!plaintext, gpui_component::button::ButtonVariants::primary)
+                        .on_click(decide(HostKeyDecision::AcceptAndRemember)),
+                ),
+        )
+    }
+
+    fn host_key_question(card: gpui::Div, prompt: &HostKeyPrompt, cx: &App) -> gpui::Div {
+        let theme = cx.theme();
+        let (muted, danger, code_bg) = (theme.muted_foreground, theme.danger, theme.muted);
+        card.child(div().text_title().child("Unknown host key"))
             .child(div().text_body().child(format!(
                 "ferge has not connected to {} before. Compare the fingerprint with the one \
                  the server's administrator gave you before you trust it.",
@@ -855,27 +891,69 @@ impl Workspace {
                      been reconfigured, or someone may be intercepting the connection.",
                 ))
             })
+    }
+
+    fn certificate_question(card: gpui::Div, prompt: &CertificatePrompt, cx: &App) -> gpui::Div {
+        let theme = cx.theme();
+        let (muted, code_bg) = (theme.muted_foreground, theme.muted);
+        let fact = |label: &'static str, value: String| {
+            h_flex()
+                .gap_2()
+                .items_start()
+                .child(
+                    div()
+                        .w(style::em(6.))
+                        .flex_shrink_0()
+                        .text_small()
+                        .text_color(muted)
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().text_body().child(value))
+        };
+        let validity = format!(
+            "{} to {}",
+            crate::format::date(prompt.valid_from),
+            crate::format::date(prompt.valid_until)
+        );
+        card.child(div().text_title().child("Untrusted certificate"))
+            .child(div().text_body().child(format!(
+                "The certificate of {} {}. Compare the fingerprint with the one the server's \
+                 administrator gave you before you trust it.",
+                prompt.server, prompt.problem
+            )))
             .child(
-                h_flex()
-                    .gap_2()
-                    .justify_end()
+                v_flex()
+                    .p_3()
+                    .gap_1()
+                    .rounded(style::RADIUS)
+                    .bg(code_bg)
+                    .child(fact("Issued to", prompt.subject.clone()))
+                    .child(fact("Issued by", prompt.issuer.clone()))
+                    .when(!prompt.names.is_empty(), |this| {
+                        this.child(fact("Valid for", prompt.names.join(", ")))
+                    })
+                    .child(fact("Valid", validity))
                     .child(
-                        Button::new("host-key-reject")
-                            .label("Cancel")
-                            .on_click(decide(HostKeyDecision::Reject)),
-                    )
-                    .child(
-                        Button::new("host-key-once")
-                            .label("Connect once")
-                            .on_click(decide(HostKeyDecision::AcceptOnce)),
-                    )
-                    .child(
-                        Button::new("host-key-trust")
-                            .primary()
-                            .label("Trust and connect")
-                            .on_click(decide(HostKeyDecision::AcceptAndRemember)),
+                        div()
+                            .pt_1()
+                            .text_body()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .child(prompt.fingerprint.clone()),
                     ),
             )
+    }
+
+    fn plaintext_question(card: gpui::Div, prompt: &PlaintextPrompt) -> gpui::Div {
+        card.child(div().text_title().child("Connect without encryption?"))
+            .child(div().text_body().child(format!(
+                "{} does not offer encryption: {}.",
+                prompt.server, prompt.reason
+            )))
+            .child(div().text_body().child(format!(
+                "Over {} without encryption, your password and your files travel unprotected: \
+                 anyone on the way can read them. Connect only on a network you trust.",
+                prompt.protocol
+            )))
     }
 
     fn render_secret_prompt(

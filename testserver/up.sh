@@ -1,15 +1,18 @@
 #!/bin/sh
 # Starts the SFTP test servers on 127.0.0.1:2222 (with fixtures) and
-# 127.0.0.1:2223 (empty, for direct transfers between servers) and waits until
-# they are ready. FERGE_TEST_PORT, FERGE_TEST_PORT2 and FERGE_TESTSERVER_NAME
-# move them, e.g. to run a second set next to the first.
+# 127.0.0.1:2223 (empty, for direct transfers between servers) and the FTP
+# server on 127.0.0.1:2121 (explicit TLS or none), :2990 (implicit TLS) and
+# :2122 (no TLS), passive ports 30000-30019, and waits until they are ready.
+# FERGE_TEST_PORT, FERGE_TEST_PORT2, FERGE_TEST_FTP_PORT, FERGE_TEST_FTPS_PORT,
+# FERGE_TEST_FTP_PLAIN_PORT, FERGE_TEST_FTP_PASV_MIN/_MAX and
+# FERGE_TESTSERVER_NAME move them, e.g. to run a second set next to the first.
 #
 #   user ferge, password ferge (sudo with password; ferge-nopasswd,
 #   ferge-sftponly and ferge-nosudo for the other cases)
 #   keys .testserver/id_ed25519 (no passphrase) and
 #        .testserver/id_ed25519_encrypted (passphrase "ferge")
 #   client config .testserver/ssh_config (host aliases "ferge-test" and
-#   "ferge-test2")
+#   "ferge-test2"); the FTP server's certificate in .testserver/ftp-cert.pem
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -27,6 +30,8 @@ fi
 cat "$state/id_ed25519.pub" "$state/id_ed25519_encrypted.pub" > "$state/authorized_keys"
 
 docker compose -f "$repo/testserver/compose.yaml" up --detach --build --wait
+docker compose -f "$repo/testserver/compose.yaml" exec -T ftp cat /etc/ferge-ftp/cert.pem \
+    > "$state/ftp-cert.pem"
 
 # Client configuration for `ferge -F .testserver/ssh_config sftp://ferge-test`
 # and for the benchmarks. The host keys change whenever the image is rebuilt.
@@ -51,4 +56,5 @@ Host ferge-test2
 CONFIG
 
 echo "ferge test servers ready: cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many"
+echo "FTP: cargo run -- ftp://ferge@127.0.0.1:${FERGE_TEST_FTP_PORT:-2121}/home/ferge/many (password ferge)"
 echo "direct transfers between them: FERGE_DIRECT_ADDRESS=127.0.0.1:$port=sshd:22,127.0.0.1:$port2=sshd2:22"

@@ -177,6 +177,7 @@ impl ResolvedTarget {
 
     pub(crate) fn account(&self) -> Account {
         Account {
+            protocol: crate::destination::Protocol::Sftp,
             user: self.user.clone(),
             host: self.alias.clone(),
             port: self.port,

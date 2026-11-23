@@ -13,6 +13,7 @@ mod file;
 mod keyring;
 mod memory;
 
+use crate::destination::Protocol;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,8 +58,9 @@ pub type Result<T, E = SecretError> = std::result::Result<T, E>;
 /// What a secret unlocks.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SecretId {
-    /// The password of `user` on an SSH server.
+    /// The password of `user` on a server.
     Password {
+        protocol: Protocol,
         user: String,
         host: String,
         port: u16,
@@ -77,7 +79,19 @@ impl SecretId {
     /// The account name under which the secret is stored, unique per id.
     fn account(&self) -> String {
         match self {
-            Self::Password { user, host, port } => format!("password:{user}@{host}:{port}"),
+            // SSH passwords keep the name ferge 0.1 gave them.
+            Self::Password {
+                protocol: Protocol::Sftp,
+                user,
+                host,
+                port,
+            } => format!("password:{user}@{host}:{port}"),
+            Self::Password {
+                protocol: Protocol::Ftp,
+                user,
+                host,
+                port,
+            } => format!("ftp-password:{user}@{host}:{port}"),
             Self::KeyPassphrase(path) => format!("passphrase:{}", path.display()),
             Self::SudoPassword { user, host, port } => format!("sudo:{user}@{host}:{port}"),
         }
@@ -86,9 +100,21 @@ impl SecretId {
     /// A human-readable description, e.g. for keyring managers.
     fn label(&self) -> String {
         match self {
-            Self::Password { user, host, port } => {
-                format!("ferge: password for {user}@{host}:{port}")
-            }
+            Self::Password {
+                protocol: Protocol::Sftp,
+                user,
+                host,
+                port,
+            } => format!("ferge: password for {user}@{host}:{port}"),
+            Self::Password {
+                protocol,
+                user,
+                host,
+                port,
+            } => format!(
+                "ferge: {} password for {user}@{host}:{port}",
+                protocol.name()
+            ),
             Self::KeyPassphrase(path) => format!("ferge: passphrase for {}", path.display()),
             Self::SudoPassword { user, host, port } => {
                 format!("ferge: sudo password for {user}@{host}:{port}")
@@ -147,4 +173,35 @@ pub fn open_default(fallback: &Path) -> Arc<dyn SecretStore> {
 /// `ferge/secrets.bin` in the platform's data directory.
 pub fn default_fallback_path() -> Option<PathBuf> {
     dirs::data_dir().map(|dir| dir.join("ferge").join("secrets.bin"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn password(protocol: Protocol) -> SecretId {
+        SecretId::Password {
+            protocol,
+            user: "me".into(),
+            host: "example.org".into(),
+            port: 21,
+        }
+    }
+
+    #[test]
+    fn passwords_are_stored_apart_per_protocol() {
+        // The name ferge 0.1 saved SSH passwords under must not change.
+        assert_eq!(
+            password(Protocol::Sftp).account(),
+            "password:me@example.org:21"
+        );
+        assert_eq!(
+            password(Protocol::Ftp).account(),
+            "ftp-password:me@example.org:21"
+        );
+        assert_eq!(
+            password(Protocol::Ftp).label(),
+            "ferge: FTP password for me@example.org:21"
+        );
+    }
 }

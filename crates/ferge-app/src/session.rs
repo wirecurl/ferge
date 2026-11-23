@@ -8,7 +8,7 @@ mod servers;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ferge_core::connect::{self, ConnectOptions};
+use ferge_core::connect::{self, ConnectOptions, Connection as Established};
 use ferge_core::library::{BookmarkId, LibrarySnapshot};
 use ferge_core::remote::sftp::SftpRemote;
 use ferge_core::transfer::TransferQueue;
@@ -101,8 +101,7 @@ impl EventEmitter<SessionEvent> for Session {}
 
 /// A connection being established: the remote, its start directory and, for
 /// SFTP, the session it logged in with.
-type PendingConnection =
-    tokio::task::JoinHandle<ferge_core::Result<(Arc<dyn Remote>, RemotePath, Option<SftpRemote>)>>;
+type PendingConnection = tokio::task::JoinHandle<ferge_core::Result<(Established, RemotePath)>>;
 
 enum ConnectState {
     Idle,
@@ -387,8 +386,12 @@ impl Session {
                 session.connect_task = None;
                 session.connect_abort = None;
                 match result {
-                    Ok((remote, path, login)) => {
-                        let account = login.as_ref().map(|login| login.account().clone());
+                    Ok((connection, path)) => {
+                        let Established {
+                            remote,
+                            account,
+                            sftp: login,
+                        } = connection;
                         // Remembered secrets are saved only now that they worked.
                         let vault = Arc::clone(&session.context.vault);
                         let prompter = Prompter::new(session.context.prompts.clone(), None);
@@ -452,7 +455,7 @@ impl Session {
                 Some(path) => path,
                 None => connection.remote.home_dir().await?,
             };
-            Ok((connection.remote, start, connection.sftp))
+            Ok((connection, start))
         })
     }
 

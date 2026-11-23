@@ -5,8 +5,8 @@
 use std::collections::HashSet;
 use std::time::SystemTime;
 
+use ferge_core::Destination;
 use ferge_core::library::{BookmarkId, FolderId};
-use ferge_core::{Destination, RemotePath, SftpTarget};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity,
@@ -21,7 +21,8 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use secrecy::SecretString;
 
 use super::{ConnectRequest, Session, SessionEvent};
-use crate::style::{self, Palette as _, TypeScale as _, em};
+use crate::server_form::{self, Protocol};
+use crate::style::{self, ControlSize, Palette as _, TypeScale as _, em};
 
 /// Something in the server panel that needs one of the window's dialogs.
 #[derive(Clone, Debug)]
@@ -134,6 +135,7 @@ impl ServerPanel {
 
 /// The Quick Connect form.
 struct QuickConnect {
+    protocol: Protocol,
     host: Entity<InputState>,
     port: Entity<InputState>,
     user: Entity<InputState>,
@@ -156,14 +158,10 @@ impl QuickConnect {
                     .masked(masked)
             })
         };
-        let host = field(
-            "example.org, an address or an ssh_config alias",
-            false,
-            window,
-            cx,
-        );
-        let port = field("22", false, window, cx);
-        let user = field("From ssh_config, or your login name", false, window, cx);
+        let protocol = Protocol::Sftp;
+        let host = field(protocol.host_hint(), false, window, cx);
+        let port = field(protocol.port_hint(), false, window, cx);
+        let user = field(protocol.user_hint(), false, window, cx);
         let password = field("Asked for when needed", true, window, cx);
         let path = field("The login folder", false, window, cx);
         let submits = [&host, &port, &user, &password, &path]
@@ -177,6 +175,7 @@ impl QuickConnect {
             })
             .collect();
         Self {
+            protocol,
             host,
             port,
             user,
@@ -195,80 +194,31 @@ impl QuickConnect {
     /// The destination described by the form.
     fn destination(&self, cx: &App) -> Result<Destination, String> {
         let text = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
-        quick_target(
+        server_form::destination(
+            self.protocol,
             &text(&self.host),
             &text(&self.port),
             &text(&self.user),
             &text(&self.path),
         )
-        .map(Destination::Sftp)
+    }
+
+    /// Switches the protocol; the hints follow.
+    fn choose(&mut self, protocol: Protocol, window: &mut Window, cx: &mut App) {
+        self.protocol = protocol;
+        for (input, hint) in [
+            (&self.host, protocol.host_hint()),
+            (&self.port, protocol.port_hint()),
+            (&self.user, protocol.user_hint()),
+        ] {
+            input.update(cx, |input, cx| input.set_placeholder(hint, window, cx));
+        }
     }
 
     fn password(&self, cx: &App) -> Option<SecretString> {
         let password = self.password.read(cx).value();
         (!password.is_empty()).then(|| SecretString::from(password.to_string()))
     }
-}
-
-/// The server described by the Quick Connect fields. The server field also
-/// takes `user@host:port` and `sftp://` addresses; the other fields fill in
-/// what it leaves out and must agree with what it says.
-fn quick_target(host: &str, port: &str, user: &str, path: &str) -> Result<SftpTarget, String> {
-    if host.is_empty() {
-        return Err("Enter a server to connect to.".into());
-    }
-    let invalid = || format!("“{host}” is not a valid server name.");
-    // `Destination::parse` reads `local` and absolute paths as this computer;
-    // here they can only be meant as a host name.
-    let mut target = match Destination::parse(host) {
-        Ok(Destination::Sftp(target)) => target,
-        Ok(Destination::Local { .. }) => SftpTarget::new(host).map_err(|_| invalid())?,
-        Err(_) => return Err(invalid()),
-    };
-    if !port.is_empty() {
-        let port = port
-            .parse::<u16>()
-            .ok()
-            .filter(|port| *port != 0)
-            .ok_or_else(|| format!("“{port}” is not a valid port."))?;
-        match target.port {
-            Some(given) if given != port => {
-                return Err(format!(
-                    "The server says port {given}, the port field {port}."
-                ));
-            }
-            _ => target.port = Some(port),
-        }
-    }
-    if !user.is_empty() {
-        if user
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '@')
-        {
-            return Err(format!("“{user}” is not a valid user name."));
-        }
-        match &target.user {
-            Some(given) if given != user => {
-                return Err(format!(
-                    "The server says user “{given}”, the user field “{user}”."
-                ));
-            }
-            _ => target.user = Some(user.to_owned()),
-        }
-    }
-    if !path.is_empty() {
-        let path = RemotePath::parse(path)
-            .map_err(|_| "The folder must be an absolute path like /srv/www.")?;
-        match &target.path {
-            Some(given) if *given != path => {
-                return Err(format!(
-                    "The address says folder {given}, the folder field {path}."
-                ));
-            }
-            _ => target.path = Some(path),
-        }
-    }
-    Ok(target)
 }
 
 impl Session {
@@ -473,7 +423,33 @@ impl Session {
             .w_full()
             .max_w(em(36.))
             .gap_3()
-            .child(style::section_title("Connect over SFTP", cx).pb_0())
+            .child(style::section_title("Connect to a server", cx).pb_0())
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(style::segmented(
+                        "quick-protocol",
+                        ControlSize::Compact,
+                        &Protocol::CHOICES.map(|(protocol, label)| (protocol, label.into())),
+                        quick.protocol,
+                        {
+                            let this = cx.entity().downgrade();
+                            move |protocol, window, cx| {
+                                let _ = this.update(cx, |session: &mut Self, cx| {
+                                    session.servers.quick.choose(protocol, window, cx);
+                                    cx.notify();
+                                });
+                            }
+                        },
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_small()
+                            .text_color(muted)
+                            .child(quick.protocol.note()),
+                    ),
+            )
             .child(
                 h_flex()
                     .gap_3()
@@ -680,7 +656,7 @@ impl Session {
         for (id, name, destination) in bookmarks {
             let icon = match destination {
                 Destination::Local { .. } => IconName::HardDrive,
-                Destination::Sftp(_) => IconName::Globe,
+                Destination::Sftp(_) | Destination::Ftp(_) => IconName::Globe,
             };
             rows.push(Self::render_row(
                 ElementId::Name(format!("favorite-{id:?}").into()),
@@ -925,73 +901,5 @@ fn ago(time: SystemTime) -> String {
         3_600..86_400 => format!("{} h ago", seconds / 3_600),
         86_400..172_800 => "yesterday".to_owned(),
         _ => format!("{} days ago", seconds / 86_400),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parts(target: &SftpTarget) -> (&str, Option<u16>, Option<&str>, Option<String>) {
-        (
-            &target.host,
-            target.port,
-            target.user.as_deref(),
-            target.path.as_ref().map(ToString::to_string),
-        )
-    }
-
-    #[test]
-    fn quick_connect_reads_addresses_in_the_server_field() {
-        let t = quick_target("root@prod.example.org", "", "", "").unwrap();
-        assert_eq!(parts(&t), ("prod.example.org", None, Some("root"), None));
-        let t = quick_target("root@prod.example.org:2222", "", "", "").unwrap();
-        assert_eq!(
-            parts(&t),
-            ("prod.example.org", Some(2222), Some("root"), None)
-        );
-        let t = quick_target("sftp://me@[::1]:2200/srv/www", "", "", "").unwrap();
-        assert_eq!(
-            parts(&t),
-            ("::1", Some(2200), Some("me"), Some("/srv/www".into()))
-        );
-        let t = quick_target("::1", "", "", "").unwrap();
-        assert_eq!(parts(&t), ("::1", None, None, None));
-        // A host that happens to be called `local`.
-        let t = quick_target("local", "22", "", "").unwrap();
-        assert_eq!(parts(&t), ("local", Some(22), None, None));
-    }
-
-    #[test]
-    fn quick_connect_fields_fill_in_and_must_agree() {
-        let t = quick_target("root@host", "2222", "root", "/tmp").unwrap();
-        assert_eq!(
-            parts(&t),
-            ("host", Some(2222), Some("root"), Some("/tmp".into()))
-        );
-        let t = quick_target("host", "", "alice", "").unwrap();
-        assert_eq!(parts(&t), ("host", None, Some("alice"), None));
-        assert!(quick_target("root@host", "", "alice", "").is_err());
-        assert!(quick_target("host:2222", "22", "", "").is_err());
-        assert!(quick_target("sftp://host/a", "", "", "/b").is_err());
-    }
-
-    #[test]
-    fn quick_connect_rejects_bad_input() {
-        for (host, port, user, path) in [
-            ("", "", "", ""),
-            ("/tmp", "", "", ""),
-            ("@host", "", "", ""),
-            ("a b", "", "", ""),
-            ("host:0", "", "", ""),
-            ("host", "x", "", ""),
-            ("host", "", "a@b", ""),
-            ("host", "", "", "relative"),
-        ] {
-            assert!(
-                quick_target(host, port, user, path).is_err(),
-                "{host:?} {port:?} {user:?} {path:?}"
-            );
-        }
     }
 }

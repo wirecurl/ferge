@@ -11,12 +11,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use ferge_core::interaction::{
-    Account, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt, server_text,
+    Account, CertificatePrompt, HostKeyDecision, HostKeyPrompt, Interaction, KeyboardPrompt,
+    PlaintextPrompt, server_text,
 };
 use ferge_core::secrets::SecretId;
 use secrecy::SecretString;
 
-use crate::prompts::Prompter;
+use crate::prompts::{Prompter, TrustQuestion};
 use crate::vault::Vault;
 
 /// Characters of each piece of server text shown in a dialog.
@@ -132,7 +133,17 @@ impl UiInteraction {
 #[async_trait]
 impl Interaction for UiInteraction {
     async fn confirm_host_key(&self, prompt: HostKeyPrompt) -> HostKeyDecision {
-        self.prompter.host_key(prompt).await
+        self.prompter.trust(TrustQuestion::HostKey(prompt)).await
+    }
+
+    async fn confirm_certificate(&self, prompt: CertificatePrompt) -> HostKeyDecision {
+        self.prompter
+            .trust(TrustQuestion::Certificate(prompt))
+            .await
+    }
+
+    async fn confirm_plaintext(&self, prompt: PlaintextPrompt) -> HostKeyDecision {
+        self.prompter.trust(TrustQuestion::Plaintext(prompt)).await
     }
 
     async fn key_passphrase(&self, key_file: &Path, retry: bool) -> Option<SecretString> {
@@ -289,6 +300,7 @@ mod tests {
 
     fn account() -> Account {
         Account {
+            protocol: ferge_core::destination::Protocol::Sftp,
             user: "me".into(),
             host: "server".into(),
             port: 22,

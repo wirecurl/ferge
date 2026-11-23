@@ -14,6 +14,7 @@ async fn keyring_round_trip() {
     tokio::task::spawn_blocking(|| {
         let store = KeyringStore::open().expect("a credential store");
         let id = SecretId::Password {
+            protocol: ferge_core::destination::Protocol::Sftp,
             user: "ferge-test".into(),
             host: "keyring-test.invalid".into(),
             port: 22,

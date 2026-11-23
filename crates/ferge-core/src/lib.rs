@@ -23,10 +23,11 @@ pub mod quick_look;
 pub mod remote;
 pub mod secrets;
 pub mod settings;
+pub mod tls;
 pub mod transfer;
 
-pub use destination::{Destination, SftpTarget};
+pub use destination::{Destination, FtpTarget, FtpTls, Protocol, SftpTarget};
 pub use entry::{Entry, EntryKind, Metadata};
-pub use error::{ElevationError, Error, HostKeyError, Result};
+pub use error::{CertificateError, ElevationError, Error, HostKeyError, Result};
 pub use path::{EntryName, RemotePath};
 pub use remote::Remote;

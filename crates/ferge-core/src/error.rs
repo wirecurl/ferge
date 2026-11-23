@@ -75,6 +75,11 @@ pub enum Error {
     #[error(transparent)]
     HostKey(#[from] HostKeyError),
 
+    /// The server's TLS certificate was not trusted, or an unencrypted
+    /// connection was not allowed.
+    #[error(transparent)]
+    Certificate(#[from] CertificateError),
+
     /// No offered authentication method was accepted.
     #[error("authentication failed for {user}@{host}")]
     AuthenticationFailed { user: String, host: String },
@@ -231,5 +236,58 @@ pub enum HostKeyError {
         path: PathBuf,
         #[source]
         source: BoxError,
+    },
+}
+
+/// Reasons a TLS connection was not trusted.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CertificateError {
+    /// The certificate differs from the one the user chose to trust, and
+    /// the system does not trust the new one either. This is what a
+    /// man-in-the-middle attack looks like, so it is never offered for
+    /// acceptance.
+    #[error(
+        "the certificate of {server} has changed ({fingerprint}); it does not match {} line \
+         {line}. Someone could be eavesdropping on the connection. Remove the old entry only if \
+         you know why the certificate changed",
+        file.display()
+    )]
+    Changed {
+        server: String,
+        fingerprint: String,
+        file: PathBuf,
+        line: usize,
+    },
+
+    /// The user declined a certificate the system does not trust.
+    #[error("the certificate of {server} ({fingerprint}) was not accepted: it {problem}")]
+    Rejected {
+        server: String,
+        fingerprint: String,
+        problem: String,
+    },
+
+    /// The certificate cannot be trusted at all (revoked, broken).
+    #[error("the certificate of {server} cannot be trusted: it {problem}")]
+    Untrusted { server: String, problem: String },
+
+    /// The server offers no encryption, and the user did not allow an
+    /// unencrypted connection.
+    #[error("{server} offers no encryption, and an unencrypted connection was not allowed")]
+    PlaintextRefused { server: String },
+
+    #[error("could not read {}", path.display())]
+    Unreadable {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error("could not record the decision in {}", path.display())]
+    Save {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
     },
 }

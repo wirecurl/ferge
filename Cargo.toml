@@ -29,6 +29,16 @@ tokio = { version = "=1.54.1" }
 russh = { version = "=0.65.2" }
 russh-sftp = { version = "=3.0.1" }
 russh-config = { version = "=0.58.0" }
+# FTP/FTPS. TLS is rustls on aws-lc-rs, the provider russh already brings.
+suppaftp = { version = "=13.0.0", default-features = false, features = ["tokio-rustls-aws-lc-rs", "deprecated"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
+# The operating system's certificate checks (and trust store).
+rustls-platform-verifier = { version = "=0.7.1" }
+# rustls's certificate checks, to tell why one failed (the version rustls uses).
+rustls-webpki = { version = "=0.103.17", default-features = false, features = ["std"] }
+# What an untrusted certificate says about itself, for the question.
+x509-parser = { version = "=0.18.1" }
 
 # Persistence. SQLite is bundled so every platform runs the same, tested version.
 rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }
@@ -68,6 +78,7 @@ bytes = "=1.12.2"
 hmac = "=0.13.0"
 jiff = "=1.0.1"
 sha1 = "=0.11.0"
+sha2 = "=0.11.1"
 tokio-util = { version = "=0.7.20", features = ["io"] }
 async-trait = "=0.1.92"
 clap = { version = "=4.6.9", features = ["derive"] }
@@ -77,6 +88,8 @@ secrecy = "=0.10.3"
 # Transfer traces are JSON lines, readable with jq and ferge-trace.
 serde_json = "=1.0.154"
 tempfile = "=3.27.0"
+# Certificates for TLS servers in tests.
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
 thiserror = "=2.0.21"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }

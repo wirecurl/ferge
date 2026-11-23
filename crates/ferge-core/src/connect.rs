@@ -9,8 +9,9 @@ use secrecy::SecretString;
 
 use crate::destination::Destination;
 use crate::error::Result;
-use crate::interaction::Interaction;
+use crate::interaction::{Account, Interaction};
 use crate::remote::Remote;
+use crate::remote::ftp::{FtpOptions, FtpRemote};
 use crate::remote::local::LocalRemote;
 use crate::remote::sftp::{SftpRemote, SshConfigSource};
 
@@ -29,6 +30,8 @@ pub struct ConnectOptions {
 #[derive(Clone, Debug)]
 pub struct Connection {
     pub remote: Arc<dyn Remote>,
+    /// The account logged in, where passwords are saved for it.
+    pub account: Option<Account>,
     /// The SSH session behind `remote`, which can open a second one as root.
     pub sftp: Option<SftpRemote>,
 }
@@ -43,6 +46,7 @@ pub async fn connect(
     match destination {
         Destination::Local { .. } => Ok(Connection {
             remote: Arc::new(LocalRemote::new()),
+            account: None,
             sftp: None,
         }),
         Destination::Sftp(target) => {
@@ -57,7 +61,18 @@ pub async fn connect(
             let sftp = SftpRemote::connect(sftp_options, interaction).await?;
             Ok(Connection {
                 remote: Arc::new(sftp.clone()),
+                account: Some(sftp.account().clone()),
                 sftp: Some(sftp),
+            })
+        }
+        Destination::Ftp(target) => {
+            let mut ftp_options = FtpOptions::new(target);
+            ftp_options.password.clone_from(&options.password);
+            let ftp = FtpRemote::connect(ftp_options, interaction).await?;
+            Ok(Connection {
+                account: Some(ftp.account()),
+                remote: Arc::new(ftp),
+                sftp: None,
             })
         }
     }

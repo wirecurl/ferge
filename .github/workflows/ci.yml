@@ -97,15 +97,18 @@ jobs:
       - name: Tests
         timeout-minutes: 5
         run: cargo test --workspace --locked --profile ci
-      - name: Start the SFTP test servers
+      - name: Start the SFTP and FTP test servers
         run: ./testserver/up.sh
       - name: SFTP integration tests
         timeout-minutes: 5
         run: cargo test --workspace --test sftp --locked --profile ci -- --ignored
+      - name: FTP integration tests
+        timeout-minutes: 5
+        run: cargo test --workspace --test ftp --locked --profile ci -- --ignored
       - name: Direct transfer integration tests
         timeout-minutes: 15
         run: cargo test --workspace --test direct --locked --profile ci -- --ignored
-      - name: Stop the SFTP test servers
+      - name: Stop the test servers
         if: always()
         run: ./testserver/down.sh
 

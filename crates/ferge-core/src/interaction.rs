@@ -6,10 +6,12 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use secrecy::SecretString;
 
+use crate::destination::Protocol;
 use crate::secrets::SecretId;
 
 /// An unknown host key that needs the user's decision.
@@ -26,20 +28,55 @@ pub struct HostKeyPrompt {
     pub other_types_known: bool,
 }
 
-/// The user's answer to a [`HostKeyPrompt`].
+/// A TLS certificate the system does not trust, which needs the user's
+/// decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CertificatePrompt {
+    /// `host:port`.
+    pub server: String,
+    /// Why the system does not trust it, completing "the certificate …":
+    /// "has expired", "was issued for a different name".
+    pub problem: String,
+    /// Who it was issued to and by (distinguished names).
+    pub subject: String,
+    pub issuer: String,
+    /// The host names and addresses it is valid for.
+    pub names: Vec<String>,
+    pub valid_from: Option<SystemTime>,
+    pub valid_until: Option<SystemTime>,
+    /// SHA-256 fingerprint, `SHA256:AB:CD:…` as `openssl` prints it.
+    pub fingerprint: String,
+}
+
+/// A server that offers no encryption: may ferge send the password and
+/// the files in plain text?
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaintextPrompt {
+    /// `host:port`.
+    pub server: String,
+    /// `FTP`, `WebDAV`.
+    pub protocol: &'static str,
+    /// What the server said, e.g. that it does not know `AUTH TLS`.
+    pub reason: String,
+}
+
+/// The user's answer to a question whether to trust a server: a
+/// [`HostKeyPrompt`], a [`CertificatePrompt`] or a [`PlaintextPrompt`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostKeyDecision {
     /// Abort the connection.
     Reject,
-    /// Trust the key for this connection only.
+    /// Trust it for this connection only.
     AcceptOnce,
-    /// Trust the key and record it in the user's known_hosts file.
+    /// Trust it and record that (in known_hosts, or for certificates in
+    /// ferge's `known_certificates`).
     AcceptAndRemember,
 }
 
 /// The account being authenticated, after `ssh_config` was applied.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Account {
+    pub protocol: Protocol,
     pub user: String,
     /// The host as the user named it (alias or address), not the resolved
     /// host name, so it matches what the user sees.
@@ -51,6 +88,7 @@ impl Account {
     /// Where a password for this account is saved.
     pub fn password_id(&self) -> SecretId {
         SecretId::Password {
+            protocol: self.protocol,
             user: self.user.clone(),
             host: self.host.clone(),
             port: self.port,
@@ -70,7 +108,7 @@ impl Account {
 impl fmt::Display for Account {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}@{}", self.user, self.host)?;
-        if self.port != crate::remote::sftp::DEFAULT_PORT {
+        if self.port != self.protocol.default_port() {
             write!(f, ":{}", self.port)?;
         }
         Ok(())
@@ -109,6 +147,18 @@ pub trait Interaction: Send + Sync + fmt::Debug {
         instructions: &str,
         prompts: &[KeyboardPrompt],
     ) -> Option<Vec<SecretString>>;
+
+    /// The server's TLS certificate is not trusted by the system.
+    async fn confirm_certificate(&self, prompt: CertificatePrompt) -> HostKeyDecision {
+        let _ = prompt;
+        HostKeyDecision::Reject
+    }
+
+    /// The server offers no encryption.
+    async fn confirm_plaintext(&self, prompt: PlaintextPrompt) -> HostKeyDecision {
+        let _ = prompt;
+        HostKeyDecision::Reject
+    }
 
     /// Working as root needs the password `sudo` asks for, usually the
     /// account's own. `retry`: the previous answer was wrong. `None` cancels.

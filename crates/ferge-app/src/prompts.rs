@@ -5,7 +5,7 @@
 //! through a oneshot channel. A dropped reply (dialog dismissed, tab closed,
 //! window gone) counts as "declined".
 
-use ferge_core::interaction::{HostKeyDecision, HostKeyPrompt};
+use ferge_core::interaction::{CertificatePrompt, HostKeyDecision, HostKeyPrompt, PlaintextPrompt};
 use ferge_core::transfer::{Conflict, ConflictDecision, DirectRequest};
 use futures::channel::{mpsc, oneshot};
 use secrecy::SecretString;
@@ -17,8 +17,9 @@ pub(crate) struct SessionId(pub(crate) u64);
 /// A question for the user, or a message to show.
 #[derive(Debug)]
 pub(crate) enum PromptRequest {
-    HostKey {
-        prompt: HostKeyPrompt,
+    /// Whether to trust a server. Dropping the reply declines.
+    Trust {
+        question: TrustQuestion,
         reply: oneshot::Sender<HostKeyDecision>,
     },
     Secret(SecretRequest),
@@ -37,6 +38,17 @@ pub(crate) enum PromptRequest {
     },
     /// A problem that does not stop the current work, shown as a notification.
     Notice(String),
+}
+
+/// What a server presented that ferge cannot vouch for.
+#[derive(Debug)]
+pub(crate) enum TrustQuestion {
+    /// An SSH host key not in known_hosts.
+    HostKey(HostKeyPrompt),
+    /// A TLS certificate the system does not trust.
+    Certificate(CertificatePrompt),
+    /// A server without encryption.
+    Plaintext(PlaintextPrompt),
 }
 
 /// The answer to [`PromptRequest::Direct`].
@@ -117,9 +129,9 @@ impl Prompter {
             .is_ok()
     }
 
-    pub(crate) async fn host_key(&self, prompt: HostKeyPrompt) -> HostKeyDecision {
+    pub(crate) async fn trust(&self, question: TrustQuestion) -> HostKeyDecision {
         let (reply, answer) = oneshot::channel();
-        if !self.send(PromptRequest::HostKey { prompt, reply }) {
+        if !self.send(PromptRequest::Trust { question, reply }) {
             return HostKeyDecision::Reject;
         }
         answer.await.unwrap_or(HostKeyDecision::Reject)

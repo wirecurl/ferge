@@ -466,6 +466,7 @@ mod tests {
 
     fn id(host: &str) -> SecretId {
         SecretId::Password {
+            protocol: crate::destination::Protocol::Sftp,
             user: "me".into(),
             host: host.into(),
             port: 22,

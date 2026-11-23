@@ -16,6 +16,7 @@ mod preview;
 mod prompts;
 mod reconnect;
 mod runtime;
+mod server_form;
 mod session;
 mod settings_window;
 mod style;

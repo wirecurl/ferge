@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 
+use crate::server_form::{self, Protocol};
 use crate::style::{self, ControlSize, TypeScale as _};
 use ferge_core::library::{BookmarkDraft, BookmarkId, FolderId, LibrarySnapshot};
-use ferge_core::{Destination, RemotePath, SftpTarget};
+use ferge_core::{Destination, RemotePath};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, ClickEvent, Context, Entity, EventEmitter, IntoElement, ParentElement as _,
@@ -29,8 +30,17 @@ impl EventEmitter<EditorEvent> for BookmarkEditor {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
-    Sftp,
+    Server(Protocol),
     Local,
+}
+
+impl Kind {
+    const CHOICES: [(Self, &'static str); 4] = [
+        (Self::Server(Protocol::Sftp), "SFTP"),
+        (Self::Server(Protocol::Ftp), "FTP"),
+        (Self::Server(Protocol::Ftps), "FTPS"),
+        (Self::Local, "Local"),
+    ];
 }
 
 pub(crate) struct BookmarkEditor {
@@ -68,30 +78,40 @@ impl BookmarkEditor {
                     .default_value(value)
             })
         };
+        let shown =
+            |path: &Option<RemotePath>| path.as_ref().map(ToString::to_string).unwrap_or_default();
+        let port_text = |port: Option<u16>| port.map(|port| port.to_string()).unwrap_or_default();
         let (kind, host, port, user, path) = match &draft.destination {
             Destination::Sftp(target) => (
-                Kind::Sftp,
+                Kind::Server(Protocol::Sftp),
                 target.host.clone(),
-                target.port.map(|port| port.to_string()).unwrap_or_default(),
+                port_text(target.port),
                 target.user.clone().unwrap_or_default(),
-                target
-                    .path
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
+                shown(&target.path),
+            ),
+            Destination::Ftp(target) => (
+                Kind::Server(Protocol::of(&draft.destination).unwrap_or(Protocol::Ftp)),
+                target.host.clone(),
+                port_text(target.port),
+                target.user.clone().unwrap_or_default(),
+                shown(&target.path),
             ),
             Destination::Local { path } => (
                 Kind::Local,
                 String::new(),
                 String::new(),
                 String::new(),
-                path.as_ref().map(ToString::to_string).unwrap_or_default(),
+                shown(path),
             ),
         };
+        let hints = match kind {
+            Kind::Server(protocol) => protocol,
+            Kind::Local => Protocol::Sftp,
+        };
         let name = field("Defaults to the host", draft.name.clone(), window, cx);
-        let host = field("Host, address or ssh_config alias", host, window, cx);
-        let port = field("22", port, window, cx);
-        let user = field("From ssh_config", user, window, cx);
+        let host = field(hints.host_hint(), host, window, cx);
+        let port = field(hints.port_hint(), port, window, cx);
+        let user = field(hints.user_hint(), user, window, cx);
         let path = field("Login or home directory", path, window, cx);
         let key = field(
             "From ssh_config and the SSH agent",
@@ -120,7 +140,7 @@ impl BookmarkEditor {
             .collect::<Vec<(FolderId, SharedString)>>();
         let mut folders = folders;
         folders.sort_by_key(|(_, path)| path.to_lowercase());
-        let first = if kind == Kind::Sftp && draft.name.is_empty() {
+        let first = if kind != Kind::Local && draft.name.is_empty() {
             &host
         } else {
             &name
@@ -139,6 +159,20 @@ impl BookmarkEditor {
             folders,
             error: None,
             _submits: submits,
+        }
+    }
+
+    /// Switches the kind of favorite; the hints follow the protocol.
+    fn choose(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
+        self.kind = kind;
+        if let Kind::Server(protocol) = kind {
+            for (input, hint) in [
+                (&self.host, protocol.host_hint()),
+                (&self.port, protocol.port_hint()),
+                (&self.user, protocol.user_hint()),
+            ] {
+                input.update(cx, |input, cx| input.set_placeholder(hint, window, cx));
+            }
         }
     }
 
@@ -169,47 +203,35 @@ impl BookmarkEditor {
         };
         let (destination, identity_file) = match self.kind {
             Kind::Local => (Destination::Local { path }, None),
-            Kind::Sftp => {
+            Kind::Server(protocol) => {
                 let host = text(&self.host);
                 if host.is_empty() {
                     return Err("Enter the server's host name or address.".into());
                 }
-                let mut target =
-                    SftpTarget::new(&host).map_err(|_| format!("“{host}” is not a valid host."))?;
-                let port = text(&self.port);
-                if !port.is_empty() {
-                    target.port = Some(
-                        port.parse::<u16>()
-                            .ok()
-                            .filter(|port| *port != 0)
-                            .ok_or_else(|| format!("“{port}” is not a valid port."))?,
-                    );
-                }
-                let user = text(&self.user);
-                if !user.is_empty() {
-                    if user
-                        .chars()
-                        .any(|c| c.is_whitespace() || c.is_control() || c == '@')
-                    {
-                        return Err(format!("“{user}” is not a valid user name."));
-                    }
-                    target.user = Some(user);
-                }
-                target.path = path;
+                let shown = path.as_ref().map(ToString::to_string).unwrap_or_default();
+                let destination = server_form::destination(
+                    protocol,
+                    &host,
+                    &text(&self.port),
+                    &text(&self.user),
+                    &shown,
+                )?;
                 let key = text(&self.key);
-                let key = (!key.is_empty()).then(|| expand_home(&key));
+                let key =
+                    (protocol == Protocol::Sftp && !key.is_empty()).then(|| expand_home(&key));
                 if let Some(key) = &key
                     && !key.is_absolute()
                 {
                     return Err("The key file must be an absolute path.".into());
                 }
-                (Destination::Sftp(target), key)
+                (destination, key)
             }
         };
         let mut name = text(&self.name);
         if name.is_empty() {
             name = match &destination {
                 Destination::Sftp(target) => target.host.clone(),
+                Destination::Ftp(target) => target.host.clone(),
                 Destination::Local { path } => path
                     .as_ref()
                     .and_then(|path| path.file_name().map(str::to_owned))
@@ -300,17 +322,17 @@ impl Render for BookmarkEditor {
                 .child(Input::new(input))
         };
         let kind = self.kind;
-        let sftp_fields =
-            v_flex()
-                .gap_3()
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .child(field("Host", &self.host))
-                        .child(div().w(style::em(6.5)).child(field("Port", &self.port))),
-                )
-                .child(field("User", &self.user))
-                .child(
+        let server_fields = v_flex()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(field("Host", &self.host))
+                    .child(div().w(style::em(6.5)).child(field("Port", &self.port))),
+            )
+            .child(field("User", &self.user))
+            .when(kind == Kind::Server(Protocol::Sftp), |this| {
+                this.child(
                     v_flex().gap_1().child(label("Private key")).child(
                         h_flex()
                             .gap_2()
@@ -321,7 +343,8 @@ impl Render for BookmarkEditor {
                                 }),
                             )),
                     ),
-                );
+                )
+            });
         v_flex()
             .gap_3()
             .child(div().text_title().child(if self.id.is_some() {
@@ -332,13 +355,13 @@ impl Render for BookmarkEditor {
             .child(style::segmented(
                 "kind",
                 ControlSize::Regular,
-                &[(Kind::Sftp, "SFTP".into()), (Kind::Local, "Local".into())],
+                &Kind::CHOICES.map(|(kind, label)| (kind, label.into())),
                 kind,
                 {
                     let this = cx.entity().downgrade();
-                    move |kind, _, cx| {
+                    move |kind, window, cx| {
                         let _ = this.update(cx, |editor: &mut Self, cx| {
-                            editor.kind = kind;
+                            editor.choose(kind, window, cx);
                             cx.notify();
                         });
                     }
@@ -346,7 +369,7 @@ impl Render for BookmarkEditor {
                 cx,
             ))
             .child(field("Name", &self.name))
-            .when(kind == Kind::Sftp, |this| this.child(sftp_fields))
+            .when(kind != Kind::Local, |this| this.child(server_fields))
             .child(field("Directory", &self.path))
             .child(
                 v_flex()

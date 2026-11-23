@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
@@ -395,7 +395,7 @@ where
         }
         .into());
     }
-    let problem = describe(&rejected.error);
+    let problem = describe(&rejected.error, &rejected.certificate, SystemTime::now());
     if !problem.may_be_accepted {
         return Err(CertificateError::Untrusted {
             server: server.key(),
@@ -553,12 +553,24 @@ struct Problem {
     may_be_accepted: bool,
 }
 
-fn describe(error: &rustls::Error) -> Problem {
+/// Why the system rejected `certificate` with `error`. Where the system
+/// does not say clearly (macOS reports a self-signed certificate only by an
+/// error number), the certificate itself tells.
+fn describe(error: &rustls::Error, certificate: &[u8], now: SystemTime) -> Problem {
     use rustls::CertificateError as E;
+    let evident = || evident_problem(certificate, now);
+    let unclear = |what: String| (evident().map_or(what, str::to_owned), true);
     let (text, may_be_accepted) = match error {
         rustls::Error::InvalidCertificate(error) => match error {
             E::UnknownIssuer => (
-                "is not signed by an authority this computer trusts (it may be self-signed)".into(),
+                evident().map_or_else(
+                    || {
+                        "is not signed by an authority this computer trusts (it may be \
+                         self-signed)"
+                            .into()
+                    },
+                    str::to_owned,
+                ),
                 true,
             ),
             E::Expired | E::ExpiredContext { .. } => ("has expired".into(), true),
@@ -581,14 +593,38 @@ fn describe(error: &rustls::Error) -> Problem {
             {
                 ("is self-signed".into(), true)
             }
-            other => (format!("could not be verified ({other:?})"), true),
+            other => unclear(format!("could not be verified ({other:?})")),
         },
-        other => (format!("could not be verified ({other})"), true),
+        other => unclear(format!("could not be verified ({other})")),
     };
     Problem {
         text,
         may_be_accepted,
     }
+}
+
+/// What makes `certificate` untrustworthy on its face at `now`: that it
+/// has expired, is not valid yet, or names itself as its issuer.
+fn evident_problem(certificate: &[u8], now: SystemTime) -> Option<&'static str> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(certificate).ok()?;
+    let now = i64::try_from(now.duration_since(UNIX_EPOCH).ok()?.as_secs()).ok()?;
+    let validity = parsed.validity();
+    if now > validity.not_after.timestamp() {
+        Some("has expired")
+    } else if now < validity.not_before.timestamp() {
+        Some("is not valid yet")
+    } else if is_self_issued(&parsed) {
+        Some("is self-signed")
+    } else {
+        None
+    }
+}
+
+/// Whether `certificate` names itself as its issuer and is signed with its
+/// own key.
+fn is_self_issued(certificate: &x509_parser::certificate::X509Certificate<'_>) -> bool {
+    certificate.subject().as_raw() == certificate.issuer().as_raw()
+        && certificate.verify_signature(None).is_ok()
 }
 
 /// The question about `certificate`, with what it says about itself.

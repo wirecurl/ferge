@@ -38,7 +38,7 @@ rustls-platform-verifier = { version = "=0.7.1" }
 # rustls's certificate checks, to tell why one failed (the version rustls uses).
 rustls-webpki = { version = "=0.103.17", default-features = false, features = ["std"] }
 # What an untrusted certificate says about itself, for the question.
-x509-parser = { version = "=0.18.1" }
+x509-parser = { version = "=0.18.1", features = ["verify-aws"] }
 
 # Persistence. SQLite is bundled so every platform runs the same, tested version.
 rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled"] }

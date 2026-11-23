@@ -202,7 +202,7 @@ async fn asks_about_an_untrusted_certificate_and_pins_exactly_that_one() {
         prompt.fingerprint,
         Fingerprint::of(&identity.der).to_string()
     );
-    assert!(prompt.problem.contains("not signed"), "{}", prompt.problem);
+    assert_eq!(prompt.problem, "is self-signed");
     assert_eq!(prompt.names, ["localhost", "127.0.0.1"]);
     assert!(prompt.valid_from.unwrap() < prompt.valid_until.unwrap());
     assert!(
@@ -467,4 +467,32 @@ async fn offers_resumable_sessions_and_tells_when_the_server_wants_newer() {
         negotiated(&client, newer, Versions::Any).await.unwrap(),
         rustls::ProtocolVersion::TLSv1_3
     );
+}
+
+#[test]
+fn reads_the_reason_off_the_certificate_where_the_system_is_unclear() {
+    // How macOS reports a certificate it does not trust.
+    let unclear = rustls::Error::InvalidCertificate(rustls::CertificateError::Other(
+        rustls::OtherError(Arc::new(std::io::Error::other(
+            "“ferge-test” certificate is not trusted: -67843",
+        ))),
+    ));
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+    params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2026, 1, 1);
+    let der = params.self_signed(&key).unwrap().der().to_vec();
+    let day = |days: u64| UNIX_EPOCH + Duration::from_secs(days * 24 * 3600);
+    // 2025-07-01, 2026-07-01, 2024-07-01.
+    let (within, after, before) = (day(20_270), day(20_635), day(19_905));
+    let describe = |error: &rustls::Error, der: &[u8], now| describe(error, der, now).text;
+    assert_eq!(describe(&unclear, &der, within), "is self-signed");
+    assert_eq!(describe(&unclear, &der, after), "has expired");
+    assert_eq!(describe(&unclear, &der, before), "is not valid yet");
+    let now = SystemTime::now();
+    // Signed by an authority nobody here knows: the system's word stands.
+    let (_, signed) = signed();
+    assert!(describe(&unclear, &signed.der, now).contains("-67843"));
+    let unknown = rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer);
+    assert!(describe(&unknown, &signed.der, now).contains("not signed by an authority"));
 }

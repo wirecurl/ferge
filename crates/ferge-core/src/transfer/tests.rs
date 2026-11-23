@@ -862,6 +862,9 @@ struct ObjectStore {
     /// Like WebDAV instead: files appear while they are written, but
     /// cannot be resumed either.
     visible_while_written: bool,
+    /// Like ProFTPD by default (with `visible_while_written`): says it can
+    /// go on writing a file, but refuses when asked to.
+    refuses_resume: bool,
 }
 
 impl ObjectStore {
@@ -871,6 +874,7 @@ impl ObjectStore {
             staging: tempfile::tempdir().unwrap(),
             times_set: AtomicUsize::new(0),
             visible_while_written: false,
+            refuses_resume: false,
         })
     }
 
@@ -939,7 +943,7 @@ impl Remote for ObjectStore {
     }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            resume_writes: false,
+            resume_writes: self.refuses_resume,
             atomic_writes: !self.visible_while_written,
             set_modified: false,
             permissions: false,
@@ -968,6 +972,9 @@ impl Remote for ObjectStore {
         path: &RemotePath,
         offset: u64,
     ) -> crate::Result<Box<dyn FileWriter>> {
+        if self.refuses_resume && offset > 0 {
+            return Err(crate::Error::Unsupported("going on with an upload"));
+        }
         assert_eq!(offset, 0, "an object store cannot resume");
         if self.visible_while_written {
             return self.inner.open_writer(path, 0).await;
@@ -1137,4 +1144,44 @@ async fn rewrites_a_partial_file_from_the_start_where_the_target_cannot_resume()
     assert_eq!(files_below(to.path()), ["big.bin"]);
     assert_eq!(std::fs::read(to.path().join("big.bin")).unwrap(), data);
     assert_eq!(*slow.reads_from.lock().unwrap(), [0, 0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn starts_a_file_again_where_the_target_refuses_to_resume() {
+    let from = tempfile::tempdir().unwrap();
+    let to = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..8 * 1024 * 1024_u32)
+        .map(|i| (i.wrapping_mul(19) % 251) as u8)
+        .collect();
+    write(&from.path().join("big.bin"), &data);
+    let slow = Arc::new(Slow::default());
+    let store = Arc::new(ObjectStore {
+        visible_while_written: true,
+        refuses_resume: true,
+        ..Arc::into_inner(ObjectStore::new()).unwrap()
+    });
+    let (queue, _events) = TransferQueue::new(2);
+    let id = queue.enqueue(
+        TransferRequest {
+            source: Arc::clone(&slow) as Arc<dyn Remote>,
+            items: vec![path(&from.path().join("big.bin"))],
+            target: Arc::clone(&store) as Arc<dyn Remote>,
+            target_dir: path(to.path()),
+        },
+        Arc::new(FixedPolicy(ConflictAction::Skip)),
+    );
+    wait_for(&queue, id, |s| s.bytes_done > 2 * 1024 * 1024).await;
+    queue.pause(id);
+    assert_eq!(settled(&queue, id).await.state, TransferState::Paused);
+
+    queue.resume(id);
+    let done = settled(&queue, id).await;
+    assert_eq!(done.state, TransferState::Completed, "{:?}", done.errors);
+    assert_eq!(done.bytes_done, data.len() as u64, "counted once");
+    assert_eq!(files_below(to.path()), ["big.bin"]);
+    assert_eq!(std::fs::read(to.path().join("big.bin")).unwrap(), data);
+    // Asked to go on where it stopped, then from the start.
+    let reads = slow.reads_from.lock().unwrap().clone();
+    assert_eq!(reads.len(), 3, "{reads:?}");
+    assert!(reads[0] == 0 && reads[1] > 0 && reads[2] == 0, "{reads:?}");
 }

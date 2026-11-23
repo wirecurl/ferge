@@ -60,6 +60,9 @@ pub(super) struct Pool {
     security: Security,
     /// Whether `LIST -a` works (it lists hidden files on most servers).
     list_hidden: AtomicBool,
+    /// Whether the server refused to go on with an upload after `REST`,
+    /// although it offers `REST STREAM` (ProFTPD does by default).
+    pub(super) refuses_resume: AtomicBool,
     state: Mutex<State>,
     freed: Notify,
 }
@@ -119,6 +122,7 @@ impl Pool {
             password,
             security,
             list_hidden: AtomicBool::new(true),
+            refuses_resume: AtomicBool::new(false),
             state: Mutex::new(State {
                 idle: vec![session],
                 open: 1,
@@ -408,7 +412,9 @@ impl Lease {
         let offset = usize::try_from(offset).map_err(|_| Error::Unsupported("files this large"))?;
         self.run(Some(path), "STOR", move |ftp| {
             Box::pin(async move {
-                ftp.resume_transfer(offset).await?;
+                if offset > 0 {
+                    ftp.resume_transfer(offset).await?;
+                }
                 ftp.put_with_stream(&target).await
             })
         })

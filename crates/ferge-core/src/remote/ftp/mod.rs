@@ -16,6 +16,7 @@ mod listing;
 mod session;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -149,13 +150,20 @@ impl FtpRemote {
         let mut lease = self.session().await?;
         let features = self.pool.features;
         if features.mlst {
-            let line = lease.mlst(path).await?;
-            return listing::mlsd(line.trim_start())
-                .map(|(_, metadata)| metadata)
-                .ok_or_else(|| Error::Remote {
-                    path: path.clone(),
-                    message: format!("the server described it as {line:?}"),
-                });
+            // A refusal may mean that nothing is there, or anything else
+            // (ProFTPD: “cannot be listed”); `SIZE` and `CWD` tell.
+            match lease.mlst(path).await {
+                Ok(line) => {
+                    return listing::mlsd(line.trim_start())
+                        .map(|(_, metadata)| metadata)
+                        .ok_or_else(|| Error::Remote {
+                            path: path.clone(),
+                            message: format!("the server described it as {line:?}"),
+                        });
+                }
+                Err(error) if is_refusal(&error) => {}
+                Err(error) => return Err(error),
+            }
         }
         match lease.size(path).await {
             Ok(size) => {
@@ -222,7 +230,7 @@ impl Remote for FtpRemote {
     fn capabilities(&self) -> Capabilities {
         let features = self.pool.features;
         Capabilities {
-            resume_writes: features.rest,
+            resume_writes: features.rest && !self.pool.refuses_resume.load(Ordering::Relaxed),
             atomic_writes: false,
             set_modified: true,
             permissions: features.unix,
@@ -296,7 +304,14 @@ impl Remote for FtpRemote {
             }
         }
         let mut lease = self.session().await?;
-        let transfer = lease.store(path, offset).await?;
+        let transfer = match lease.store(path, offset).await {
+            Err(error) if offset > 0 && is_refusal(&error) => {
+                tracing::debug!(%path, %error, "the server does not go on with uploads");
+                self.pool.refuses_resume.store(true, Ordering::Relaxed);
+                return Err(Error::Unsupported("going on with an upload"));
+            }
+            transfer => transfer?,
+        };
         Ok(Box::new(FtpWriter {
             transfer: Some(transfer),
             lease: Some(lease),
@@ -364,6 +379,8 @@ impl Remote for FtpRemote {
     }
 
     async fn mkdir(&self, path: &RemotePath) -> Result<()> {
+        // ProFTPD answers that it made a folder that was there already.
+        self.ensure_free(path).await?;
         let mut lease = self.session().await?;
         let result = lease.mkdir(path).await;
         drop(lease);

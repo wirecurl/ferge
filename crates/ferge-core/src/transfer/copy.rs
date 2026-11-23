@@ -211,7 +211,18 @@ async fn copy_file(transfer: &Transfer, index: usize, file: &PlannedFile) -> Res
         let resumable = (unchanged && capabilities.resume_writes).then_some((&part, current.size));
         let offset = resume_offset(transfer, index, file, resumable).await;
         let (length, method) =
-            write_part(transfer, index, file, &part, offset, current.size).await?;
+            match write_part(transfer, index, file, &part, offset, current.size).await {
+                // The target said it could go on writing, but will not
+                // (ProFTPD unless configured to): start again.
+                Err(Error::Unsupported(what)) if offset > 0 => {
+                    transfer
+                        .trace
+                        .event("file.restart", json!({ "i": index, "why": what }));
+                    let offset = resume_offset(transfer, index, file, None).await;
+                    write_part(transfer, index, file, &part, offset, current.size).await?
+                }
+                written => written?,
+            };
         settle_length(transfer, file, length);
         if replace {
             target.rename_replace(&part, &destination).await?;

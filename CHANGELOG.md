@@ -9,8 +9,11 @@ All notable changes to ferge are listed here. The format follows
 ### Added
 
 - FTP with TLS: `ftp://` with `AUTH TLS`, `ftps://` with implicit TLS. Listings stream with
-  `MLSD` or `LIST`, uploads and downloads resume, several transfers share a small pool of
-  connections, and times and permissions are kept where the server allows it.
+  `MLSD` or `LIST`, uploads and downloads resume (an upload the server will not resume starts
+  again), several transfers share a small pool of connections, and times and permissions are
+  kept where the server allows it. Tested against vsftpd and ProFTPD. ferge offers FTP servers
+  TLS 1.2, so that every data connection can resume the control connection's session as the
+  servers demand, and TLS 1.3 only to servers that know nothing older.
 - Certificates the system does not trust are shown with their names, validity and fingerprint
   before ferge connects, and can be trusted once or for good; a remembered certificate that
   changes is refused. A server without encryption is used only after asking.

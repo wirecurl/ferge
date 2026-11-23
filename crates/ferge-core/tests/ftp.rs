@@ -1,6 +1,8 @@
-//! Integration tests against the FTP test server (vsftpd).
+//! Integration tests against the FTP test servers: vsftpd, which lists with
+//! `LIST`, and ProFTPD, which lists with `MLSD` and sets times with `MFMT`.
+//! What does not depend on the server runs against both.
 //!
-//! Start it with `./testserver/up.sh`, then run
+//! Start them with `./testserver/up.sh`, then run
 //! `cargo test -p ferge-core --test ftp -- --include-ignored`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test code")]
@@ -121,8 +123,55 @@ fn options(tls: FtpTls, port: u16, known: &Path) -> FtpOptions {
     options
 }
 
-fn explicit(known: &Path) -> FtpOptions {
-    options(FtpTls::Explicit, port("FERGE_TEST_FTP_PORT", 2121), known)
+/// The servers with explicit TLS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Server {
+    Vsftpd,
+    Proftpd,
+}
+
+impl Server {
+    fn port(self) -> u16 {
+        match self {
+            Self::Vsftpd => port("FERGE_TEST_FTP_PORT", 2121),
+            Self::Proftpd => port("FERGE_TEST_FTP_MLSD_PORT", 2124),
+        }
+    }
+}
+
+/// Runs each test against both servers, as `test::vsftpd` and
+/// `test::proftpd`.
+macro_rules! on_both_servers {
+    ($($test:ident),* $(,)?) => {$(
+        mod $test {
+            use super::Server;
+
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "needs the FTP test server (./testserver/up.sh)"]
+            async fn vsftpd() {
+                super::$test(Server::Vsftpd).await;
+            }
+
+            #[tokio::test(flavor = "multi_thread")]
+            #[ignore = "needs the FTP test server (./testserver/up.sh)"]
+            async fn proftpd() {
+                super::$test(Server::Proftpd).await;
+            }
+        }
+    )*};
+}
+
+on_both_servers!(
+    asks_about_the_certificate_and_lists_with_any_names,
+    streams_a_large_folder,
+    reads_writes_and_changes_files,
+    makes_folders_and_tells_what_is_missing,
+    many_operations_share_a_few_connections,
+    transfers_trees_up_and_down,
+);
+
+fn explicit(server: Server, known: &Path) -> FtpOptions {
+    options(FtpTls::Explicit, server.port(), known)
 }
 
 async fn connect(options: FtpOptions, interaction: &Arc<Scripted>) -> Result<FtpRemote, Error> {
@@ -130,10 +179,10 @@ async fn connect(options: FtpOptions, interaction: &Arc<Scripted>) -> Result<Ftp
 }
 
 /// A logged-in connection over explicit TLS.
-async fn session() -> (FtpRemote, tempfile::TempDir) {
+async fn session(server: Server) -> (FtpRemote, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let remote = connect(
-        explicit(&dir.path().join("known")),
+        explicit(server, &dir.path().join("known")),
         &Scripted::new(&["ferge"]),
     )
     .await
@@ -199,13 +248,13 @@ async fn names(remote: &dyn Remote, dir: &RemotePath) -> Vec<(String, EntryKind)
     names
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the FTP test server (./testserver/up.sh)"]
-async fn asks_about_the_certificate_and_lists_with_any_names() {
+async fn asks_about_the_certificate_and_lists_with_any_names(server: Server) {
     let dir = tempfile::tempdir().unwrap();
     let known = dir.path().join("known");
     let interaction = Scripted::new(&["ferge"]);
-    let remote = connect(explicit(&known), &interaction).await.unwrap();
+    let remote = connect(explicit(server, &known), &interaction)
+        .await
+        .unwrap();
     let prompts = interaction.certificates.lock().unwrap().clone();
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0].fingerprint, server_fingerprint());
@@ -222,13 +271,18 @@ async fn asks_about_the_certificate_and_lists_with_any_names() {
         ("with space.txt", EntryKind::File),
         ("nested", EntryKind::Directory),
         ("link-to-hello", EntryKind::Symlink),
-        ("dangling-link", EntryKind::Symlink),
     ] {
         assert!(
             tree.contains(&(expected.0.to_owned(), expected.1)),
             "{expected:?} in {tree:?}"
         );
     }
+    // ProFTPD leaves out links that point nowhere.
+    assert_eq!(
+        tree.contains(&("dangling-link".to_owned(), EntryKind::Symlink)),
+        server == Server::Vsftpd,
+        "{tree:?}"
+    );
     assert_eq!(
         read_all(&remote, &path("/home/ferge/tree/Ünïcödé ✓.txt"), 0)
             .await
@@ -236,8 +290,13 @@ async fn asks_about_the_certificate_and_lists_with_any_names() {
         13
     );
     // Folders whose names look like glob patterns list as themselves.
+    // ProFTPD refuses to make folders with a `*` in their name.
     let scratch = scratch(&remote, "glob").await;
-    let tricky = scratch.join(&ferge_core::EntryName::new("[a]*?").unwrap());
+    let pattern = match server {
+        Server::Vsftpd => "[a]*?",
+        Server::Proftpd => "[a]?",
+    };
+    let tricky = scratch.join(&ferge_core::EntryName::new(pattern).unwrap());
     remote.mkdir(&tricky).await.unwrap();
     remote
         .write(
@@ -257,11 +316,11 @@ async fn asks_about_the_certificate_and_lists_with_any_names() {
         certificate: HostKeyDecision::AcceptAndRemember,
         ..Arc::into_inner(Scripted::new(&["ferge"])).unwrap()
     });
-    connect(explicit(&known), &remember).await.unwrap();
+    connect(explicit(server, &known), &remember).await.unwrap();
     let again = Scripted::new(&["ferge"]);
     let again_options = FtpOptions {
         password: Some(SecretString::from("ferge")),
-        ..explicit(&known)
+        ..explicit(server, &known)
     };
     connect(again_options, &again).await.unwrap();
     assert!(again.certificates.lock().unwrap().is_empty());
@@ -271,10 +330,8 @@ async fn asks_about_the_certificate_and_lists_with_any_names() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the FTP test server (./testserver/up.sh)"]
-async fn streams_a_large_folder() {
-    let (remote, _dir) = session().await;
+async fn streams_a_large_folder(server: Server) {
+    let (remote, _dir) = session(server).await;
     let started = Instant::now();
     let mut stream = remote.list(&path("/home/ferge/many"));
     let first = stream.next().await.unwrap().unwrap();
@@ -290,9 +347,15 @@ async fn streams_a_large_folder() {
     assert_eq!(total, MANY_COUNT);
     assert!(chunks > 2, "{chunks}");
     // vsftpd reads and sorts the whole folder before it sends the first
-    // line, so when the first rows come is up to the server; what follows
-    // is up to ferge.
-    println!("first rows after {first_after:?}, all after {all_after:?}");
+    // line, so there the first rows come when the server is ready. ProFTPD
+    // sends as it reads, and ferge passes the rows on as they come.
+    // `ferge-bench` reports the times.
+    if server == Server::Proftpd {
+        assert!(
+            first_after < all_after / 2,
+            "first rows after {first_after:?}, all after {all_after:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -324,7 +387,9 @@ async fn a_declined_certificate_or_password_fails_the_connection() {
         certificate: HostKeyDecision::Reject,
         ..Arc::into_inner(Scripted::new(&["ferge"])).unwrap()
     });
-    let error = connect(explicit(&known), &decline).await.unwrap_err();
+    let error = connect(explicit(Server::Vsftpd, &known), &decline)
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, Error::Certificate(CertificateError::Rejected { .. })),
         "{error:?}"
@@ -335,11 +400,15 @@ async fn a_declined_certificate_or_password_fails_the_connection() {
     );
 
     let wrong = Scripted::new(&["wrong", "ferge"]);
-    connect(explicit(&known), &wrong).await.unwrap();
+    connect(explicit(Server::Vsftpd, &known), &wrong)
+        .await
+        .unwrap();
     assert_eq!(*wrong.password_retries.lock().unwrap(), [false, true]);
 
     let none = Scripted::new(&[]);
-    let error = connect(explicit(&known), &none).await.unwrap_err();
+    let error = connect(explicit(Server::Vsftpd, &known), &none)
+        .await
+        .unwrap_err();
     assert!(error.is_authentication(), "{error:?}");
 }
 
@@ -388,10 +457,8 @@ async fn asks_before_logging_in_without_encryption() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the FTP test server (./testserver/up.sh)"]
-async fn reads_writes_and_changes_files() {
-    let (remote, _dir) = session().await;
+async fn reads_writes_and_changes_files(server: Server) {
+    let (remote, _dir) = session(server).await;
     let dir = scratch(&remote, "ops").await;
     let name = |name: &str| dir.join(&ferge_core::EntryName::new(name).unwrap());
     let data: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 251) as u8).collect();
@@ -426,23 +493,38 @@ async fn reads_writes_and_changes_files() {
         Some(Error::AlreadyExists { .. })
     ));
 
-    // Resuming a write keeps the start and continues.
+    // Resuming a write keeps the start and continues, where the server
+    // lets it: ProFTPD refuses unless configured to (`AllowStoreRestart`),
+    // and then says it cannot.
     let mut writer = remote.open_writer(&name("half.bin"), 0).await.unwrap();
     writer
         .write(Bytes::copy_from_slice(&data[..1_000_000]))
         .await
         .unwrap();
     writer.finish().await.unwrap();
-    let mut writer = remote
-        .open_writer(&name("half.bin"), 1_000_000)
-        .await
-        .unwrap();
-    writer
-        .write(Bytes::copy_from_slice(&data[1_000_000..]))
-        .await
-        .unwrap();
-    assert_eq!(writer.finish().await.unwrap(), data.len() as u64);
-    assert_eq!(read_all(&remote, &name("half.bin"), 0).await, data);
+    assert!(remote.capabilities().resume_writes);
+    match (
+        server,
+        remote.open_writer(&name("half.bin"), 1_000_000).await,
+    ) {
+        (Server::Vsftpd, Ok(mut writer)) => {
+            writer
+                .write(Bytes::copy_from_slice(&data[1_000_000..]))
+                .await
+                .unwrap();
+            assert_eq!(writer.finish().await.unwrap(), data.len() as u64);
+            assert_eq!(read_all(&remote, &name("half.bin"), 0).await, data);
+        }
+        (Server::Proftpd, Err(Error::Unsupported(_))) => {
+            assert!(!remote.capabilities().resume_writes, "not asked again");
+            assert_eq!(
+                read_all(&remote, &name("half.bin"), 0).await,
+                &data[..1_000_000],
+                "left as it was"
+            );
+        }
+        (server, result) => panic!("{server:?}: {:?}", result.map(|_| ())),
+    }
 
     // Times.
     let old = UNIX_EPOCH + Duration::from_secs(1_600_000_000);
@@ -473,10 +555,8 @@ async fn reads_writes_and_changes_files() {
     cleanup(&remote, &dir).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the FTP test server (./testserver/up.sh)"]
-async fn makes_folders_and_tells_what_is_missing() {
-    let (remote, _dir) = session().await;
+async fn makes_folders_and_tells_what_is_missing(server: Server) {
+    let (remote, _dir) = session(server).await;
     let dir = scratch(&remote, "folders").await;
     let name = |name: &str| dir.join(&ferge_core::EntryName::new(name).unwrap());
     let file = name("data.bin");
@@ -521,10 +601,8 @@ async fn makes_folders_and_tells_what_is_missing() {
     cleanup(&remote, &dir).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the FTP test server (./testserver/up.sh)"]
-async fn many_operations_share_a_few_connections() {
-    let (remote, _dir) = session().await;
+async fn many_operations_share_a_few_connections(server: Server) {
+    let (remote, _dir) = session(server).await;
     let reads = (0..12).map(|_| {
         let remote = remote.clone();
         async move {
@@ -546,10 +624,8 @@ async fn many_operations_share_a_few_connections() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the FTP test server (./testserver/up.sh)"]
-async fn transfers_trees_up_and_down() {
-    let (remote, _dir) = session().await;
+async fn transfers_trees_up_and_down(server: Server) {
+    let (remote, _dir) = session(server).await;
     let ftp: Arc<dyn Remote> = Arc::new(remote.clone());
     let local: Arc<dyn Remote> = Arc::new(LocalRemote::new());
     let from = tempfile::tempdir().unwrap();

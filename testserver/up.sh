@@ -1,10 +1,12 @@
 #!/bin/sh
 # Starts the SFTP test servers on 127.0.0.1:2222 (with fixtures) and
 # 127.0.0.1:2223 (empty, for direct transfers between servers) and the FTP
-# server on 127.0.0.1:2121 (explicit TLS or none), :2990 (implicit TLS) and
-# :2122 (no TLS), passive ports 30000-30019, and waits until they are ready.
-# FERGE_TEST_PORT, FERGE_TEST_PORT2, FERGE_TEST_FTP_PORT, FERGE_TEST_FTPS_PORT,
-# FERGE_TEST_FTP_PLAIN_PORT, FERGE_TEST_FTP_PASV_MIN/_MAX and
+# servers on 127.0.0.1:2121 (vsftpd, explicit TLS or none), :2990 (implicit
+# TLS), :2122 (no TLS) and :2124 (ProFTPD with MLSD, explicit TLS), passive
+# ports 30000-30039, and waits until they are ready. FERGE_TEST_PORT,
+# FERGE_TEST_PORT2, FERGE_TEST_FTP_PORT, FERGE_TEST_FTPS_PORT,
+# FERGE_TEST_FTP_PLAIN_PORT, FERGE_TEST_FTP_MLSD_PORT,
+# FERGE_TEST_FTP_PASV_MIN/_MAX and
 # FERGE_TESTSERVER_NAME move them, e.g. to run a second set next to the first.
 #
 #   user ferge, password ferge (sudo with password; ferge-nopasswd,
@@ -56,5 +58,5 @@ Host ferge-test2
 CONFIG
 
 echo "ferge test servers ready: cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many"
-echo "FTP: cargo run -- ftp://ferge@127.0.0.1:${FERGE_TEST_FTP_PORT:-2121}/home/ferge/many (password ferge)"
+echo "FTP: cargo run -- ftp://ferge@127.0.0.1:${FERGE_TEST_FTP_PORT:-2121}/home/ferge/many (password ferge), with MLSD on port ${FERGE_TEST_FTP_MLSD_PORT:-2124}"
 echo "direct transfers between them: FERGE_DIRECT_ADDRESS=127.0.0.1:$port=sshd:22,127.0.0.1:$port2=sshd2:22"

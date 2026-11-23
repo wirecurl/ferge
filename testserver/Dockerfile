@@ -1,4 +1,4 @@
-# OpenSSH and vsftpd test servers for ferge's integration tests and benchmarks.
+# OpenSSH, vsftpd and ProFTPD test servers for ferge's integration tests and benchmarks.
 # Start it with ./testserver/up.sh; see CLAUDE.md.
 FROM alpine:3.24
 
@@ -8,7 +8,7 @@ FROM alpine:3.24
 # SSH client lets two test servers copy between each other directly. Host keys
 # are created when a container starts, so two containers differ.
 RUN apk add --no-cache openssh-server openssh-sftp-server openssh-client-default python3 sudo \
-        vsftpd openssl \
+        vsftpd proftpd proftpd-mod_tls openssl \
     && for user in ferge ferge-nopasswd ferge-sftponly ferge-nosudo; do \
            adduser -D -s /bin/sh "$user" && echo "$user:ferge" | chpasswd; \
        done \
@@ -23,11 +23,12 @@ RUN apk add --no-cache openssh-server openssh-sftp-server openssh-client-default
 
 COPY sshd_config /etc/ssh/sshd_config
 COPY vsftpd.conf /etc/ferge-ftp/vsftpd.conf
+COPY proftpd.conf /etc/ferge-ftp/proftpd.conf
 COPY generate_fixtures.py /usr/local/bin/generate_fixtures.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/generate_fixtures.py
 
-EXPOSE 22 21 990
+EXPOSE 22 21 990 2100 2101
 HEALTHCHECK --interval=1s --timeout=2s --start-period=120s --retries=3 \
     CMD test -f /run/ferge-fixtures-ready && nc -z 127.0.0.1 22
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

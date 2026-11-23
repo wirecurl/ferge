@@ -37,16 +37,20 @@ the above plus the SFTP integration tests. Actions in workflows are pinned to co
 ## Test server
 
 ```sh
-./testserver/up.sh               # OpenSSH on 127.0.0.1:2222 and :2223, vsftpd (see below), waits until ready
+./testserver/up.sh               # OpenSSH on 127.0.0.1:2222 and :2223, vsftpd and ProFTPD (see below), waits until ready
 ./testserver/down.sh             # stop and remove (fixtures are regenerated on next start)
 cargo test --workspace -- --include-ignored   # includes SFTP, FTP and direct-transfer tests
 ```
 
-vsftpd serves the same fixtures: explicit TLS (or none) on 127.0.0.1:2121, implicit TLS on
-:2990, no TLS at all on :2122, passive ports 30000–30019. Its self-signed certificate is new for
-every container and saved to `.testserver/ftp-cert.pem`. `FERGE_TEST_FTP_PORT`,
-`FERGE_TEST_FTPS_PORT`, `FERGE_TEST_FTP_PLAIN_PORT` and `FERGE_TEST_FTP_PASV_MIN`/`_MAX` move
-them.
+Two FTP servers serve the same fixtures. vsftpd lists with `LIST`: explicit TLS (or none) on
+127.0.0.1:2121, implicit TLS on :2990, no TLS at all on :2122. ProFTPD lists with `MLSD`, sets
+times with `MFMT`, refuses to resume uploads (its default) and says it made a folder that was
+there already: explicit TLS on :2124. Passive ports 30000–30039, the lower half vsftpd's. Both
+use one self-signed certificate, new for every container (kept when it restarts) and saved to
+`.testserver/ftp-cert.pem`. `FERGE_TEST_FTP_PORT`, `FERGE_TEST_FTPS_PORT`,
+`FERGE_TEST_FTP_PLAIN_PORT`, `FERGE_TEST_FTP_MLSD_PORT` and `FERGE_TEST_FTP_PASV_MIN`/`_MAX`
+move them. The FTP tests that do not depend on the server run against both
+(`…::vsftpd`, `…::proftpd`).
 
 The second server (`ferge-test2`, port 2223, no fixtures) exists for direct transfers between
 servers; inside the compose network the two reach each other as `sshd:22` and `sshd2:22`.

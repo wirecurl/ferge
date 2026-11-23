@@ -2,9 +2,10 @@
 #
 # sshd is the main test server. sshd2 is a second, empty one for direct
 # transfers between two servers; inside the compose network they reach each
-# other as sshd:22 and sshd2:22. ftp serves the same fixtures over FTP with
-# explicit and implicit TLS; its passive ports are mapped one to one, since
-# the server announces them.
+# other as sshd:22 and sshd2:22. ftp serves the same fixtures over FTP:
+# vsftpd with explicit, implicit and no TLS, ProFTPD (for MLSD) with explicit
+# TLS. The passive ports are mapped one to one, since the servers announce
+# them.
 name: ${FERGE_TESTSERVER_NAME:-ferge-testserver}
 
 services:
@@ -40,14 +41,15 @@ services:
     environment:
       FERGE_SERVICE: ftp
       FERGE_FTP_PASV_MIN: ${FERGE_TEST_FTP_PASV_MIN:-30000}
-      FERGE_FTP_PASV_MAX: ${FERGE_TEST_FTP_PASV_MAX:-30019}
+      FERGE_FTP_PASV_MAX: ${FERGE_TEST_FTP_PASV_MAX:-30039}
     ports:
       - "127.0.0.1:${FERGE_TEST_FTP_PORT:-2121}:21"
       - "127.0.0.1:${FERGE_TEST_FTPS_PORT:-2990}:990"
       - "127.0.0.1:${FERGE_TEST_FTP_PLAIN_PORT:-2122}:2100"
-      - "127.0.0.1:${FERGE_TEST_FTP_PASV_MIN:-30000}-${FERGE_TEST_FTP_PASV_MAX:-30019}:${FERGE_TEST_FTP_PASV_MIN:-30000}-${FERGE_TEST_FTP_PASV_MAX:-30019}"
+      - "127.0.0.1:${FERGE_TEST_FTP_MLSD_PORT:-2124}:2101"
+      - "127.0.0.1:${FERGE_TEST_FTP_PASV_MIN:-30000}-${FERGE_TEST_FTP_PASV_MAX:-30039}:${FERGE_TEST_FTP_PASV_MIN:-30000}-${FERGE_TEST_FTP_PASV_MAX:-30039}"
     healthcheck:
-      test: ["CMD-SHELL", "test -f /run/ferge-fixtures-ready && nc -z 127.0.0.1 21 && nc -z 127.0.0.1 990 && nc -z 127.0.0.1 2100"]
+      test: ["CMD-SHELL", "test -f /run/ferge-fixtures-ready && nc -z 127.0.0.1 21 && nc -z 127.0.0.1 990 && nc -z 127.0.0.1 2100 && nc -z 127.0.0.1 2101"]
       interval: 1s
       timeout: 2s
       start_period: 120s

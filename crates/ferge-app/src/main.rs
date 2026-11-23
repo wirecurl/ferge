@@ -108,6 +108,12 @@ fn main() -> ExitCode {
     }
     let started = Instant::now();
     let cli = Cli::parse();
+    if let Some(problem) = missing_display(|name| std::env::var_os(name)) {
+        // Without a display server, the window would exist but never be
+        // drawn: ferge would run without anyone seeing it.
+        eprintln!("ferge: {problem}");
+        return ExitCode::FAILURE;
+    }
     // Benchmarks must neither read nor change the user's files.
     logging::init(cli.bench.is_none());
     match worker::current_program() {
@@ -158,6 +164,20 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Why ferge cannot show a window, if it cannot: on Linux, neither a
+/// Wayland nor an X11 display is named, as in a plain SSH session.
+fn missing_display(variable: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<&'static str> {
+    if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        return None;
+    }
+    let named = |name: &str| variable(name).is_some_and(|value| !value.is_empty());
+    (!named("WAYLAND_DISPLAY") && !named("DISPLAY")).then_some(
+        "there is no display to show the window on: neither WAYLAND_DISPLAY nor DISPLAY is \
+         set. In an SSH session, set the one of the desktop to open the window there, such as \
+         WAYLAND_DISPLAY=wayland-1.",
+    )
+}
+
 fn open_main_window(
     options: workspace::Options,
     cx: &mut App,
@@ -193,6 +213,25 @@ fn open_main_window(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn refuses_to_start_without_a_display() {
+        let with = |set: &'static [(&'static str, &'static str)]| {
+            super::missing_display(move |name| {
+                set.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).into())
+            })
+        };
+        assert!(with(&[]).is_some(), "an SSH session");
+        assert!(
+            with(&[("WAYLAND_DISPLAY", "")]).is_some(),
+            "empty counts as unset"
+        );
+        assert!(with(&[("WAYLAND_DISPLAY", "wayland-1")]).is_none());
+        assert!(with(&[("DISPLAY", ":0")]).is_none());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn the_window_icon_decodes() {

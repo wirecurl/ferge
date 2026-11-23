@@ -19,6 +19,8 @@ All notable changes to ferge are listed here. The format follows
 
 ### Fixed
 
+- Started without a display, as in an SSH session, ferge says so and exits instead of running
+  without a window.
 - A certificate the system does not trust no longer shows up as an error in the log; ferge
   notes it and asks.
 

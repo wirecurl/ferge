@@ -2432,11 +2432,14 @@ name = "ferge-bench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64ct",
  "bytes",
  "clap",
  "dirs 7.0.0",
  "ferge-core",
  "futures",
+ "secrecy",
  "serde_json",
  "tempfile",
  "tokio",

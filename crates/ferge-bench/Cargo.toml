@@ -11,12 +11,15 @@ default-run = "ferge-bench"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+base64ct = { workspace = true, features = ["alloc"] }
 bytes.workspace = true
 clap.workspace = true
 dirs.workspace = true
 ferge-core.workspace = true
 futures.workspace = true
 serde_json.workspace = true
+secrecy.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
 

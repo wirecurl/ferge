@@ -1,7 +1,9 @@
-//! Throughput of the transfer engine against the test server, with OpenSSH's
-//! `sftp` as a point of reference. Reported, not judged: PLAN.md sets no
-//! throughput budget, and loopback numbers say little about real links.
+//! Throughput of the transfer engine against a test server, with the usual
+//! tool for the protocol (OpenSSH's `sftp`, `curl`) as a point of
+//! reference. Reported, not judged: PLAN.md sets no throughput budget, and
+//! loopback numbers say little about real links.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,16 +23,21 @@ pub(crate) const SIZE: u64 = 256 * 1024 * 1024;
 pub(crate) struct Throughput {
     pub upload: Duration,
     pub download: Duration,
-    /// The same download with OpenSSH's `sftp`, if it is installed.
-    pub openssh_download: Option<Duration>,
+    /// The same download with the reference tool, if it is installed.
+    pub reference: Option<Duration>,
 }
 
-/// Uploads and downloads a [`SIZE`] file through a [`TransferQueue`].
-pub(crate) async fn measure(
+/// Uploads and downloads a [`SIZE`] file through a [`TransferQueue`], then
+/// downloads it once more with `reference`.
+pub(crate) async fn measure<F, Fut>(
     remote: &Arc<dyn Remote>,
-    ssh_config: &Path,
     scratch: &Path,
-) -> anyhow::Result<Throughput> {
+    reference: F,
+) -> anyhow::Result<Throughput>
+where
+    F: FnOnce(RemotePath) -> Fut,
+    Fut: Future<Output = Option<Duration>>,
+{
     let local: Arc<dyn Remote> = Arc::new(LocalRemote::new());
     let source = scratch.join("throughput.bin");
     write_test_file(&source)?;
@@ -76,13 +83,13 @@ pub(crate) async fn measure(
         "the downloaded file has the wrong size"
     );
 
-    let openssh_download = openssh_get(ssh_config, remote_file.as_str(), scratch).await;
+    let reference = reference(remote_file.clone()).await;
     remote.delete_file(&remote_file).await?;
     remote.delete_dir(&remote_dir).await?;
     Ok(Throughput {
         upload,
         download,
-        openssh_download,
+        reference,
     })
 }
 
@@ -130,7 +137,11 @@ fn write_test_file(path: &Path) -> std::io::Result<()> {
 }
 
 /// Downloads `remote_path` with `sftp -b`; `None` if it is not installed or fails.
-async fn openssh_get(ssh_config: &Path, remote_path: &str, scratch: &Path) -> Option<Duration> {
+pub(crate) async fn openssh_get(
+    ssh_config: &Path,
+    remote_path: &str,
+    scratch: &Path,
+) -> Option<Duration> {
     let target = scratch.join("openssh.bin");
     let batch = format!("get \"{remote_path}\" \"{}\"\n", target.display());
     let batch_file = scratch.join("batch");

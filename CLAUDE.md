@@ -73,6 +73,7 @@ dirs, unicode, hidden files, symlinks incl. a dangling one). Tests that need the
 cargo build --release
 cargo run --release -p ferge-bench   # prints measurements and a budget table; exit 1 = budget missed
                                      # also reports transfer throughput (256 MiB up/down, vs. OpenSSH sftp)
+                                     # and FTP listings and throughput for both FTP servers (vs. curl)
 ```
 
 The harness starts the release binary in hidden `--bench startup|interaction` modes. The app
@@ -80,7 +81,8 @@ prints `ferge-bench:` markers to stderr; `ZED_MEASUREMENTS=1` makes GPUI print t
 every frame, which the harness attributes to the preceding input. Frame budget: 8.33 ms (120 Hz).
 
 `cargo run --release -p ferge-bench -- --between-only` only compares the routes between the two
-test servers (through this computer, direct push and pull, within one server).
+test servers (through this computer, direct push and pull, within one server); `--ftp-only` only
+measures FTP.
 
 Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many`,
 or over FTP `cargo run -- ftp://ferge@127.0.0.1:2121/home/ferge/many` (password `ferge`).

@@ -132,7 +132,7 @@ Fertig, wenn: Ein Ordner wandert zwischen den beiden Test-Containern direkt, mit
 
 ### Phase 4 – Weitere Protokolle
 
-FTP/FTPS, S3-kompatibel (AWS, R2, B2, MinIO), WebDAV. Integrationstests gegen vsftpd, MinIO und einen WebDAV-Server in Docker.
+FTP/FTPS, S3-kompatibel (AWS, R2, B2, MinIO), WebDAV. Integrationstests gegen vsftpd und ProFTPD, MinIO und einen WebDAV-Server in Docker.
 
 Reihenfolge: erst die Grundlagen, die alle drei brauchen, dann FTP/FTPS, S3 und WebDAV, jedes mit Testserver, Integrationstests und Oberfläche, bevor das nächste anfängt.
 
@@ -149,14 +149,14 @@ Reihenfolge: erst die Grundlagen, die alle drei brauchen, dann FTP/FTPS, S3 und 
 - **Zugangsdaten:** `SecretId` unterscheidet nach Protokoll (FTP-Passwort, S3-Secret-Key zum Access Key und Endpunkt, WebDAV-Passwort). Die bestehenden SFTP-Einträge behalten ihren Namen. Gefragt wird wie bei SFTP über `Interaction::password`, mit dem Protokoll im `Account`.
 - **TLS:** rustls mit den Wurzelzertifikaten des Systems, eine Konfiguration für FTPS, S3 und WebDAV. Ein Zertifikat, dem das System nicht traut (selbst signiert, abgelaufen, falscher Name), führt zu einer Rückfrage wie bei unbekannten Host-Keys: Aussteller, Gültigkeit, Namen und SHA-256-Fingerabdruck, „einmal“ oder „merken“. Gemerkte Zertifikate liegen pro Host und Port in `known_certificates` im Datenordner, wie `known_hosts` eine Zeile pro Server; ändert sich ein gemerktes Zertifikat und traut das System dem neuen nicht, wird abgelehnt und gesagt, warum. Unverschlüsseltes FTP und `dav://` gehen nur nach ausdrücklicher Zustimmung pro Server, weil Passwort und Daten dann im Klartext laufen.
 
-Stand: Die Grundlagen sind da (Fähigkeiten, `Remote::destination()`, gemeinsamer Verbindungsaufbau, Zugangsdaten nach Protokoll, TLS mit Rückfrage), ebenso FTP/FTPS mit Testserver, Integrationstests, Protokollwahl in Quick Connect und Favoriten und den Rückfragen in der App. Gemessen gegen vsftpd: `many/` ist nach rund 370 ms vollständig gelistet; die ersten Zeilen kommen nach rund 270 ms, weil vsftpd den Ordner erst ganz liest und sortiert. Offen bei FTP: Messungen in `ferge-bench` (Listing und Durchsatz), ein Server mit `MLSD` im Testaufbau (vsftpd kann es nicht; der Parser ist nur per Unit-Test geprüft).
+Stand: Die Grundlagen sind da (Fähigkeiten, `Remote::destination()`, gemeinsamer Verbindungsaufbau, Zugangsdaten nach Protokoll, TLS mit Rückfrage), ebenso FTP/FTPS mit Testserver, Integrationstests, Protokollwahl in Quick Connect und Favoriten und den Rückfragen in der App. Zweiter Testserver ProFTPD (`MLSD`, `MFMT`); die serverunabhängigen FTP-Tests laufen gegen beide. Er hat drei Eigenheiten aufgedeckt, die ferge jetzt beherrscht: Er gibt auf Datenverbindungen keine neuen TLS-1.3-Tickets aus, rustls nutzt jedes nur einmal, also scheiterte die dritte Datenverbindung (ferge bietet FTP-Servern deshalb TLS 1.2 an, dessen Sitzungen sich beliebig oft fortsetzen lassen, und TLS 1.3 nur Servern ohne 1.2); er verweigert standardmäßig fortgesetzte Uploads (die Datei beginnt dann von vorn); und `MKD` auf einen vorhandenen Ordner meldet Erfolg (ferge prüft vorher). `ferge-bench` misst FTP (`--ftp-only`), gegen `curl`: vsftpd zeigt die ersten Zeilen von `many/` nach rund 260 ms und ist nach rund 340 ms fertig, weil es den Ordner erst ganz liest und sortiert; ProFTPD nach rund 15 ms bzw. 3,7 s (der Server ist langsam, ferge reicht die Zeilen weiter, wie sie kommen). Durchsatz über Loopback auf Höhe von `curl` (Download vsftpd 1,2 GB/s gegen 0,9 GB/s, ProFTPD 1,5 gegen 1,4 GB/s).
 
 **FTP/FTPS** (`suppaftp` mit tokio und rustls)
 
 - Listing über `MLSD`, sonst `LIST` mit dem Unix- und dem DOS-Format, Zeitstempel über `MLSD` oder `MDTM`. Das Listing wird beim Lesen in Stücken an die UI gereicht.
 - Ein Steuerkanal für den Browser, eigene Verbindungen für Transfers (FTP kann pro Verbindung nur eine Datei übertragen); Passiv-Modus (`EPSV`, sonst `PASV`), TLS-Session-Wiederverwendung auf dem Datenkanal, weil vsftpd und andere sie verlangen.
 - Fortsetzen mit `REST` + `STOR` bzw. `RETR`, Umbenennen mit `RNFR`/`RNTO` (ohne Überschreiben vorher geprüft), Zeitstempel mit `MFMT`, wo angeboten, Rechte mit `SITE CHMOD`, Keepalive mit `NOOP`.
-- Testserver: vsftpd mit explizitem und implizitem TLS und einem selbst signierten Zertifikat, Passivports fest gemappt, dieselben Fixtures `many/` und `tree/` wie beim SSH-Server.
+- Testserver: vsftpd mit explizitem und implizitem TLS und einem selbst signierten Zertifikat, dazu ProFTPD für `MLSD`, Passivports fest gemappt, dieselben Fixtures `many/` und `tree/` wie beim SSH-Server.
 
 **S3** (`opendal`, Dienst `s3`)
 

@@ -11,6 +11,7 @@
 mod app;
 mod between;
 mod core;
+mod ftp;
 mod report;
 mod stats;
 mod transfer;
@@ -58,6 +59,9 @@ struct Cli {
     /// Only compare the routes between the two test servers.
     #[arg(long)]
     between_only: bool,
+    /// Only measure listings and throughput over FTP.
+    #[arg(long)]
+    ftp_only: bool,
 }
 
 fn workspace_root() -> PathBuf {
@@ -85,6 +89,10 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
         measure_between(&ssh_config).await?;
         return Ok(true);
     }
+    if cli.ftp_only {
+        measure_ftp(&root, cli.runs).await?;
+        return Ok(true);
+    }
     let binary = cli.app.unwrap_or_else(|| app::default_binary(&root));
     ensure!(
         binary.exists(),
@@ -110,6 +118,7 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
     let core = measure_core(&ssh_config, &large_dir, cli.runs).await?;
     measure_transfers(&ssh_config).await?;
     measure_between(&ssh_config).await?;
+    measure_ftp(&root, cli.runs).await?;
     let ui = measure_ui(&app).await?;
     let verdicts = verdicts(&startup, &core, &ui);
     println!();
@@ -180,7 +189,46 @@ async fn measure_transfers(ssh_config: &Path) -> anyhow::Result<()> {
     );
     let remote = core::connect(ssh_config, "ferge-test").await?;
     let scratch = tempfile::tempdir()?;
-    let result = transfer::measure(&remote, ssh_config, scratch.path()).await?;
+    let scratch = scratch.path();
+    let result = transfer::measure(&remote, scratch, |file| async move {
+        transfer::openssh_get(ssh_config, file.as_str(), scratch).await
+    })
+    .await?;
+    print_throughput(&result, "OpenSSH sftp");
+    Ok(())
+}
+
+/// Listings and throughput over FTP, for both test servers; reported, as
+/// there is no budget for them.
+async fn measure_ftp(root: &Path, runs: usize) -> anyhow::Result<()> {
+    let state = root.join(".testserver");
+    let many = RemotePath::parse("/home/ferge/many")?;
+    for server in ftp::servers() {
+        println!("FTP over TLS ({}), {runs} runs…", server.name);
+        let Some(remote) = ftp::connect(&server, &state).await? else {
+            println!("  skipped: nothing answers on port {}", server.port);
+            continue;
+        };
+        let listing = core::listing(&remote, &many, runs).await?;
+        ensure!(
+            listing.entries == LARGE_DIRECTORY,
+            "expected {LARGE_DIRECTORY} entries in {many}, found {}",
+            listing.entries
+        );
+        println!("  first chunk:     {}", listing.first_chunk);
+        println!("  complete:        {}", listing.complete);
+        let scratch = tempfile::tempdir()?;
+        let (scratch, server) = (scratch.path(), &server);
+        let result = transfer::measure(&remote, scratch, |file| async move {
+            ftp::curl_get(server, &file, transfer::SIZE, scratch).await
+        })
+        .await?;
+        print_throughput(&result, "curl");
+    }
+    Ok(())
+}
+
+fn print_throughput(result: &transfer::Throughput, reference: &str) {
     #[expect(
         clippy::cast_precision_loss,
         reason = "megabytes per second need no exact bytes"
@@ -196,14 +244,14 @@ async fn measure_transfers(ssh_config: &Path) -> anyhow::Result<()> {
         ms(result.download),
         rate(result.download)
     );
-    if let Some(openssh) = result.openssh_download {
+    if let Some(elapsed) = result.reference {
         println!(
-            "  OpenSSH sftp:    {} ({:.0} MB/s) for comparison",
-            ms(openssh),
-            rate(openssh)
+            "  {:<17}{} ({:.0} MB/s) for comparison",
+            format!("{reference}:"),
+            ms(elapsed),
+            rate(elapsed)
         );
     }
-    Ok(())
 }
 
 struct UiResults {

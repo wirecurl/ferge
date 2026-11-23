@@ -1279,6 +1279,10 @@ impl Transfer {
             self.make_plan(shared).await?
         };
         self.set_state(TransferState::Running, shared);
+        let route = self.preferred_route(shared);
+        if matches!(route, Route::DirectPush | Route::DirectPull) {
+            direct::ask(self, shared, &plan).await;
+        }
         let (problems, unusable) = plan.create_dirs(self.target().as_ref()).await;
         for error in problems {
             self.control().record_error(error);
@@ -1299,7 +1303,7 @@ impl Transfer {
             target: Arc::clone(&self.target()),
             target_dir: self.target_dir.clone(),
         });
-        match self.preferred_route(shared) {
+        match route {
             Route::DirectPush | Route::DirectPull => {
                 match direct::run(self, shared, &plan).await? {
                     direct::Outcome::Finished => {}

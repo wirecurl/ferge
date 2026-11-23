@@ -104,13 +104,7 @@ pub(super) async fn run(
     shared: &Arc<Shared>,
     plan: &Arc<Plan>,
 ) -> Result<Outcome> {
-    let pending: Vec<usize> = plan
-        .files
-        .iter()
-        .enumerate()
-        .filter(|(_, file)| lock(&file.state).status == FileStatus::Pending)
-        .map(|(index, _)| index)
-        .collect();
+    let pending = pending(plan);
     if pending.is_empty() {
         return Ok(Outcome::Finished);
     }
@@ -276,6 +270,26 @@ fn sides_of(transfer: &Transfer, mode: Mode) -> (Arc<dyn Remote>, Arc<dyn Remote
 
 /// Asks once per transfer whether the servers may copy directly, if they
 /// could at all; `Err` says why not.
+/// The files of `plan` still to be copied.
+fn pending(plan: &Plan) -> Vec<usize> {
+    plan.files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| lock(&file.state).status == FileStatus::Pending)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Asks whether the servers may copy directly, if there is anything to
+/// copy, before anything is made on either of them. [`run`] goes by the
+/// answer.
+pub(super) async fn ask(transfer: &Transfer, shared: &Shared, plan: &Plan) {
+    if !pending(plan).is_empty() {
+        // Why not is said again by `run`.
+        let _ = approve(transfer, shared).await;
+    }
+}
+
 async fn approve(transfer: &Transfer, shared: &Shared) -> std::result::Result<(), String> {
     let options = &shared.options.direct;
     let mut reasons = Vec::new();

@@ -28,6 +28,8 @@ All notable changes to ferge are listed here. The format follows
   notes it and asks.
 - Enter answers the question about copying directly between two servers with "Copy directly",
   the button it highlights.
+- ferge asks whether two servers may copy directly before it makes any folder on the target;
+  until now the folders of the transfer were there already while the question was open.
 
 ## [0.1.0] - 2026-11-22
 

@@ -624,10 +624,13 @@ async fn next_job_reports(source: &SftpRemote, target: &SftpRemote, job: &str, t
     assert_clean(target, &snapshot).await;
 }
 
-/// Answers every question about copying directly with "no".
+/// Answers every question about copying directly with "no", and notes
+/// whether `look` existed when asked.
 #[derive(Debug, Default)]
 struct Declines {
     asked: std::sync::Mutex<Vec<DirectRequest>>,
+    look: Option<(SftpRemote, RemotePath)>,
+    existed: std::sync::Mutex<Vec<bool>>,
 }
 
 #[async_trait]
@@ -641,6 +644,10 @@ impl ConflictResolver for Declines {
 
     async fn approve_direct(&self, request: DirectRequest) -> DirectDecision {
         self.asked.lock().unwrap().push(request);
+        if let Some((remote, path)) = &self.look {
+            let exists = remote.lstat(path).await.is_ok();
+            self.existed.lock().unwrap().push(exists);
+        }
         DirectDecision::Relay
     }
 }
@@ -655,7 +662,10 @@ async fn asks_before_copying_directly() {
     let target_dir = scratch(&target, "declined-dst").await;
     let traces = tempfile::tempdir().unwrap();
     let (queue, _events) = TransferQueue::with_options(options(RoutePolicy::Auto, traces.path()));
-    let resolver = Arc::new(Declines::default());
+    let resolver = Arc::new(Declines {
+        look: Some((target.clone(), target_dir.join(&name("tree")))),
+        ..Declines::default()
+    });
     let id = queue.enqueue(
         TransferRequest {
             source: Arc::new(source.clone()),
@@ -680,6 +690,8 @@ async fn asks_before_copying_directly() {
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].source_id, format!("ferge@127.0.0.1:{one}"));
     assert_eq!(asked[0].target_id, format!("ferge@127.0.0.1:{two}"));
+    // Nothing was made on the target before the answer.
+    assert_eq!(*resolver.existed.lock().unwrap(), [false]);
     // Nothing was set up on the servers.
     assert!(
         !trace(&snapshot)

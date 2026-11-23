@@ -27,6 +27,25 @@
     </ul>
   </description>
 
+  <screenshots>
+    <screenshot type="default">
+      <caption>This computer and a server side by side, with uploads in the transfer queue</caption>
+      <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/hero-light.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Favorites, hosts from the SSH configuration and recent connections</caption>
+      <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/servers.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A spreadsheet in the preview</caption>
+      <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/preview.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Working as root on a server, with the inspector</caption>
+      <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/root.png</image>
+    </screenshot>
+  </screenshots>
+
   <launchable type="desktop-id">com.wirecurl.ferge.desktop</launchable>
   <provides>
     <binary>ferge</binary>

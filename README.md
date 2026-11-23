@@ -1,85 +1,130 @@
-<img src="packaging/linux/icons/hicolor/scalable/apps/com.wirecurl.ferge.svg" width="96" height="96" alt="">
+<div align="center">
+
+<img src="packaging/linux/icons/hicolor/scalable/apps/com.wirecurl.ferge.svg" width="112" height="112" alt="">
 
 # ferge
 
-A fast file transfer client for Linux and macOS, written in Rust with
-[GPUI](https://www.gpui.rs/). ferge is keyboard-first, renders on the GPU and keeps every
-network and disk operation off the UI thread, so folders with 100,000 entries scroll, sort and
-filter without dropping a frame.
+**A fast, keyboard-first file transfer client for Linux and macOS.**<br>
+SFTP, FTP and FTPS in a native app that renders on the GPU and never makes you wait.
 
-Status: **0.1.0**, the first release (see [CHANGELOG.md](CHANGELOG.md)). Browsing, previews,
-file operations and transfers between this computer and SFTP servers work, with favorites,
-history, saved passwords and working as root; FTP/FTPS, S3, WebDAV and sync follow in later
-phases (see [PLAN.md](PLAN.md)).
+[![CI](https://github.com/wirecurl/ferge/actions/workflows/ci.yml/badge.svg)](https://github.com/wirecurl/ferge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/wirecurl/ferge?label=release)](https://github.com/wirecurl/ferge/releases/latest)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
+![Linux and macOS](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)
 
-The window follows the dual-pane concept of classic file transfer clients: this computer on
-the left, a server on the right. Each side switches between its files and a server panel with
-favorites, the hosts from `~/.ssh/config`, recent connections and Quick Connect.
+[Install](#install) · [Features](#features) · [Keyboard](#keyboard) · [Building](#from-source) · [Changelog](CHANGELOG.md)
+
+</div>
+
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.png">
+  <img src="docs/screenshots/hero-light.png" alt="ferge with a local website project on the left and the same site on an SFTP server on the right; below, the transfer queue uploads a video, an archive and a folder of photos.">
+</picture>
+
+## Why ferge
+
+- **Fast where it counts.** Folders with 100,000 entries scroll, sort and filter without
+  dropping a frame. Listings stream in while the server is still sending, and every network and
+  disk operation stays off the UI thread.
+- **Transfers you can trust.** Pause in the middle of a file, quit, come back tomorrow: ferge
+  picks up where it stopped. Nothing is overwritten without asking, and half-written files never
+  appear under their real name.
+- **Made for the keyboard.** Every action has a key, the command palette finds commands, servers,
+  tabs and files, and type-to-filter works in every folder.
+- **At home on your system.** Your `~/.ssh/config`, keys, agent and `known_hosts` just work;
+  passwords go to the desktop keyring; fonts, theme and font size follow the desktop.
+- **Free software**, written in Rust with [GPUI](https://www.gpui.rs/), licensed under the GPL.
 
 ## Features
 
-- Transfers between any two panes or tabs: uploads, downloads and server-to-server copies of
-  files and whole folders. Copy with Ctrl+C / Ctrl+V, F5 into the other pane, or drag and
-  drop, including files dropped from the desktop's file manager. Local files can also be dragged
-  out of ferge into other applications.
-- A transfer queue with progress, speed and time left; up to four files in parallel. Transfers
-  can be paused and resumed in the middle of a file. Files are written as `name.ferge-part` and
-  renamed when complete, keeping their modification time; cancelling removes partial files.
-- Existing files are not overwritten silently: replace, skip or keep both, optionally for the
-  rest of a transfer. A folder that exists already is asked about once: merge into it, skip it
-  or keep both. A symbolic link where a folder goes is never followed.
-- SFTP reads and writes are pipelined (16 requests in flight, up to 255 KiB each) over separate
+### Two panes, any direction
+
+This computer on the left, a server on the right, in as many tabs as you like. Copy with
+<kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>V</kbd>, press <kbd>F5</kbd> to send the
+selection to the other side, or drag and drop, also to and from your desktop's file manager.
+Uploads, downloads and copies between two servers all go through the same queue: up to four
+files in parallel, with progress, speed and time left.
+
+Between two SSH servers, ferge can copy **directly**: the source pushes or the target pulls over
+their own connection, with a key that only works for that job and expires. The copy goes on when
+ferge quits, and every server is left exactly as it was found.
+
+### Your servers, one keystroke away
+
+<img src="docs/screenshots/servers.png" alt="The server panel with favorites in folders, the hosts from ~/.ssh/config and recent connections.">
+
+Favorites in folders, every host from `~/.ssh/config`, recent connections and Quick Connect in
+one panel. Start typing to search, press <kbd>Enter</kbd> to connect.
+
+### Look inside files, even on servers
+
+<img src="docs/screenshots/preview.png" alt="A spreadsheet previewed as a grid with a tab for each sheet.">
+
+Press <kbd>Space</kbd> to preview the selected file, and keep moving through the folder with the
+arrow keys. ferge shows text, images, spreadsheets (`xlsx`, `ods`, `csv`, …), Word, PowerPoint
+and OpenDocument files and PDF pages, all built in and all the same for files on a server.
+Documents are read in a separate, memory-limited process, so a damaged or hostile file cannot
+take ferge down.
+
+### Root without a root login
+
+<img src="docs/screenshots/root.png" alt="A pane working as root on /etc/nginx, its header tinted, next to the inspector with editable permissions.">
+
+On any SSH server where your account may use sudo, one click switches a pane to root in the same
+folder. Nothing to set up on the server: ferge runs `sftp-server` through `sudo` on the existing
+connection and only asks for a password if sudo needs one. The tinted header reminds you while it
+lasts. The inspector (<kbd>Ctrl</kbd>+<kbd>I</kbd>) shows the details of the selection and lets
+you change permissions.
+
+### Everything from the keyboard
+
+<p align="center">
+  <img src="docs/screenshots/palette.png" width="640" alt="The command palette, showing commands with their shortcuts, a file and servers for the query 'show'.">
+</p>
+
+<kbd>Ctrl</kbd>+<kbd>K</kbd> opens the command palette: commands with their shortcuts, servers,
+tabs and the files of open folders, all in one search. See [Keyboard](#keyboard) for the full
+list.
+
+### And also
+
+- **SFTP** via [russh](https://github.com/Eugeny/russh): agent, key files (with passphrase
+  prompt), password and keyboard-interactive login. `~/.ssh/config` with aliases, `ProxyCommand`,
+  `IdentityFile`, `Include`, `Match all` and more. Reads and writes are pipelined over separate
   data channels, so transfers never block browsing.
-- Two file browsers per tab, side by side (one in narrow windows). A server panel in each:
-  favorites in folders, `~/.ssh/config` hosts, recent connections, Quick Connect, and a search
-  that connects with Enter. Favorites and history are stored in SQLite in the data directory
-  (`~/.local/share/ferge` on Linux).
-- Work as root on any SSH server where your account may use sudo, without logging in as root
-  and without setting anything up: the shield button in a pane's header (or "Open as root" /
-  "Work as root" where the server refused access) switches the pane to root in the same folder.
-  ferge finds the server's `sftp-server`, runs it through `sudo` on the existing connection and
-  asks for the sudo password only if sudo needs one (a saved login password is tried first; the
-  sudo password can be remembered like any other). The pane header is tinted while it lasts.
-- File operations: new folder and file, rename in place, duplicate, delete (folders with their
-  contents, after asking), copy address; also from a row's context menu.
-- An inspector with the details of the selection and editable permissions; optional Kind and
-  Permissions columns; hidden files on demand.
-- Passwords and key passphrases can be remembered: in the Secret Service (GNOME Keyring,
-  KeePassXC, KWallet) on Linux and the Keychain on macOS. Without a credential service, ferge
-  uses an encrypted file (Argon2id + XChaCha20-Poly1305) protected by a master password.
-  Passwords are only saved after they worked; a saved password the server rejects is asked for
-  again. `FERGE_SECRET_STORE=file` forces the encrypted file.
-- SFTP via [russh](https://github.com/Eugeny/russh): SSH agent, key files (with passphrase
-  prompt), keyboard-interactive and password authentication.
-- Reads `~/.ssh/config`: host aliases, `HostName`, `User`, `Port`, `IdentityFile`,
-  `IdentitiesOnly`, `ProxyCommand`, `UserKnownHostsFile`, `HostKeyAlias`, `Include`,
-  `Match all`.
-- Strict host key checking against `known_hosts` with OpenSSH semantics (hashed names,
-  wildcards, `@revoked`). Unknown keys are confirmed in a dialog; changed keys are refused.
-- Listings stream in while the server is still sending, are cached per connection and
-  revalidated in the background. Going back is instant.
-- Natural, case-insensitive sorting by name, size or date (folders first) and type-to-filter.
-- Uses the desktop's interface and fixed-width fonts and its light or dark preference, and
-  follows changes to them while running; respects server-side decorations on Wayland
-  compositors such as niri. Theme, fonts and font size can be changed in the settings window
-  or in a settings file.
+- **FTP and FTPS** (explicit and implicit TLS) with resumable transfers. Certificates the system
+  does not trust are shown with their names, validity and fingerprint before ferge connects.
+- **Strict host key checking** with OpenSSH semantics: hashed names, wildcards, `@revoked`.
+  Unknown keys are confirmed, changed keys are refused.
+- **Safe transfers:** files are written as `name.ferge-part` and renamed when complete, keeping
+  their modification time. Existing files and folders are asked about: replace, skip, keep both
+  or merge. Transfers continue after a lost connection and after a restart.
+- **Saved passwords** in the Secret Service (GNOME Keyring, KeePassXC, KWallet) or the macOS
+  Keychain, or in a file encrypted with Argon2id and XChaCha20-Poly1305. A password is only saved
+  after it worked.
+- **File operations:** new folder and file, rename in place, duplicate, delete, copy address.
+- **Native on Linux:** Wayland and X11, light and dark following the desktop, the desktop's fonts
+  via the XDG portal, server-side decorations on compositors such as niri.
 
 ## Install
 
 Every release has packages on the [releases page](https://github.com/wirecurl/ferge/releases):
 
-- **macOS** 11 or newer, Apple silicon and Intel: `brew install --cask wirecurl/tap/ferge`, or
-  the `.dmg`. ferge is not signed with an Apple Developer ID yet, so macOS asks before the
-  first start: allow it under System Settings → Privacy & Security → Open Anyway.
-- **Debian, Ubuntu** (22.04 or newer): `sudo apt install ./ferge_0.1.0_amd64.deb`
-- **Fedora, openSUSE**: `sudo dnf install ./ferge-0.1.0-1.x86_64.rpm`, or `sudo zypper install`
-  with the same file.
-- **Arch, CachyOS**: `makepkg -si` in `packaging/aur/ferge` builds the package from source.
-- **Any other Linux** with glibc 2.35 or newer: unpack the tarball into `~/.local`, with
-  `tar -xzf ferge-0.1.0-x86_64-linux.tar.gz -C ~/.local --strip-components=1`.
+| System | How |
+|---|---|
+| **macOS** 11+, Apple silicon and Intel | `brew install --cask wirecurl/tap/ferge`, or the `.dmg` |
+| **Debian, Ubuntu** 22.04+ | `sudo apt install ./ferge_0.1.0_amd64.deb` |
+| **Fedora, openSUSE** | `sudo dnf install ./ferge-0.1.0-1.x86_64.rpm` (or `zypper install`) |
+| **Arch, CachyOS** | `makepkg -si` in [`packaging/aur/ferge`](packaging/aur/ferge) |
+| **Any other Linux** with glibc 2.35+ | `tar -xzf ferge-0.1.0-x86_64-linux.tar.gz -C ~/.local --strip-components=1` |
 
 Packages for aarch64 Linux are there as well. On Linux, ferge draws with Vulkan; Mesa provides a
 driver for most graphics cards.
+
+ferge is not signed with an Apple Developer ID yet, so macOS asks before the first start: allow it
+under System Settings → Privacy & Security → Open Anyway.
 
 ### From source
 
@@ -111,9 +156,19 @@ sed -i "s|^Exec=ferge|Exec=$HOME/.cargo/bin/ferge|" ~/.local/share/applications/
 ferge                                   # this computer on the left, the servers on the right
 ferge myserver                          # an ssh_config alias, opened on the right
 ferge sftp://alice@example.org:2222/srv # user, port and start directory
+ferge ftps://alice@ftp.example.org/www  # FTP over TLS (ftp:// asks the server for TLS first)
 ferge /var/log                          # local folder
 ferge -F ./ssh_config myserver          # use another SSH client configuration
 ```
+
+## Keyboard
+
+The essentials: arrow keys and <kbd>Enter</kbd> to move around, type to filter,
+<kbd>Space</kbd> to preview, <kbd>F5</kbd> to copy to the other side, <kbd>Tab</kbd> to switch
+sides, <kbd>Ctrl</kbd>+<kbd>K</kbd> for everything else.
+
+<details>
+<summary>All shortcuts</summary>
 
 | Key (Linux) | Key (macOS) | Action |
 |---|---|---|
@@ -151,17 +206,17 @@ ferge -F ./ssh_config myserver          # use another SSH client configuration
 In the server panel, type to search, use ↑ ↓ and press Enter to connect (Ctrl+Enter: new tab).
 Favorites and folders are edited from their context menu or the + menu.
 
+</details>
+
 ## Preview
 
-Space shows the selected file over the panes; the arrow keys keep moving through the folder.
 ferge shows text and images, spreadsheets (`xlsx`, `xlsm`, `xlsb`, `ods`, `csv`, `tsv`) as a
 grid with a tab per sheet, Word, PowerPoint and OpenDocument files (`docx`, `pptx`, `odt`, `odp`)
-as their text with headings, lists and tables, and PDF pages. All of it is built in and works
-the same for files on servers. On macOS, Quick Look renders office files, including older
-formats and Pages, Numbers and Keynote, as their programs would. Text is read only from its
-start; documents up to 64 MB are read whole. Documents and pictures are read in a separate
-process with a memory and time limit, so a damaged or hostile file cannot take ferge down. Text in the preview can be selected with the mouse
-and copied with Ctrl+C (⌘C); without a selection, Ctrl+C copies the selected files as always.
+as their text with headings, lists and tables, and PDF pages. On macOS, Quick Look renders office
+files, including older formats and Pages, Numbers and Keynote, as their programs would. Text is
+read only from its start; documents up to 64 MB are read whole. Text in the preview can be
+selected with the mouse and copied with Ctrl+C (⌘C); without a selection, Ctrl+C copies the
+selected files as always.
 
 ## Settings
 
@@ -174,14 +229,22 @@ default; a value ferge cannot use is reported and ignored.
 
 ```toml
 [appearance]
-theme = "dark"              # "system" (default), "light" or "dark"
-font = "Inter"              # interface font; default: the desktop's
-font-size = 14              # in pixels, 6 to 32; default: the desktop's
+theme = "dark"               # "system" (default), "light" or "dark"
+font = "Inter"               # interface font; default: the desktop's
+font-size = 14               # in pixels, 6 to 32; default: the desktop's
 mono-font = "JetBrains Mono" # fixed-width text; default: the desktop's
 ```
 
 On Linux, "the desktop's" fonts come from the XDG desktop portal (the GNOME interface settings
 that every portal backend provides), including the text scaling factor.
+
+## Roadmap
+
+ferge 0.1.0 is the first release: browsing, previews, file operations and transfers over SFTP,
+with favorites, history, saved passwords and working as root. FTP and FTPS are done on `main`
+and come with the next release. Next up are S3-compatible storage (AWS, R2, B2, MinIO) and
+WebDAV, then folder sync with a dry run before anything changes. The full plan is in
+[PLAN.md](PLAN.md).
 
 ## Development
 
@@ -195,11 +258,12 @@ cargo build --release && cargo run --release -p ferge-bench
 ./packaging/build.sh             # binary for packages and releases, without this machine's paths
 ```
 
-CI runs formatting, clippy, the tests, the SFTP integration tests against the test server and
-`cargo deny` on every push to `main` and every pull request, and the macOS build on `main`.
+CI runs formatting, clippy, the tests, the SFTP and FTP integration tests against the test
+servers and `cargo deny` on every push to `main` and every pull request, and the macOS build on
+`main`.
 
-The workspace has three crates: `ferge-core` (protocols, listings; no UI), `ferge-app` (GPUI
-application) and `ferge-bench` (performance budget checks).
+The workspace has three crates: `ferge-core` (protocols, transfers, listings; no UI),
+`ferge-app` (the GPUI application) and `ferge-bench` (performance budget checks).
 
 ## License
 

@@ -6,6 +6,17 @@ All notable changes to ferge are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- FTP with TLS: `ftp://` with `AUTH TLS`, `ftps://` with implicit TLS. Listings stream with
+  `MLSD` or `LIST`, uploads and downloads resume, several transfers share a small pool of
+  connections, and times and permissions are kept where the server allows it.
+- Certificates the system does not trust are shown with their names, validity and fingerprint
+  before ferge connects, and can be trusted once or for good; a remembered certificate that
+  changes is refused. A server without encryption is used only after asking.
+- Quick Connect and the favorite editor offer SFTP, FTP and FTPS; an address typed with a
+  scheme picks the protocol itself.
+
 ## [0.1.0] - 2026-11-22
 
 The first release.

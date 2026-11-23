@@ -4,7 +4,8 @@ PLAN.md is the binding source for technology, architecture and performance budge
 
 ## Layout
 
-- `crates/ferge-core` – UI-independent core: remote backends, listings, `transfer` (queue,
+- `crates/ferge-core` – UI-independent core: remote backends (`local`, `sftp`, `ftp`), `tls`
+  (certificate checks and the questions about them), listings, `transfer` (queue,
   pause/resume, conflicts), `library` (SQLite: favorites, folders, history), `secrets`
   (keyring / encrypted file), `settings` (TOML file, edited in place, watched), `desktop`
   (desktop fonts via the XDG portal), `document` (previews: spreadsheets, office text, PDF
@@ -36,10 +37,16 @@ the above plus the SFTP integration tests. Actions in workflows are pinned to co
 ## Test server
 
 ```sh
-./testserver/up.sh               # OpenSSH on 127.0.0.1:2222 and :2223, waits until ready
+./testserver/up.sh               # OpenSSH on 127.0.0.1:2222 and :2223, vsftpd (see below), waits until ready
 ./testserver/down.sh             # stop and remove (fixtures are regenerated on next start)
-cargo test --workspace -- --include-ignored   # includes SFTP and direct-transfer tests
+cargo test --workspace -- --include-ignored   # includes SFTP, FTP and direct-transfer tests
 ```
+
+vsftpd serves the same fixtures: explicit TLS (or none) on 127.0.0.1:2121, implicit TLS on
+:2990, no TLS at all on :2122, passive ports 30000–30019. Its self-signed certificate is new for
+every container and saved to `.testserver/ftp-cert.pem`. `FERGE_TEST_FTP_PORT`,
+`FERGE_TEST_FTPS_PORT`, `FERGE_TEST_FTP_PLAIN_PORT` and `FERGE_TEST_FTP_PASV_MIN`/`_MAX` move
+them.
 
 The second server (`ferge-test2`, port 2223, no fixtures) exists for direct transfers between
 servers; inside the compose network the two reach each other as `sshd:22` and `sshd2:22`.
@@ -71,7 +78,10 @@ every frame, which the harness attributes to the preceding input. Frame budget: 
 `cargo run --release -p ferge-bench -- --between-only` only compares the routes between the two
 test servers (through this computer, direct push and pull, within one server).
 
-Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many`.
+Running the app against the test server: `cargo run -- -F .testserver/ssh_config sftp://ferge-test/home/ferge/many`,
+or over FTP `cargo run -- ftp://ferge@127.0.0.1:2121/home/ferge/many` (password `ferge`).
+Certificates accepted with "Trust and connect" and servers allowed without encryption are
+recorded in `known_certificates` in the data directory.
 
 ## Debugging transfers
 

@@ -5,7 +5,8 @@
 # ferge
 
 **A fast, keyboard-first file transfer client for Linux and macOS.**<br>
-SFTP, FTP and FTPS in a native app that renders on the GPU and never makes you wait.
+SFTP, FTP and FTPS in a native app that never makes you wait, copies straight from server to
+server and works as root through sudo.
 
 [![CI](https://github.com/wirecurl/ferge/actions/workflows/ci.yml/badge.svg)](https://github.com/wirecurl/ferge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/wirecurl/ferge?label=release)](https://github.com/wirecurl/ferge/releases/latest)
@@ -31,6 +32,11 @@ SFTP, FTP and FTPS in a native app that renders on the GPU and never makes you w
 - **Transfers you can trust.** Pause in the middle of a file, quit, come back tomorrow: ferge
   picks up where it stopped. Nothing is overwritten without asking, and half-written files never
   appear under their real name.
+- **Server to server, directly.** Two SSH servers exchange the files themselves instead of
+  everything going down to your computer and up again, and the copy goes on when your laptop
+  sleeps.
+- **Root without a root login.** Open `/etc` and other folders your account cannot read, as root
+  through sudo, with nothing to set up on the server.
 - **Made for the keyboard.** Every action has a key, the command palette finds commands, servers,
   tabs and files, and type-to-filter works in every folder.
 - **At home on your system.** Your `~/.ssh/config`, keys, agent and `known_hosts` just work;
@@ -47,9 +53,31 @@ selection to the other side, or drag and drop, also to and from your desktop's f
 Uploads, downloads and copies between two servers all go through the same queue: up to four
 files in parallel, with progress, speed and time left.
 
-Between two SSH servers, ferge can copy **directly**: the source pushes or the target pulls over
-their own connection, with a key that only works for that job and expires. The copy goes on when
-ferge quits, and every server is left exactly as it was found.
+### Server to server, without the detour
+
+<img src="docs/screenshots/direct.png" alt="ferge asking whether web-01 and web-02 should copy four website folders directly, without going through this computer.">
+
+Moving sites to a new server usually means downloading everything and uploading it again, through
+your own internet connection. ferge lets two SSH servers exchange the files themselves instead:
+one of them pushes or the other pulls, whichever can reach the other, at the speed of their
+network. The copy goes on when your laptop sleeps or ferge quits, and ferge follows it again when
+it starts.
+
+Nothing is left behind. For the job, ferge adds a key that can do nothing but this one job and
+expires, removes it when the copy is done and checks that both servers are exactly as it found
+them. Where the servers cannot reach each other, the copy simply goes through this computer.
+
+### Root without a root login
+
+<img src="docs/screenshots/root.png" alt="On the left, /etc/nginx on web-01 is closed to the user sam and offers 'Open as root'; on the right, the same server as root in /etc/nginx/ssl, with a private key that only root may read in the inspector.">
+
+Your account cannot open `/etc/nginx`, and like most servers, this one refuses root logins.
+On any SSH server where your account may use sudo, **Open as root** switches the pane to root in
+the same folder. Nothing to set up on the server: ferge runs `sftp-server` through `sudo` on the
+connection it already has and only asks for a password if sudo needs one. Upload, rename, delete
+and change permissions as root, without copying to `/tmp` first and moving things into place over
+SSH. The tinted header reminds you while it lasts, and the inspector (<kbd>Ctrl</kbd>+<kbd>I</kbd>)
+shows the details of the selection and lets you change permissions.
 
 ### Your servers, one keystroke away
 
@@ -67,16 +95,6 @@ arrow keys. ferge shows text, images, spreadsheets (`xlsx`, `ods`, `csv`, …), 
 and OpenDocument files and PDF pages, all built in and all the same for files on a server.
 Documents are read in a separate, memory-limited process, so a damaged or hostile file cannot
 take ferge down.
-
-### Root without a root login
-
-<img src="docs/screenshots/root.png" alt="A pane working as root on /etc/nginx, its header tinted, next to the inspector with editable permissions.">
-
-On any SSH server where your account may use sudo, one click switches a pane to root in the same
-folder. Nothing to set up on the server: ferge runs `sftp-server` through `sudo` on the existing
-connection and only asks for a password if sudo needs one. The tinted header reminds you while it
-lasts. The inspector (<kbd>Ctrl</kbd>+<kbd>I</kbd>) shows the details of the selection and lets
-you change permissions.
 
 ### Everything from the keyboard
 

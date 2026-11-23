@@ -33,16 +33,20 @@
       <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/hero-light.png</image>
     </screenshot>
     <screenshot>
+      <caption>Two servers about to copy files directly, without going through this computer</caption>
+      <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/direct.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A folder the account cannot open, and the same server as root through sudo</caption>
+      <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/root.png</image>
+    </screenshot>
+    <screenshot>
       <caption>Favorites, hosts from the SSH configuration and recent connections</caption>
       <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/servers.png</image>
     </screenshot>
     <screenshot>
       <caption>A spreadsheet in the preview</caption>
       <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/preview.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>Working as root on a server, with the inspector</caption>
-      <image>https://raw.githubusercontent.com/wirecurl/ferge/main/docs/screenshots/root.png</image>
     </screenshot>
   </screenshots>
 

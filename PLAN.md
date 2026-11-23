@@ -132,7 +132,55 @@ Fertig, wenn: Ein Ordner wandert zwischen den beiden Test-Containern direkt, mit
 
 ### Phase 4 – Weitere Protokolle
 
-FTP/FTPS, S3-kompatibel (AWS, R2, B2, MinIO), WebDAV. Integrationstests gegen vsftpd und MinIO in Docker.
+FTP/FTPS, S3-kompatibel (AWS, R2, B2, MinIO), WebDAV. Integrationstests gegen vsftpd, MinIO und einen WebDAV-Server in Docker.
+
+Reihenfolge: erst die Grundlagen, die alle drei brauchen, dann FTP/FTPS, S3 und WebDAV, jedes mit Testserver, Integrationstests und Oberfläche, bevor das nächste anfängt.
+
+**Grundlagen**
+
+- **Adressen:** `Destination` bekommt je Protokoll eine Variante, mit Adressen, die `parse` wieder liest:
+  - `ftp://[user@]host[:port][/pfad]` (explizites TLS, Port 21) und `ftps://…` (implizites TLS, Port 990);
+  - `s3://[access-key@]endpunkt[:port]/[bucket[/pfad]]`, `s3+http://…` nur für lokale Server wie MinIO;
+  - `davs://[user@]host[:port][/pfad]` (HTTPS) und `dav://…` (HTTP), wie bei GNOME und KDE.
+
+  Favoriten, Verlauf, Quick Connect und das Adressfeld nehmen alle Formen an. Die bestehende Tabelle `bookmarks` speichert sie schon als Adresse; Zusatzfelder wie Region oder „unverschlüsselt erlaubt“ kommen in eine Migration.
+- **Fähigkeiten statt Annahmen:** `Remote::capabilities()` sagt, was ein Backend kann: an einem Offset weiterschreiben, atomar schreiben (das Objekt erscheint erst, wenn es vollständig ist), billig umbenennen, Zeitstempel setzen, Rechte setzen, Symlinks. Die Transfer-Engine richtet sich danach. Wo atomar geschrieben wird (S3), entfällt die `.ferge-part`-Datei: ferge schreibt direkt unter den Zielnamen, ohne Überschreiben mit `If-None-Match: *`, wo der Server es kennt, sonst nach der Prüfung beim Planen. Wo nicht weitergeschrieben werden kann (S3-Upload, WebDAV), beginnt ein fortgesetzter Upload die Datei von vorn; Downloads setzen überall per Range bzw. `REST` fort. Der Inspector bietet Rechte nur an, wo sie gesetzt werden können.
+- **Wiederverbinden:** `Remote::destination()` beschreibt, wie man diese Verbindung wieder herstellt. Gespeicherte Transfers und „Connection lost“ nutzen das, ebenso ein gemeinsamer Verbindungsaufbau (`connect::connect`) für Tabs und Transfers, statt SFTP-Endpunkte vorauszusetzen. Direkte Transfers und „als root arbeiten“ bleiben bei SFTP.
+- **Zugangsdaten:** `SecretId` unterscheidet nach Protokoll (FTP-Passwort, S3-Secret-Key zum Access Key und Endpunkt, WebDAV-Passwort). Die bestehenden SFTP-Einträge behalten ihren Namen. Gefragt wird wie bei SFTP über `Interaction::password`, mit dem Protokoll im `Account`.
+- **TLS:** rustls mit den Wurzelzertifikaten des Systems, eine Konfiguration für FTPS, S3 und WebDAV. Ein Zertifikat, dem das System nicht traut (selbst signiert, abgelaufen, falscher Name), führt zu einer Rückfrage wie bei unbekannten Host-Keys: Aussteller, Gültigkeit, Namen und SHA-256-Fingerabdruck, „einmal“ oder „merken“. Gemerkte Zertifikate liegen pro Host und Port in der Library; ändert sich ein gemerktes Zertifikat, wird abgelehnt und gesagt, warum. Unverschlüsseltes FTP und `dav://` gehen nur nach ausdrücklicher Zustimmung pro Server, weil Passwort und Daten dann im Klartext laufen.
+
+Stand: Fähigkeiten, `Remote::destination()` und der gemeinsame Verbindungsaufbau sind da. Zugangsdaten nach Protokoll und TLS kommen mit FTP/FTPS, weil sie erst dort gebraucht und gegen einen echten Server geprüft werden.
+
+**FTP/FTPS** (`suppaftp` mit tokio und rustls)
+
+- Listing über `MLSD`, sonst `LIST` mit dem Unix- und dem DOS-Format, Zeitstempel über `MLSD` oder `MDTM`. Das Listing wird beim Lesen in Stücken an die UI gereicht.
+- Ein Steuerkanal für den Browser, eigene Verbindungen für Transfers (FTP kann pro Verbindung nur eine Datei übertragen); Passiv-Modus (`EPSV`, sonst `PASV`), TLS-Session-Wiederverwendung auf dem Datenkanal, weil vsftpd und andere sie verlangen.
+- Fortsetzen mit `REST` + `STOR` bzw. `RETR`, Umbenennen mit `RNFR`/`RNTO` (ohne Überschreiben vorher geprüft), Zeitstempel mit `MFMT`, wo angeboten, Rechte mit `SITE CHMOD`, Keepalive mit `NOOP`.
+- Testserver: vsftpd mit explizitem und implizitem TLS und einem selbst signierten Zertifikat, Passivports fest gemappt, dieselben Fixtures `many/` und `tree/` wie beim SSH-Server.
+
+**S3** (`opendal`, Dienst `s3`)
+
+- Endpunkte für AWS, R2, B2 und MinIO; Region aus der Adresse oder vom Server ermittelt. Pfad-Stil, für AWS virtuelle Hosts.
+- `/` zeigt die Buckets (`ListBuckets`, falls der Schlüssel das darf; sonst muss der Bucket in der Adresse stehen), darunter Präfixe als Ordner. Listings kommen seitenweise (1000 Einträge) und damit gestreamt.
+- Ordner anlegen legt ein leeres `prefix/`-Objekt an, Löschen eines Ordners entfernt es. Umbenennen ist serverseitiges Kopieren und Löschen; Ordner umbenennen geht nur als Transfer mit Fortschritt, nicht als stilles „Rename“.
+- Große Dateien als Multipart-Upload mit mehreren Teilen gleichzeitig. Pause bricht den Multipart-Upload ab (`AbortMultipartUpload`), damit keine unsichtbaren Teile Speicher kosten.
+- Änderungszeit: Listings zeigen `LastModified` (die Upload-Zeit). Beim Hochladen schreibt ferge die Änderungszeit der Quelle als `x-amz-meta-mtime` (wie rclone); der Inspector zeigt sie.
+- Testserver: MinIO mit einem Bucket, der `many/` und `tree/` enthält, und einem zweiten, leeren.
+
+**WebDAV** (`opendal`, Dienst `webdav`)
+
+- `PROPFIND` mit `Depth: 1`, Umbenennen mit `MOVE` (`Overwrite: F` bzw. `T`), Ordner mit `MKCOL`. Zeitstempel nur, wo der Server sie annimmt (Nextcloud und ownCloud über `X-OC-Mtime`).
+- Ob `opendal` große `PROPFIND`-Antworten in Stücken liefert, ist zu prüfen. Wenn nicht, liest ferge sie selbst mit `quick-xml` als Strom, damit die ersten Zeilen erscheinen, bevor die Antwort vollständig ist.
+- Testserver: Apache mit `mod_dav` über HTTP und HTTPS (selbst signiert), mit Basic- und Digest-Anmeldung.
+
+**Oberfläche**
+
+- Quick Connect und der Favoriten-Dialog bekommen eine Protokollwahl (`style::segmented`: SFTP, FTP, S3, WebDAV); die Felder folgen dem Protokoll (bei S3 Endpunkt, Access Key, Secret Key, Bucket, Region). Eine eingetippte Adresse wählt das Protokoll selbst.
+- Listen und Tabs zeigen das Protokoll mit einem Symbol; der Verbindungsfehler sagt, was auf welcher Ebene scheiterte (DNS, TCP, TLS, Anmeldung, Rechte).
+
+**Tests und Messung:** Jedes Backend läuft durch dieselbe Testsammlung für `Remote` (Listing, Lesen ab Offset, Schreiben, Konflikte, Umbenennen, Löschen, böse Namen) und durch die Transfertests gegen die Container; sie sind `#[ignore]`d wie die SFTP-Tests und laufen in CI. `ferge-bench` misst für jedes Protokoll die ersten Zeilen und das ganze Listing von `many/` sowie den Durchsatz (256 MiB hoch und runter, verglichen mit `curl` bzw. `lftp`).
+
+Fertig, wenn: ferge mit allen vier Protokollen gegen die Testcontainer verbindet, `many/` überall flüssig zeigt, Dateien und Ordner zwischen beliebigen zwei Seiten kopiert (auch FTP nach S3), Transfers nach einer verlorenen Verbindung und nach einem Neustart weiterlaufen, und unbekannte Zertifikate genauso sorgfältig behandelt werden wie unbekannte Host-Keys.
 
 ### Phase 5 – Sync
 

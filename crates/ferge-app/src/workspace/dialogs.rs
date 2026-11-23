@@ -38,11 +38,15 @@ const DIALOG_CONTEXT: &str = "FergeDialog";
 /// Shortest master password accepted for a new password file.
 const MIN_MASTER_PASSWORD_LEN: usize = 8;
 
-gpui::actions!(ferge_dialog, [CancelPrompt, CancelDialog, ConfirmDialog]);
+gpui::actions!(
+    ferge_dialog,
+    [CancelPrompt, ConfirmPrompt, CancelDialog, ConfirmDialog]
+);
 
 pub(super) fn bind_keys(cx: &mut gpui::App) {
     cx.bind_keys([
         gpui::KeyBinding::new("escape", CancelPrompt, Some(PROMPT_CONTEXT)),
+        gpui::KeyBinding::new("enter", ConfirmPrompt, Some(PROMPT_CONTEXT)),
         gpui::KeyBinding::new("escape", CancelDialog, Some(DIALOG_CONTEXT)),
         gpui::KeyBinding::new("enter", ConfirmDialog, Some(DIALOG_CONTEXT)),
     ]);
@@ -416,6 +420,20 @@ impl Workspace {
             Some(ActivePrompt::Conflict { .. }) => self.answer_conflict(None, window, cx),
             Some(ActivePrompt::Direct { .. }) => self.answer_direct(false, window, cx),
             None => {}
+        }
+    }
+
+    /// Enter answers the question about copying directly as its primary
+    /// button does. A focused button or checkbox keeps Enter for itself, and
+    /// the other questions are answered with their buttons or in their
+    /// fields: trusting a server is never a key press away.
+    fn confirm_prompt(&mut self, _: &ConfirmPrompt, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.prompt, Some(ActivePrompt::Direct { .. }))
+            && self.prompt_focus.is_focused(window)
+        {
+            self.answer_direct(true, window, cx);
+        } else {
+            cx.propagate();
         }
     }
 
@@ -811,6 +829,7 @@ impl Workspace {
         Some(
             Self::overlay(PROMPT_CONTEXT)
                 .on_action(cx.listener(Self::cancel_prompt))
+                .on_action(cx.listener(Self::confirm_prompt))
                 .child(card),
         )
     }

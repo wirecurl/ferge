@@ -26,6 +26,8 @@ All notable changes to ferge are listed here. The format follows
   without a window.
 - A certificate the system does not trust no longer shows up as an error in the log; ferge
   notes it and asks.
+- Enter answers the question about copying directly between two servers with "Copy directly",
+  the button it highlights.
 
 ## [0.1.0] - 2026-11-22
 
